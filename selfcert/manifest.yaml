@@ -1,0 +1,10 @@
+manifestVersion: 1
+name: '@evrardjp/selfcert'
+version: 2026.05.21.1
+description: Self-signed TLS certificate generator — creates RSA-4096 certs locally using node:crypto and stores cert + key in a swamp vault.
+repository: 'https://github.com/evrardjp/swamp-extensions'
+models:
+  - selfcert.ts
+additionalFiles:
+  - README.md
+  - LICENSE.txt
