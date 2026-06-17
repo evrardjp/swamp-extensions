@@ -1,0 +1,30 @@
+manifestVersion: 1
+name: "@evrardjp/pi-session-telemetry"
+version: "2026.06.17.1"
+description: >-
+  Privacy-safe Pi coding-agent session telemetry ingestion and reporting for
+  Swamp. Captures useful metadata, usage, tool, message, and session signals
+  while keeping prompt content, tool payloads, and local paths opt-in.
+repository: "https://github.com/evrardjp/swamp-extensions"
+paths:
+  base: manifest
+models:
+  - models/pi_session_telemetry.ts
+reports:
+  - reports/pi_session_report.ts
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+labels:
+  - pi
+  - telemetry
+  - agent
+  - reporting
+  - privacy
+  - usage
+  - observability
+dependencies: []

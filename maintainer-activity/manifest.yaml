@@ -1,0 +1,33 @@
+manifestVersion: 1
+name: "@evrardjp/maintainer-activity"
+version: "2026.06.17.1"
+description: >-
+  Durable maintainer activity ledger and briefing reports for GitHub PR/issue
+  lifecycle events, CI attention, classifications, and distilled Pi agent-session
+  findings.
+repository: "https://github.com/evrardjp/swamp-extensions"
+paths:
+  base: manifest
+models:
+  - models/maintainer_activity.ts
+reports:
+  - reports/maintainer_briefing.ts
+skills:
+  - maintainer-daily-briefing
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+labels:
+  - maintainer
+  - briefing
+  - github
+  - pi
+  - agent
+  - lifecycle
+  - ci
+  - reporting
+dependencies: []

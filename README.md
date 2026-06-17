@@ -1,0 +1,81 @@
+# swamp-extensions
+
+Personal Swamp extensions maintained by evrardjp.
+
+## Layout
+
+This repository uses one publishable extension per subdirectory. Each extension
+has its own `manifest.yaml` and uses `paths.base: manifest`, so files resolve
+relative to that extension directory.
+
+```text
+swamp-extensions/
+  pi-session-telemetry/
+    manifest.yaml
+    README.md
+    LICENSE.txt
+    models/
+    reports/
+  maintainer-activity/
+    manifest.yaml
+    README.md
+    LICENSE.txt
+    models/
+    reports/
+```
+
+This is preferable to one giant manifest because each extension can be versioned,
+quality-checked, reviewed, and published independently.
+
+## Extensions
+
+### `@evrardjp/pi-session-telemetry`
+
+High-volume Pi agent telemetry sink. Stores normalized Pi events, message/tool
+metadata, token/cost usage, and session summaries. Prompt text, tool payloads,
+and local paths are opt-in.
+
+Use it for observability and reporting over real Pi usage.
+
+### `@evrardjp/maintainer-activity`
+
+Low-volume maintainer ledger. Stores curated PR/issue lifecycle events,
+classifications, CI attention records, and distilled Pi agent-session findings.
+
+Use it for daily maintainer briefings and PR/issue drill-downs.
+
+## Relationship between the two
+
+```text
+Pi usage
+  -> @evrardjp/pi-session-telemetry
+  -> raw/metadata event stream and usage report
+
+Maintainer-relevant conclusion from a Pi session
+  -> @evrardjp/maintainer-activity record_pi_session_finding
+  -> daily briefing / PR drill-down
+```
+
+Do not mirror every Pi event into maintainer activity. Bridge only durable,
+actionable conclusions.
+
+## Local development from another Swamp repo
+
+From a Swamp repository, add all extension subdirectories as sources:
+
+```bash
+swamp extension source add "/var/home/evrardjp/git/evrardjp/swamp-extensions/*"
+swamp extension source list --json
+```
+
+Run checks against a Swamp repo with:
+
+```bash
+swamp extension fmt /var/home/evrardjp/git/evrardjp/swamp-extensions/pi-session-telemetry/manifest.yaml \
+  --check --repo-dir /path/to/swamp-repo
+
+TMPDIR=/tmp swamp extension push /var/home/evrardjp/git/evrardjp/swamp-extensions/pi-session-telemetry/manifest.yaml \
+  --dry-run --json --repo-dir /path/to/swamp-repo
+```
+
+Never publish without explicit maintainer approval.
