@@ -19,6 +19,19 @@ GitHub PR feed models             Pi session telemetry / agent conclusions
                     -> @evrardjp/maintainer-briefing report
 ```
 
+`maintainer-activity` and `maintainer-briefing` are different Swamp concepts:
+
+- `@evrardjp/maintainer-activity` is the **model type**. A model instance such as
+  `maintainer-activity` owns the durable ledger and exposes methods that ingest
+  or record maintainer facts.
+- `@evrardjp/maintainer-briefing` is a **report** attached to that model. It does
+  not fetch GitHub itself; it reads the model's stored Swamp data and renders a
+  markdown/JSON view.
+
+In short: **model = data + methods**, **report = view over that data**. Refresh
+feed models and ingest into `maintainer-activity` before reading the report when
+you need a current daily briefing.
+
 The model intentionally stores curated records, not every raw event. Use it for
 answers to questions like:
 
@@ -164,15 +177,28 @@ swamp model method run maintainer-activity record_ci_attention \
 
 ## Report
 
-Run the daily briefing:
+The daily briefing is a report over the `maintainer-activity` model data. For a
+current briefing, refresh the relevant GitHub PR feed first, then ingest it, then
+read the report:
 
 ```bash
+# Example for external-secrets/external-secrets
+swamp model method run gh-pr-feed-eso-eso refresh
+swamp model method run maintainer-activity ingest_github_pr_feed \
+  --input feedModelId=0e829358-6f1c-4172-8a09-2ec9f8923a39 \
+  --input repo=external-secrets/external-secrets \
+  --input limit=5000 \
+  --input includeBots=true
 swamp report get @evrardjp/maintainer-briefing \
   --model maintainer-activity \
   --markdown
 ```
 
-The report surfaces:
+Use `swamp report get ... --json` when an agent needs to filter or drill down
+programmatically. Only use the stored report without refreshing when you
+explicitly want cached data.
+
+The report currently surfaces:
 
 - urgent/noteworthy work items
 - security-relevant items
@@ -181,6 +207,26 @@ The report surfaces:
 - inactive items
 - recent lifecycle/agent events
 - recent session logs
+
+It is a maintainer briefing view, not a full PR review queue yet. Planned useful
+additions include sections for "needs my code fixes", "ready for maintainer
+review", "quick wins", "needs maintainer decision", and "author action needed".
+
+## Bundled maintainer skill
+
+The Pi/agent-facing maintainer workflow lives in:
+
+```text
+maintainer-daily-briefing/SKILL.md
+```
+
+It tells agents how to fetch `@evrardjp/maintainer-briefing`, drill into a
+PR/issue, and record durable conclusions through `record_pi_session_finding`.
+It is included as an extension additional file for now. Registering it as a
+first-class Swamp `skills:` manifest entry currently requires a Swamp repo with a
+supported enrolled skill tool; this repo is primarily using Pi, so keeping the
+skill file alongside the extension avoids breaking extension validation while
+still keeping the procedure versioned with the model/report it operates.
 
 ## Development checks
 

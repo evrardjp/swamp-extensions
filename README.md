@@ -22,6 +22,11 @@ swamp-extensions/
     LICENSE.txt
     models/
     reports/
+  libvirt-vm-pool/
+    manifest.yaml
+    README.md
+    LICENSE.txt
+    models/
 ```
 
 This is preferable to one giant manifest because each extension can be versioned,
@@ -43,6 +48,15 @@ Low-volume maintainer ledger. Stores curated PR/issue lifecycle events,
 classifications, CI attention records, and distilled Pi agent-session findings.
 
 Use it for daily maintainer briefings and PR/issue drill-downs.
+
+### `@evrardjp/libvirt-vm-pool`
+
+Desired-state local libvirt VM pool reconciler. It owns VM substrate lifecycle
+(domain/disk/seed/power state) and writes per-VM connection facts as Swamp data
+for downstream SSH/config/app models.
+
+Use it as the first phase of homelab workflows before applying base config and
+app-specific guarantees.
 
 ## Relationship between the two
 

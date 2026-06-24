@@ -12,8 +12,6 @@ models:
   - models/maintainer_activity.ts
 reports:
   - reports/maintainer_briefing.ts
-skills:
-  - maintainer-daily-briefing
 workflows: []
 vaults: []
 drivers: []
@@ -21,6 +19,7 @@ datastores: []
 additionalFiles:
   - README.md
   - LICENSE.txt
+  - maintainer-daily-briefing/SKILL.md
 labels:
   - maintainer
   - briefing
