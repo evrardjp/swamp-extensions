@@ -71,6 +71,7 @@ type Classification = {
   recommendedAction?: string;
   state?: string;
   merged?: boolean;
+  mergeable?: string;
   author?: string;
   isOwnPr?: boolean;
   isDraft?: boolean;
@@ -101,6 +102,7 @@ type CiAttention = {
   conclusion?: string;
   url?: string;
   logUrl?: string;
+  errorExcerpt?: string;
   reason: string;
   requiresMaintainerAttention: boolean;
   observedAt: string;
@@ -152,6 +154,29 @@ function key(repo: string, itemType: string, number?: number): string {
 
 function esc(value: unknown): string {
   return String(value ?? "").replaceAll("|", "\\|").replaceAll("\n", " ");
+}
+
+function ciJobUrl(ci: CiAttention): string {
+  return String(ci.logUrl ?? ci.url ?? "");
+}
+
+function ciPrUrl(ci: CiAttention): string {
+  if (ci.prNumber) return `https://github.com/${ci.repo}/pull/${ci.prNumber}`;
+  return ci.url ?? "";
+}
+
+function renderCiAttentionSections(items: CiAttention[]): string[] {
+  if (items.length === 0) return ["_None._"];
+  return items.flatMap((ci) => [
+    `### ${ciPrUrl(ci)} @ ${ci.observedAt}`,
+    "",
+    `Workflow name: ${esc(ci.workflow)}`,
+    "",
+    `Failing job: ${ciJobUrl(ci)}`,
+    "",
+    `Error message: ${esc(ci.errorExcerpt ?? ci.reason)}`,
+    "",
+  ]);
 }
 
 function renderTable(headers: string[], rows: string[][]): string[] {
@@ -327,34 +352,42 @@ export const report = {
       b.priorityScore - a.priorityScore || a.key.localeCompare(b.key)
     );
 
-    const urgent = summaries.filter((item) => item.reasons.length > 0).slice(
-      0,
-      20,
-    );
+    const noteworthy = summaries.filter((item) => item.reasons.length > 0)
+      .slice(0, 20);
     const security = summaries.filter((item) =>
       item.latestClassification?.securityRelevant
     ).slice(0, 20);
-    const blocked = summaries.filter((item) => {
-      const status = item.latestClassification?.blockerStatus;
-      return status && !["not_blocked", "unknown"].includes(status);
-    }).slice(0, 20);
     const inactive = summaries.filter((item) =>
       item.latestClassification?.inactive
+    );
+    const inactiveActiveInTwoDays = inactive.filter((item) =>
+      (item.latestClassification?.inactiveDays ?? 0) < 2
+    ).slice(0, 20);
+    const inactiveActiveThisWeek = inactive.filter((item) => {
+      const days = item.latestClassification?.inactiveDays ?? 0;
+      return days >= 2 && days < 7;
+    }).slice(0, 20);
+    const inactiveActiveLastWeek = inactive.filter((item) => {
+      const days = item.latestClassification?.inactiveDays ?? 0;
+      return days >= 7 && days < 14;
+    }).slice(0, 20);
+    const inactiveActiveLastMonth = inactive.filter((item) => {
+      const days = item.latestClassification?.inactiveDays ?? 0;
+      return days >= 14 && days < 30;
+    }).slice(0, 20);
+    const inactiveStale = inactive.filter((item) =>
+      (item.latestClassification?.inactiveDays ?? 0) >= 30
     ).slice(0, 20);
     const needsMyCodeFixes = summaries.filter((item) =>
       item.latestClassification?.needsMyCodeFix
     ).slice(0, 20);
-    const readyForMaintainerReview = summaries.filter((item) =>
-      item.latestClassification?.readyForMaintainerReview
+    const needsMyLongerReview = summaries.filter((item) =>
+      item.latestClassification?.readyForMaintainerReview &&
+      !item.latestClassification?.quickWin
     ).slice(0, 20);
     const quickWins = summaries.filter((item) =>
-      item.latestClassification?.quickWin
-    ).slice(0, 20);
-    const needsMaintainerDecision = summaries.filter((item) =>
-      item.latestClassification?.needsMaintainerDecision
-    ).slice(0, 20);
-    const recommendAuthorAction = summaries.filter((item) =>
-      item.latestClassification?.recommendAuthorAction
+      item.latestClassification?.quickWin &&
+      item.latestClassification?.readyForMaintainerReview
     ).slice(0, 20);
 
     const itemRows = (items: ItemSummary[]) =>
@@ -364,12 +397,53 @@ export const report = {
         esc(item.title ?? item.latestClassification?.title ?? ""),
         String(item.priorityScore),
         esc(item.reasons.join(", ")),
-        esc(item.latestClassification?.recommendedAction ?? ""),
       ]);
-    const reviewRows = (items: ItemSummary[]) =>
+    const inactiveRecommendedAction = (item: ItemSummary): string => {
+      const c = item.latestClassification;
+      if (c?.checksState === "failure") return "Request the user to fix CI";
+      if (c?.reviewState === "changes_requested") {
+        return "Needs code change by author";
+      }
+      if (
+        c?.checksState === "success" && c?.reviewState !== "changes_requested"
+      ) {
+        return "Needs another review";
+      }
+      return c?.recommendedAction ?? "";
+    };
+    const inactiveOverallState = (item: ItemSummary): string => {
+      const c = item.latestClassification;
+      const state: string[] = [];
+      if (c?.reviewState === "changes_requested") {
+        state.push("has requested changes");
+      }
+      if (c?.checksState === "failure") state.push("CI is red");
+      if (
+        ["CONFLICTING", "conflicting", "dirty"].includes(c?.mergeable ?? "")
+      ) {
+        state.push("has merge conflicts");
+      }
+      if (state.length === 0) state.push("no requested changes / CI not red");
+      return state.join(", ");
+    };
+    const inactiveRows = (items: ItemSummary[]) =>
+      items.map((item) => [
+        esc(item.repo),
+        esc(`${item.itemType}${item.number ? ` #${item.number}` : ""}`),
+        esc(item.title ?? item.latestClassification?.title ?? ""),
+        esc(`${item.latestClassification?.inactiveDays ?? 0}d`),
+        esc(inactiveOverallState(item)),
+        esc(inactiveRecommendedAction(item)),
+      ]);
+    const reviewRows = (
+      items: ItemSummary[],
+      options: { includeRecommendedAction?: boolean } = {
+        includeRecommendedAction: true,
+      },
+    ) =>
       items.map((item) => {
         const c = item.latestClassification;
-        return [
+        const row = [
           esc(item.repo),
           esc(`${item.itemType}${item.number ? ` #${item.number}` : ""}`),
           esc(item.title ?? c?.title ?? ""),
@@ -380,8 +454,11 @@ export const report = {
           esc(c?.reviewedByMeSinceLastCodeChange ?? ""),
           esc(c?.changedFiles ?? ""),
           esc(((c?.additions ?? 0) + (c?.deletions ?? 0)) || ""),
-          esc(c?.recommendedAction ?? ""),
         ];
+        if (options.includeRecommendedAction) {
+          row.push(esc(c?.recommendedAction ?? ""));
+        }
+        return row;
       });
 
     const modelName = context.definition?.name ?? context.modelId ??
@@ -406,20 +483,14 @@ export const report = {
         "Recommended action",
       ], reviewRows(needsMyCodeFixes)),
       "",
-      "## Ready for maintainer review",
+      "## Security relevant",
       ...renderTable([
         "Repo",
         "Item",
         "Title",
-        "State",
-        "Author",
-        "CI",
-        "Last code change",
-        "Reviewed by me since code change",
-        "Files",
-        "Lines",
-        "Recommended action",
-      ], reviewRows(readyForMaintainerReview)),
+        "Score",
+        "Reasons",
+      ], itemRows(security)),
       "",
       "## Quick review wins",
       ...renderTable([
@@ -436,7 +507,7 @@ export const report = {
         "Recommended action",
       ], reviewRows(quickWins)),
       "",
-      "## Needs maintainer decision",
+      "## Needs my (longer) review",
       ...renderTable([
         "Repo",
         "Item",
@@ -448,76 +519,69 @@ export const report = {
         "Reviewed by me since code change",
         "Files",
         "Lines",
-        "Recommended action",
-      ], reviewRows(needsMaintainerDecision)),
+      ], reviewRows(needsMyLongerReview, { includeRecommendedAction: false })),
       "",
-      "## Recommend changes/bumps to other authors",
+      "## Active in the two days",
       ...renderTable([
         "Repo",
         "Item",
         "Title",
-        "State",
-        "Author",
-        "CI",
-        "Last code change",
-        "Reviewed by me since code change",
-        "Files",
-        "Lines",
+        "Inactive",
+        "Overall state",
         "Recommended action",
-      ], reviewRows(recommendAuthorAction)),
+      ], inactiveRows(inactiveActiveInTwoDays)),
       "",
-      "## Urgent / Noteworthy",
+      "## Active this week",
+      ...renderTable([
+        "Repo",
+        "Item",
+        "Title",
+        "Inactive",
+        "Overall state",
+        "Recommended action",
+      ], inactiveRows(inactiveActiveThisWeek)),
+      "",
+      "## Active last week",
+      ...renderTable([
+        "Repo",
+        "Item",
+        "Title",
+        "Inactive",
+        "Overall state",
+        "Recommended action",
+      ], inactiveRows(inactiveActiveLastWeek)),
+      "",
+      "## Active last month",
+      ...renderTable([
+        "Repo",
+        "Item",
+        "Title",
+        "Inactive",
+        "Overall state",
+        "Recommended action",
+      ], inactiveRows(inactiveActiveLastMonth)),
+      "",
+      "## Stale",
+      ...renderTable([
+        "Repo",
+        "Item",
+        "Title",
+        "Inactive",
+        "Overall state",
+        "Recommended action",
+      ], inactiveRows(inactiveStale)),
+      "",
+      "## Noteworthy",
       ...renderTable([
         "Repo",
         "Item",
         "Title",
         "Score",
         "Reasons",
-        "Recommended action",
-      ], itemRows(urgent)),
-      "",
-      "## Security-Relevant",
-      ...renderTable([
-        "Repo",
-        "Item",
-        "Title",
-        "Score",
-        "Reasons",
-        "Recommended action",
-      ], itemRows(security)),
-      "",
-      "## Blocked / Needs Input",
-      ...renderTable([
-        "Repo",
-        "Item",
-        "Title",
-        "Score",
-        "Reasons",
-        "Recommended action",
-      ], itemRows(blocked)),
+      ], itemRows(noteworthy)),
       "",
       "## CI Attention",
-      ...renderTable(
-        ["Observed", "Repo", "PR", "Workflow", "Conclusion", "Reason"],
-        visibleCiAttention.slice(0, 20).map((ci) => [
-          esc(ci.observedAt),
-          esc(ci.repo),
-          esc(ci.prNumber ?? ""),
-          esc(ci.workflow),
-          esc(ci.conclusion ?? ci.status ?? ""),
-          esc(ci.reason),
-        ]),
-      ),
-      "",
-      "## Inactive",
-      ...renderTable([
-        "Repo",
-        "Item",
-        "Title",
-        "Score",
-        "Reasons",
-        "Recommended action",
-      ], itemRows(inactive)),
+      ...renderCiAttentionSections(visibleCiAttention.slice(0, 20)),
       "",
       "## Recent Lifecycle / Agent Events",
       ...renderTable(
@@ -559,15 +623,17 @@ export const report = {
           ciAttention: visibleCiAttention.length,
           sessionLogs: visibleSessionLogs.length,
         },
-        urgent,
+        noteworthy,
         security,
-        blocked,
         inactive,
+        inactiveActiveInTwoDays,
+        inactiveActiveThisWeek,
+        inactiveActiveLastWeek,
+        inactiveActiveLastMonth,
+        inactiveStale,
         needsMyCodeFixes,
-        readyForMaintainerReview,
+        needsMyLongerReview,
         quickWins,
-        needsMaintainerDecision,
-        recommendAuthorAction,
         ciAttention: visibleCiAttention,
         recentEvents: visibleEvents.slice(0, 30),
         recentSessionLogs: visibleSessionLogs.slice(0, 20),

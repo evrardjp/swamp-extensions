@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@evrardjp/maintainer-activity"
-version: "2026.06.17.1"
+version: "2026.06.25.1"
 description: >-
   Durable maintainer activity ledger and briefing reports for GitHub PR/issue
   lifecycle events, CI attention, classifications, and distilled Pi agent-session

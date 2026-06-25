@@ -85,6 +85,7 @@ const ClassificationSchema = z.object({
   isOwnPr: z.boolean().default(false),
   state: z.string().default("OPEN"),
   merged: z.boolean().default(false),
+  mergeable: z.string().optional(),
   isDraft: z.boolean().default(false),
   labels: z.array(z.string()).default([]),
   checksState: z.string().optional(),
@@ -113,6 +114,7 @@ const CiAttentionSchema = z.object({
   conclusion: z.string().optional(),
   url: z.string().url().optional(),
   logUrl: z.string().url().optional(),
+  errorExcerpt: z.string().optional(),
   reason: z.string().min(1),
   requiresMaintainerAttention: z.boolean().default(true),
   observedAt: z.iso.datetime().default(() => new Date().toISOString()),
@@ -177,6 +179,9 @@ type GithubPrFeedEvent = {
   detectedAt: string;
   checkName?: string;
   checkConclusion?: string;
+  checkUrl?: string;
+  checkDetailsUrl?: string;
+  checkExcerpt?: string;
 };
 
 type GithubPrSnapshot = {
@@ -251,11 +256,90 @@ function safeName(
     .slice(0, 180);
 }
 
+function checkRunId(eventId: string): string | undefined {
+  return eventId.match(/-check-(\d+)$/)?.[1];
+}
+
+function checkRunUrl(repo: string, eventId: string): string | undefined {
+  const id = checkRunId(eventId);
+  return id ? `https://github.com/${repo}/runs/${id}` : undefined;
+}
+
+async function runGh(
+  args: string[],
+): Promise<{ stdout: string; success: boolean }> {
+  const output = await new Deno.Command("gh", {
+    args,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  return {
+    stdout: new TextDecoder().decode(output.stdout),
+    success: output.success,
+  };
+}
+
+function truncate(s: string, maxLen: number): string {
+  return s.length > maxLen ? `${s.slice(0, maxLen)}…` : s;
+}
+
+function errorWarningExcerpt(...chunks: Array<unknown>): string {
+  const lines = chunks
+    .flatMap((chunk) => String(chunk ?? "").split(/\r?\n/))
+    .map((line) => line.trim())
+    .filter((line) =>
+      /\b(error|warning|fail(?:ed|ure)?|panic|exception|critical)\b/i.test(line)
+    );
+  return truncate([...new Set(lines)].slice(0, 5).join(" | "), 1000);
+}
+
+async function lookupCheckRun(
+  repo: string,
+  eventId: string,
+): Promise<{ url?: string; logUrl?: string; excerpt?: string }> {
+  const id = checkRunId(eventId);
+  if (!id) return {};
+  const check = await runGh([
+    "api",
+    `repos/${repo}/check-runs/${id}`,
+    "--jq",
+    `{html_url, details_url, output}`,
+  ]);
+  if (!check.success) return { url: checkRunUrl(repo, eventId) };
+  const parsed = JSON.parse(check.stdout) as {
+    html_url?: string;
+    details_url?: string;
+    output?: { title?: string; summary?: string; text?: string };
+  };
+  const annotations = await runGh([
+    "api",
+    `repos/${repo}/check-runs/${id}/annotations`,
+    "--jq",
+    `[.[] | select((.annotation_level == "failure") or (.annotation_level == "warning")) | [.path, .start_line, .annotation_level, .message, .raw_details] | map(select(. == null | not)) | join(":")] | .[:5] | join("\\n")`,
+  ]);
+  return {
+    url: parsed.html_url ?? checkRunUrl(repo, eventId),
+    logUrl: parsed.details_url,
+    excerpt: errorWarningExcerpt(
+      parsed.output?.title,
+      parsed.output?.summary,
+      parsed.output?.text,
+      annotations.success ? annotations.stdout : "",
+    ),
+  };
+}
+
 function daysBetween(later: Date, earlierIso?: string): number {
   if (!earlierIso) return Number.POSITIVE_INFINITY;
   const earlier = new Date(earlierIso);
   if (Number.isNaN(earlier.getTime())) return Number.POSITIVE_INFINITY;
   return (later.getTime() - earlier.getTime()) / (24 * 60 * 60 * 1000);
+}
+
+function inactiveDaysSince(later: Date, earlierIso?: string): number {
+  const days = daysBetween(later, earlierIso);
+  if (!Number.isFinite(days)) return 9999;
+  return Math.max(0, Math.floor(days));
 }
 
 function maxIso(values: Array<string | undefined>): string | undefined {
@@ -314,7 +398,7 @@ type ModelContext = {
 /** Model that stores durable maintainer activity and agent-session context. */
 export const model = {
   type: "@evrardjp/maintainer-activity",
-  version: "2026.06.17.1",
+  version: "2026.06.25.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     lifecycleEvent: {
@@ -413,6 +497,10 @@ export const model = {
           );
 
           if (event.type === "check_failure") {
+            const checkRun = event.checkUrl && event.checkExcerpt
+              ? {}
+              : await lookupCheckRun(parsed.repo, event.eventId);
+            const errorExcerpt = event.checkExcerpt || checkRun.excerpt;
             handles.push(
               await context.writeResource(
                 "ciAttention",
@@ -422,9 +510,11 @@ export const model = {
                   prNumber: event.prNumber,
                   workflow: event.checkName ?? "github-check",
                   conclusion: event.checkConclusion ?? "failure",
-                  url: event.prUrl,
-                  reason:
-                    `GitHub check failure detected on PR #${event.prNumber}`,
+                  url: event.checkUrl ?? checkRun.url ?? event.prUrl,
+                  logUrl: event.checkDetailsUrl ?? checkRun.logUrl,
+                  errorExcerpt,
+                  reason: errorExcerpt || event.body ||
+                    `${event.checkName ?? "GitHub check"} failed`,
                   requiresMaintainerAttention: true,
                   observedAt: event.detectedAt,
                   tags: ["github-pr-feed"],
@@ -456,16 +546,39 @@ export const model = {
           );
           if (!snapshot) continue;
           const prEvents = eventsByPr.get(snapshot.prNumber) ?? [];
-          const isOwnPr = personalHandles.has((snapshot.author ?? "").toLowerCase());
-          const prState = snapshot.merged ? "MERGED" : (snapshot.state ?? "OPEN");
+          const isOwnPr = personalHandles.has(
+            (snapshot.author ?? "").toLowerCase(),
+          );
+          const prState = snapshot.merged
+            ? "MERGED"
+            : (snapshot.state ?? "OPEN");
           const isOpen = prState === "OPEN";
           const ciBlocked = isOpen && snapshot.checksState === "failure";
-          const changesRequested = isOpen && snapshot.reviewState === "changes_requested";
-          const lastCodeChangeAt = snapshot.lastCodeChangeAt ?? snapshot.updatedAt;
+          const changesRequested = isOpen &&
+            snapshot.reviewState === "changes_requested";
+          const lastCodeChangeAt = snapshot.lastCodeChangeAt ??
+            snapshot.updatedAt;
           const lastConversationAt = maxIso([
             snapshot.lastConversationAt,
             ...prEvents.map((event) => event.occurredAt ?? event.detectedAt),
           ]);
+          const humanConversationAt = maxIso(
+            prEvents
+              .filter((event) =>
+                ["review", "review_comment", "issue_comment"].includes(
+                  event.type,
+                ) && event.authorType !== "bot"
+              )
+              .map((event) => event.occurredAt ?? event.detectedAt),
+          );
+          const latestRelevantActivityAt = maxIso([
+            lastCodeChangeAt,
+            humanConversationAt,
+          ]);
+          const referenceTime = new Date(snapshot.lastPollAt);
+          const inactiveDays = isOpen
+            ? inactiveDaysSince(referenceTime, latestRelevantActivityAt)
+            : 0;
           const personalReviewAt = maxIso(
             prEvents
               .filter((event) =>
@@ -475,18 +588,25 @@ export const model = {
               .map((event) => event.occurredAt ?? event.detectedAt),
           );
           const reviewedByMeSinceLastCodeChange = Boolean(
-            personalReviewAt && lastCodeChangeAt && personalReviewAt >= lastCodeChangeAt,
+            personalReviewAt && lastCodeChangeAt &&
+              personalReviewAt >= lastCodeChangeAt,
           );
           const humanNonPersonalCommentAfterCode = prEvents.some((event) =>
-            ["review", "review_comment", "issue_comment"].includes(event.type) &&
+            ["review", "review_comment", "issue_comment"].includes(
+              event.type,
+            ) &&
             event.authorType !== "bot" &&
             !personalHandles.has(event.author.toLowerCase()) &&
-            (!lastCodeChangeAt || (event.occurredAt ?? event.detectedAt) >= lastCodeChangeAt)
+            (!lastCodeChangeAt ||
+              (event.occurredAt ?? event.detectedAt) >= lastCodeChangeAt)
           );
-          const staleHighActivityDecision = (snapshot.discussionCount ?? 0) > 10 &&
-            daysBetween(now, maxIso([lastConversationAt, lastCodeChangeAt])) >= 7;
+          const staleHighActivityDecision =
+            (snapshot.discussionCount ?? 0) > 10 &&
+            daysBetween(now, maxIso([lastConversationAt, lastCodeChangeAt])) >=
+              7;
           const designProposal = isDesignProposal(snapshot);
-          const needsMaintainerDecision = isOpen && (staleHighActivityDecision || designProposal);
+          const needsMaintainerDecision = isOpen &&
+            (staleHighActivityDecision || designProposal);
           const needsMyCodeFix = isOpen && isOwnPr &&
             (ciBlocked || changesRequested || humanNonPersonalCommentAfterCode);
           const readyForMaintainerReview = isOpen && !isOwnPr &&
@@ -501,7 +621,9 @@ export const model = {
             daysBetween(now, lastCodeChangeAt) >= 1;
           const categories = [
             needsMyCodeFix ? "needs-my-code-fix" : undefined,
-            readyForMaintainerReview ? "ready-for-maintainer-review" : undefined,
+            readyForMaintainerReview
+              ? "ready-for-maintainer-review"
+              : undefined,
             quickWin ? "quick-win" : undefined,
             needsMaintainerDecision ? "needs-maintainer-decision" : undefined,
             recommendAuthorAction ? "recommend-author-action" : undefined,
@@ -517,9 +639,9 @@ export const model = {
           const recommendedAction = needsMyCodeFix
             ? "Fix your PR: address CI, requested changes, or reviewer comments since the last code change"
             : readyForMaintainerReview
-            ? "Review this PR; you have not reviewed it since the last code change"
-            : quickWin
-            ? "Quick review candidate"
+            ? personalReviewAt
+              ? "Review this PR; code has changed since your last review"
+              : "Review this PR; you have never reviewed it"
             : needsMaintainerDecision
             ? "Make or request a maintainer decision"
             : recommendAuthorAction
@@ -527,11 +649,14 @@ export const model = {
             : ciBlocked
             ? "Inspect failing checks and decide whether maintainer action is needed"
             : undefined;
-          const blockerStatus = needsMyCodeFix || readyForMaintainerReview || needsMaintainerDecision
+          const blockerStatus = needsMyCodeFix || readyForMaintainerReview ||
+              needsMaintainerDecision
             ? "maintainer_input_needed"
             : ciBlocked
             ? "ci_blocked"
-            : isOpen ? "unknown" : "not_blocked";
+            : isOpen
+            ? "unknown"
+            : "not_blocked";
 
           handles.push(
             await context.writeResource(
@@ -560,14 +685,15 @@ export const model = {
                 blockerConfidence: blockerStatus === "unknown" ? 0.3 : 0.8,
                 securityRelevant: false,
                 securitySignals: [],
-                inactive: false,
-                inactiveDays: 0,
+                inactive: isOpen,
+                inactiveDays,
                 difficulty: "unknown",
                 reviewEffort: quickWin ? "quick" : "unknown",
                 priorityScore,
                 recommendedAction,
                 state: prState,
                 merged: Boolean(snapshot.merged),
+                mergeable: snapshot.mergeable,
                 author: snapshot.author,
                 isOwnPr,
                 isDraft: Boolean(snapshot.isDraft),
