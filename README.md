@@ -27,6 +27,11 @@ swamp-extensions/
     README.md
     LICENSE.txt
     models/
+  capability-orchestrator/
+    manifest.yaml
+    README.md
+    LICENSE.txt
+    models/
 ```
 
 This is preferable to one giant manifest because each extension can be versioned,
@@ -57,6 +62,12 @@ for downstream SSH/config/app models.
 
 Use it as the first phase of homelab workflows before applying base config and
 app-specific guarantees.
+
+### `@evrardjp/capability-orchestrator`
+
+Capability catalog and DAG planner models. The catalog publishes manually
+maintained capability definitions; the planner combines those definitions with
+VM pool data and emits ordered execution waves for Swamp workflows.
 
 ## Relationship between the two
 

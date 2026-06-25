@@ -10,7 +10,12 @@
  */
 import { z } from "npm:zod@4";
 
-const GlobalArgsSchema = z.object({});
+const GlobalArgsSchema = z.object({
+  personalGithubHandles: z.array(z.string()).default([
+    "evrardjp",
+    "evrardj-roche",
+  ]).describe("GitHub handles that represent the maintainer/user"),
+});
 
 const ItemRefSchema = z.object({
   repo: z.string().min(1).describe("Repository as owner/name"),
@@ -76,6 +81,24 @@ const ClassificationSchema = z.object({
   reviewEffortReason: z.string().optional(),
   priorityScore: z.number().default(0),
   recommendedAction: z.string().optional(),
+  author: z.string().optional(),
+  isOwnPr: z.boolean().default(false),
+  isDraft: z.boolean().default(false),
+  labels: z.array(z.string()).default([]),
+  checksState: z.string().optional(),
+  reviewState: z.string().optional(),
+  lastCodeChangeAt: z.string().optional(),
+  lastConversationAt: z.string().optional(),
+  discussionCount: z.number().nonnegative().default(0),
+  additions: z.number().nonnegative().optional(),
+  deletions: z.number().nonnegative().optional(),
+  changedFiles: z.number().nonnegative().optional(),
+  reviewedByMeSinceLastCodeChange: z.boolean().default(false),
+  needsMyCodeFix: z.boolean().default(false),
+  readyForMaintainerReview: z.boolean().default(false),
+  quickWin: z.boolean().default(false),
+  needsMaintainerDecision: z.boolean().default(false),
+  recommendAuthorAction: z.boolean().default(false),
   tags: z.array(z.string()).default([]),
 });
 
@@ -113,6 +136,10 @@ const GithubPrFeedIngestArgsSchema = z.object({
   repo: z.string().min(1).describe("Repository as owner/name"),
   limit: z.number().int().positive().default(200),
   includeBots: z.boolean().default(true),
+  personalGithubHandles: z.array(z.string()).default([
+    "evrardjp",
+    "evrardj-roche",
+  ]).describe("GitHub handles that represent this maintainer/user"),
 });
 
 const PiSessionFindingSchema = z.object({
@@ -143,6 +170,8 @@ type GithubPrFeedEvent = {
   author: string;
   authorType?: string;
   body?: string;
+  state?: string;
+  occurredAt?: string;
   detectedAt: string;
   checkName?: string;
   checkConclusion?: string;
@@ -153,6 +182,19 @@ type GithubPrSnapshot = {
   prTitle: string;
   prUrl: string;
   headSha?: string;
+  author?: string;
+  isDraft?: boolean;
+  labels?: string[];
+  reviewDecision?: string;
+  mergeable?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  lastCodeChangeAt?: string;
+  lastConversationAt?: string;
+  discussionCount?: number;
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
   reviewState?: string;
   checksState?: string;
   lastPollAt: string;
@@ -203,6 +245,46 @@ function safeName(
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 180);
+}
+
+function daysBetween(later: Date, earlierIso?: string): number {
+  if (!earlierIso) return Number.POSITIVE_INFINITY;
+  const earlier = new Date(earlierIso);
+  if (Number.isNaN(earlier.getTime())) return Number.POSITIVE_INFINITY;
+  return (later.getTime() - earlier.getTime()) / (24 * 60 * 60 * 1000);
+}
+
+function maxIso(values: Array<string | undefined>): string | undefined {
+  const valid = values.filter((v): v is string => Boolean(v));
+  if (valid.length === 0) return undefined;
+  return valid.sort().at(-1);
+}
+
+function isDesignProposal(snapshot: GithubPrSnapshot): boolean {
+  const title = snapshot.prTitle.toLowerCase();
+  const labels = (snapshot.labels ?? []).map((label) => label.toLowerCase());
+  return title.startsWith("design") ||
+    title.includes("proposal") ||
+    labels.some((label) =>
+      label.includes("design") || label.includes("proposal") ||
+      label.includes("architecture")
+    );
+}
+
+function isQuickWin(snapshot: GithubPrSnapshot, isOwnPr: boolean): boolean {
+  if (isOwnPr || snapshot.isDraft || snapshot.checksState !== "success") {
+    return false;
+  }
+  const title = snapshot.prTitle.toLowerCase();
+  const labels = (snapshot.labels ?? []).map((label) => label.toLowerCase());
+  const totalChanges = (snapshot.additions ?? 0) + (snapshot.deletions ?? 0);
+  const smallDiff = (snapshot.changedFiles ?? 999) <= 5 && totalChanges <= 250;
+  const smallKind = /^(docs|doc|fix|chore|test)(\(|:)/.test(title) ||
+    labels.some((label) =>
+      label.includes("docs") || label.includes("chore") ||
+      label.includes("kind/documentation")
+    );
+  return smallDiff || smallKind;
 }
 
 type ModelContext = {
@@ -282,10 +364,15 @@ export const model = {
         );
         const handles: Array<{ name: string }> = [];
 
+        const personalHandles = new Set(
+          parsed.personalGithubHandles.map((handle) => handle.toLowerCase()),
+        );
+        const now = new Date();
         const eventEntries = entries
           .filter((entry) => tagsOf(entry).specName === "feedbackEvent")
           .sort((a, b) => b.name.localeCompare(a.name))
           .slice(0, parsed.limit);
+        const eventsByPr = new Map<number, GithubPrFeedEvent[]>();
 
         for (const entry of eventEntries) {
           const event = await readJson<GithubPrFeedEvent>(
@@ -296,6 +383,9 @@ export const model = {
           );
           if (!event) continue;
           if (!parsed.includeBots && event.authorType === "bot") continue;
+          const prEvents = eventsByPr.get(event.prNumber) ?? [];
+          prEvents.push(event);
+          eventsByPr.set(event.prNumber, prEvents);
 
           handles.push(
             await context.writeResource(
@@ -311,7 +401,7 @@ export const model = {
                 summary:
                   `${event.type} by ${event.author} on PR #${event.prNumber}: ${event.prTitle}`,
                 body: event.body,
-                createdAt: event.detectedAt,
+                createdAt: event.occurredAt ?? event.detectedAt,
                 url: event.prUrl,
                 tags: ["github-pr-feed"],
               },
@@ -361,7 +451,82 @@ export const model = {
             entry,
           );
           if (!snapshot) continue;
+          const prEvents = eventsByPr.get(snapshot.prNumber) ?? [];
+          const isOwnPr = personalHandles.has((snapshot.author ?? "").toLowerCase());
           const ciBlocked = snapshot.checksState === "failure";
+          const changesRequested = snapshot.reviewState === "changes_requested";
+          const lastCodeChangeAt = snapshot.lastCodeChangeAt ?? snapshot.updatedAt;
+          const lastConversationAt = maxIso([
+            snapshot.lastConversationAt,
+            ...prEvents.map((event) => event.occurredAt ?? event.detectedAt),
+          ]);
+          const personalReviewAt = maxIso(
+            prEvents
+              .filter((event) =>
+                event.type === "review" &&
+                personalHandles.has(event.author.toLowerCase())
+              )
+              .map((event) => event.occurredAt ?? event.detectedAt),
+          );
+          const reviewedByMeSinceLastCodeChange = Boolean(
+            personalReviewAt && lastCodeChangeAt && personalReviewAt >= lastCodeChangeAt,
+          );
+          const humanNonPersonalCommentAfterCode = prEvents.some((event) =>
+            ["review", "review_comment", "issue_comment"].includes(event.type) &&
+            event.authorType !== "bot" &&
+            !personalHandles.has(event.author.toLowerCase()) &&
+            (!lastCodeChangeAt || (event.occurredAt ?? event.detectedAt) >= lastCodeChangeAt)
+          );
+          const staleHighActivityDecision = (snapshot.discussionCount ?? 0) > 10 &&
+            daysBetween(now, maxIso([lastConversationAt, lastCodeChangeAt])) >= 7;
+          const designProposal = isDesignProposal(snapshot);
+          const needsMaintainerDecision = staleHighActivityDecision || designProposal;
+          const needsMyCodeFix = isOwnPr &&
+            (ciBlocked || changesRequested || humanNonPersonalCommentAfterCode);
+          const readyForMaintainerReview = !isOwnPr &&
+            !snapshot.isDraft &&
+            snapshot.checksState === "success" &&
+            !changesRequested &&
+            !reviewedByMeSinceLastCodeChange;
+          const quickWin = isQuickWin(snapshot, isOwnPr);
+          const recommendAuthorAction = !isOwnPr &&
+            ciBlocked &&
+            !changesRequested &&
+            daysBetween(now, lastCodeChangeAt) >= 1;
+          const categories = [
+            needsMyCodeFix ? "needs-my-code-fix" : undefined,
+            readyForMaintainerReview ? "ready-for-maintainer-review" : undefined,
+            quickWin ? "quick-win" : undefined,
+            needsMaintainerDecision ? "needs-maintainer-decision" : undefined,
+            recommendAuthorAction ? "recommend-author-action" : undefined,
+          ].filter((tag): tag is string => Boolean(tag));
+          const priorityScore = Math.max(
+            needsMyCodeFix ? 100 : 0,
+            readyForMaintainerReview ? 80 : 0,
+            quickWin ? 70 : 0,
+            needsMaintainerDecision ? 65 : 0,
+            ciBlocked ? 60 : 0,
+            recommendAuthorAction ? 45 : 0,
+          );
+          const recommendedAction = needsMyCodeFix
+            ? "Fix your PR: address CI, requested changes, or reviewer comments since the last code change"
+            : readyForMaintainerReview
+            ? "Review this PR; you have not reviewed it since the last code change"
+            : quickWin
+            ? "Quick review candidate"
+            : needsMaintainerDecision
+            ? "Make or request a maintainer decision"
+            : recommendAuthorAction
+            ? "Recommend changes or bump the author; CI is failing and no code change landed in the last 24h"
+            : ciBlocked
+            ? "Inspect failing checks and decide whether maintainer action is needed"
+            : undefined;
+          const blockerStatus = needsMyCodeFix || readyForMaintainerReview || needsMaintainerDecision
+            ? "maintainer_input_needed"
+            : ciBlocked
+            ? "ci_blocked"
+            : "unknown";
+
           handles.push(
             await context.writeResource(
               "classification",
@@ -378,22 +543,42 @@ export const model = {
                 url: snapshot.prUrl,
                 observedRevision: snapshot.headSha,
                 analyzedAt: snapshot.lastPollAt,
-                blockerStatus: ciBlocked ? "ci_blocked" : "unknown",
+                blockerStatus,
                 blockerReason: ciBlocked
                   ? "GitHub PR feed reported failing checks"
+                  : needsMaintainerDecision
+                  ? "Design proposal or high-activity stale conversation needs a decision"
+                  : readyForMaintainerReview
+                  ? "Maintainer has not reviewed since the latest code change"
                   : undefined,
-                blockerConfidence: ciBlocked ? 0.8 : 0.3,
+                blockerConfidence: blockerStatus === "unknown" ? 0.3 : 0.8,
                 securityRelevant: false,
                 securitySignals: [],
                 inactive: false,
                 inactiveDays: 0,
                 difficulty: "unknown",
-                reviewEffort: "unknown",
-                priorityScore: ciBlocked ? 60 : 0,
-                recommendedAction: ciBlocked
-                  ? "Inspect failing checks and decide whether maintainer action is needed"
-                  : undefined,
-                tags: ["github-pr-feed"],
+                reviewEffort: quickWin ? "quick" : "unknown",
+                priorityScore,
+                recommendedAction,
+                author: snapshot.author,
+                isOwnPr,
+                isDraft: Boolean(snapshot.isDraft),
+                labels: snapshot.labels ?? [],
+                checksState: snapshot.checksState,
+                reviewState: snapshot.reviewState,
+                lastCodeChangeAt,
+                lastConversationAt,
+                discussionCount: snapshot.discussionCount ?? 0,
+                additions: snapshot.additions,
+                deletions: snapshot.deletions,
+                changedFiles: snapshot.changedFiles,
+                reviewedByMeSinceLastCodeChange,
+                needsMyCodeFix,
+                readyForMaintainerReview,
+                quickWin,
+                needsMaintainerDecision,
+                recommendAuthorAction,
+                tags: ["github-pr-feed", ...categories],
               },
             ),
           );

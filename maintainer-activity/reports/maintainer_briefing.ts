@@ -69,6 +69,24 @@ type Classification = {
   reviewEffortReason?: string;
   priorityScore: number;
   recommendedAction?: string;
+  author?: string;
+  isOwnPr?: boolean;
+  isDraft?: boolean;
+  labels?: string[];
+  checksState?: string;
+  reviewState?: string;
+  lastCodeChangeAt?: string;
+  lastConversationAt?: string;
+  discussionCount?: number;
+  additions?: number;
+  deletions?: number;
+  changedFiles?: number;
+  reviewedByMeSinceLastCodeChange?: boolean;
+  needsMyCodeFix?: boolean;
+  readyForMaintainerReview?: boolean;
+  quickWin?: boolean;
+  needsMaintainerDecision?: boolean;
+  recommendAuthorAction?: boolean;
   tags?: string[];
 };
 
@@ -321,6 +339,21 @@ export const report = {
     const inactive = summaries.filter((item) =>
       item.latestClassification?.inactive
     ).slice(0, 20);
+    const needsMyCodeFixes = summaries.filter((item) =>
+      item.latestClassification?.needsMyCodeFix
+    ).slice(0, 20);
+    const readyForMaintainerReview = summaries.filter((item) =>
+      item.latestClassification?.readyForMaintainerReview
+    ).slice(0, 20);
+    const quickWins = summaries.filter((item) =>
+      item.latestClassification?.quickWin
+    ).slice(0, 20);
+    const needsMaintainerDecision = summaries.filter((item) =>
+      item.latestClassification?.needsMaintainerDecision
+    ).slice(0, 20);
+    const recommendAuthorAction = summaries.filter((item) =>
+      item.latestClassification?.recommendAuthorAction
+    ).slice(0, 20);
 
     const itemRows = (items: ItemSummary[]) =>
       items.map((item) => [
@@ -331,6 +364,22 @@ export const report = {
         esc(item.reasons.join(", ")),
         esc(item.latestClassification?.recommendedAction ?? ""),
       ]);
+    const reviewRows = (items: ItemSummary[]) =>
+      items.map((item) => {
+        const c = item.latestClassification;
+        return [
+          esc(item.repo),
+          esc(`${item.itemType}${item.number ? ` #${item.number}` : ""}`),
+          esc(item.title ?? c?.title ?? ""),
+          esc(c?.author ?? ""),
+          esc(c?.checksState ?? ""),
+          esc(c?.lastCodeChangeAt ?? ""),
+          esc(c?.reviewedByMeSinceLastCodeChange ?? ""),
+          esc(c?.changedFiles ?? ""),
+          esc(((c?.additions ?? 0) + (c?.deletions ?? 0)) || ""),
+          esc(c?.recommendedAction ?? ""),
+        ];
+      });
 
     const modelName = context.definition?.name ?? context.modelId ??
       "maintainer-activity";
@@ -338,6 +387,76 @@ export const report = {
       `# Maintainer Briefing — ${modelName}`,
       "",
       `Items: **${summaries.length}** · Events: **${visibleEvents.length}** · Classifications: **${visibleClassifications.length}** · CI attention: **${visibleCiAttention.length}** · Session logs: **${visibleSessionLogs.length}**`,
+      "",
+      "## Needs my code fixes",
+      ...renderTable([
+        "Repo",
+        "Item",
+        "Title",
+        "Author",
+        "CI",
+        "Last code change",
+        "Reviewed by me since code change",
+        "Files",
+        "Lines",
+        "Recommended action",
+      ], reviewRows(needsMyCodeFixes)),
+      "",
+      "## Ready for maintainer review",
+      ...renderTable([
+        "Repo",
+        "Item",
+        "Title",
+        "Author",
+        "CI",
+        "Last code change",
+        "Reviewed by me since code change",
+        "Files",
+        "Lines",
+        "Recommended action",
+      ], reviewRows(readyForMaintainerReview)),
+      "",
+      "## Quick review wins",
+      ...renderTable([
+        "Repo",
+        "Item",
+        "Title",
+        "Author",
+        "CI",
+        "Last code change",
+        "Reviewed by me since code change",
+        "Files",
+        "Lines",
+        "Recommended action",
+      ], reviewRows(quickWins)),
+      "",
+      "## Needs maintainer decision",
+      ...renderTable([
+        "Repo",
+        "Item",
+        "Title",
+        "Author",
+        "CI",
+        "Last code change",
+        "Reviewed by me since code change",
+        "Files",
+        "Lines",
+        "Recommended action",
+      ], reviewRows(needsMaintainerDecision)),
+      "",
+      "## Recommend changes/bumps to other authors",
+      ...renderTable([
+        "Repo",
+        "Item",
+        "Title",
+        "Author",
+        "CI",
+        "Last code change",
+        "Reviewed by me since code change",
+        "Files",
+        "Lines",
+        "Recommended action",
+      ], reviewRows(recommendAuthorAction)),
       "",
       "## Urgent / Noteworthy",
       ...renderTable([
@@ -436,6 +555,11 @@ export const report = {
         security,
         blocked,
         inactive,
+        needsMyCodeFixes,
+        readyForMaintainerReview,
+        quickWins,
+        needsMaintainerDecision,
+        recommendAuthorAction,
         ciAttention: visibleCiAttention,
         recentEvents: visibleEvents.slice(0, 30),
         recentSessionLogs: visibleSessionLogs.slice(0, 20),
