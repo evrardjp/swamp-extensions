@@ -83,6 +83,8 @@ const ClassificationSchema = z.object({
   recommendedAction: z.string().optional(),
   author: z.string().optional(),
   isOwnPr: z.boolean().default(false),
+  state: z.string().default("OPEN"),
+  merged: z.boolean().default(false),
   isDraft: z.boolean().default(false),
   labels: z.array(z.string()).default([]),
   checksState: z.string().optional(),
@@ -182,6 +184,8 @@ type GithubPrSnapshot = {
   prTitle: string;
   prUrl: string;
   headSha?: string;
+  state?: string;
+  merged?: boolean;
   author?: string;
   isDraft?: boolean;
   labels?: string[];
@@ -453,8 +457,10 @@ export const model = {
           if (!snapshot) continue;
           const prEvents = eventsByPr.get(snapshot.prNumber) ?? [];
           const isOwnPr = personalHandles.has((snapshot.author ?? "").toLowerCase());
-          const ciBlocked = snapshot.checksState === "failure";
-          const changesRequested = snapshot.reviewState === "changes_requested";
+          const prState = snapshot.merged ? "MERGED" : (snapshot.state ?? "OPEN");
+          const isOpen = prState === "OPEN";
+          const ciBlocked = isOpen && snapshot.checksState === "failure";
+          const changesRequested = isOpen && snapshot.reviewState === "changes_requested";
           const lastCodeChangeAt = snapshot.lastCodeChangeAt ?? snapshot.updatedAt;
           const lastConversationAt = maxIso([
             snapshot.lastConversationAt,
@@ -480,16 +486,16 @@ export const model = {
           const staleHighActivityDecision = (snapshot.discussionCount ?? 0) > 10 &&
             daysBetween(now, maxIso([lastConversationAt, lastCodeChangeAt])) >= 7;
           const designProposal = isDesignProposal(snapshot);
-          const needsMaintainerDecision = staleHighActivityDecision || designProposal;
-          const needsMyCodeFix = isOwnPr &&
+          const needsMaintainerDecision = isOpen && (staleHighActivityDecision || designProposal);
+          const needsMyCodeFix = isOpen && isOwnPr &&
             (ciBlocked || changesRequested || humanNonPersonalCommentAfterCode);
-          const readyForMaintainerReview = !isOwnPr &&
+          const readyForMaintainerReview = isOpen && !isOwnPr &&
             !snapshot.isDraft &&
             snapshot.checksState === "success" &&
             !changesRequested &&
             !reviewedByMeSinceLastCodeChange;
-          const quickWin = isQuickWin(snapshot, isOwnPr);
-          const recommendAuthorAction = !isOwnPr &&
+          const quickWin = isOpen && isQuickWin(snapshot, isOwnPr);
+          const recommendAuthorAction = isOpen && !isOwnPr &&
             ciBlocked &&
             !changesRequested &&
             daysBetween(now, lastCodeChangeAt) >= 1;
@@ -525,7 +531,7 @@ export const model = {
             ? "maintainer_input_needed"
             : ciBlocked
             ? "ci_blocked"
-            : "unknown";
+            : isOpen ? "unknown" : "not_blocked";
 
           handles.push(
             await context.writeResource(
@@ -560,6 +566,8 @@ export const model = {
                 reviewEffort: quickWin ? "quick" : "unknown",
                 priorityScore,
                 recommendedAction,
+                state: prState,
+                merged: Boolean(snapshot.merged),
                 author: snapshot.author,
                 isOwnPr,
                 isDraft: Boolean(snapshot.isDraft),

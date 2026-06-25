@@ -69,6 +69,8 @@ type Classification = {
   reviewEffortReason?: string;
   priorityScore: number;
   recommendedAction?: string;
+  state?: string;
+  merged?: boolean;
   author?: string;
   isOwnPr?: boolean;
   isDraft?: boolean;
@@ -371,6 +373,7 @@ export const report = {
           esc(item.repo),
           esc(`${item.itemType}${item.number ? ` #${item.number}` : ""}`),
           esc(item.title ?? c?.title ?? ""),
+          esc(c?.state ?? ""),
           esc(c?.author ?? ""),
           esc(c?.checksState ?? ""),
           esc(c?.lastCodeChangeAt ?? ""),
@@ -393,6 +396,7 @@ export const report = {
         "Repo",
         "Item",
         "Title",
+        "State",
         "Author",
         "CI",
         "Last code change",
@@ -407,6 +411,7 @@ export const report = {
         "Repo",
         "Item",
         "Title",
+        "State",
         "Author",
         "CI",
         "Last code change",
@@ -421,6 +426,7 @@ export const report = {
         "Repo",
         "Item",
         "Title",
+        "State",
         "Author",
         "CI",
         "Last code change",
@@ -435,6 +441,7 @@ export const report = {
         "Repo",
         "Item",
         "Title",
+        "State",
         "Author",
         "CI",
         "Last code change",
@@ -449,6 +456,7 @@ export const report = {
         "Repo",
         "Item",
         "Title",
+        "State",
         "Author",
         "CI",
         "Last code change",

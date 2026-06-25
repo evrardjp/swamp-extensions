@@ -128,6 +128,12 @@ Use this bridge instead of dumping all Pi telemetry into daily reports.
 
 ## GitHub PR feed ingestion
 
+If `@mgreten/github-pr-feed` does not have cached events, refresh it first:
+
+```bash                                                                                                                                                                                                                                                                                                                                            
+swamp model method run gh-pr-feed-eso-eso refresh                                                                                                                                                                                                                                                                                                
+```    
+
 If a `@mgreten/github-pr-feed` model has cached PR events and snapshots, ingest
 it into the maintainer ledger:
 
@@ -135,7 +141,9 @@ it into the maintainer ledger:
 swamp model method run maintainer-activity ingest_github_pr_feed \
   --input feedModelId=<github-pr-feed-model-id> \
   --input repo=owner/repo \
-  --input limit=200
+  --input limit=5000 \
+  --input includeBots=true \                                                                                                                                                                                                                                                                                                                     
+  --input 'personalGithubHandles:json=["evrardjp","evrardj-roche"]'                                                                                                                                                                                                                                                                              
 ```
 
 This creates:
@@ -177,22 +185,37 @@ swamp model method run maintainer-activity record_ci_attention \
 
 ## Report
 
-The daily briefing is a report over the `maintainer-activity` model data. For a
-current briefing, refresh the relevant GitHub PR feed first, then ingest it, then
-read the report:
+### Cached report
+The daily briefing is a report over the `maintainer-activity` model data.
+
+You can produce the cached report using:
+
+```bash                                                                                                                                                                                                                                                                                                                                            
+swamp report get @evrardjp/maintainer-briefing \                                                                                                                                                                                                                                                                                                 
+  --model maintainer-activity \                                                                                                                                                                                                                                                                                                                  
+  --markdown                                                                                                                                                                                                                                                                                                                                     
+```    
+
+### Refreshed/today's daily briefing (example: External-Secrets)
+
+For an up-to-date daily briefing, refresh the relevant GitHub PR feed first,
+then ingest it, then read the report:
 
 ```bash
-# Example for external-secrets/external-secrets
-swamp model method run gh-pr-feed-eso-eso refresh
-swamp model method run maintainer-activity ingest_github_pr_feed \
-  --input feedModelId=0e829358-6f1c-4172-8a09-2ec9f8923a39 \
-  --input repo=external-secrets/external-secrets \
-  --input limit=5000 \
-  --input includeBots=true
-swamp report get @evrardjp/maintainer-briefing \
-  --model maintainer-activity \
-  --markdown
-```
+#change directory to your swamp repo first
+swamp model method run gh-pr-feed-eso-eso refresh                                                                                                                                                                                                                                                                                                
+                                                                                                                                                                                                                                                                                                                                                 
+swamp model method run maintainer-activity ingest_github_pr_feed \                                                                                                                                                                                                                                                                               
+  --input feedModelId=0e829358-6f1c-4172-8a09-2ec9f8923a39 \                                                                                                                                                                                                                                                                                     
+  --input repo=external-secrets/external-secrets \                                                                                                                                                                                                                                                                                               
+  --input limit=5000 \                                                                                                                                                                                                                                                                                                                           
+  --input includeBots=true \                                                                                                                                                                                                                                                                                                                     
+  --input 'personalGithubHandles:json=["evrardjp","evrardj-roche"]'                                                                                                                                                                                                                                                                              
+                                                                                                                                                                                                                                                                                                                                                 
+swamp report get @evrardjp/maintainer-briefing \                                                                                                                                                                                                                                                                                                 
+  --model maintainer-activity \                                                                                                                                                                                                                                                                                                                  
+  --markdown                                                                                                                                                                                                                                                                                                                                     
+```    
 
 Use `swamp report get ... --json` when an agent needs to filter or drill down
 programmatically. Only use the stored report without refreshing when you
