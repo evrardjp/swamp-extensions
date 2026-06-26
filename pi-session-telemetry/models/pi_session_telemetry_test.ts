@@ -1,7 +1,11 @@
 import { assertEquals } from "jsr:@std/assert@1";
 import { model } from "./pi_session_telemetry.ts";
 
-type Written = { specName: string; name: string; data: Record<string, unknown> };
+type Written = {
+  specName: string;
+  name: string;
+  data: Record<string, unknown>;
+};
 
 function context(globalArgs: Record<string, unknown> = {}) {
   const writes: Written[] = [];
@@ -50,7 +54,10 @@ Deno.test("pi telemetry defaults redact content and local paths", async () => {
   assertEquals((event.data as Record<string, unknown>).content, undefined);
   assertEquals((event.data as Record<string, unknown>).contentText, undefined);
   assertEquals((event.data as Record<string, unknown>).raw, undefined);
-  assertEquals((event.data as Record<string, unknown>).contentHash, "sha256:abc");
+  assertEquals(
+    (event.data as Record<string, unknown>).contentHash,
+    "sha256:abc",
+  );
 
   const message = writes.find((write) => write.specName === "message")!.data;
   assertEquals(message.cwd, undefined);
@@ -70,6 +77,9 @@ Deno.test("pi telemetry opt-in preserves content and local paths", async () => {
   const event = writes.find((write) => write.specName === "event")!.data;
   assertEquals(event.cwd, "/home/example/private-repo");
   assertEquals(event.sessionFile, "/home/example/.pi/session.jsonl");
-  assertEquals((event.data as Record<string, unknown>).contentText, "secret answer");
+  assertEquals(
+    (event.data as Record<string, unknown>).contentText,
+    "secret answer",
+  );
   assertEquals((event.data as Record<string, unknown>).raw, { private: true });
 });
