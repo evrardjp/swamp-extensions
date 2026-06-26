@@ -9,6 +9,7 @@ const DenoFs = {
   writeFile: (p: string, d: Uint8Array) => Deno.writeFile(p, d),
   readTextFile: (p: string) => Deno.readTextFile(p),
   remove: (p: string) => Deno.remove(p),
+  makeTempFile: (o: Deno.MakeTempOptions) => Deno.makeTempFile(o),
   env: Deno.env,
 };
 
@@ -375,17 +376,24 @@ async function reconcile(
     } else {
       actions.push("ensureImage");
       if (apply) await ensureImage(vm, actions);
-      actions.push("define");
-      if (apply) {
-        const xmlPath = `${vm.imagesDir}/${vm.name}.xml.tmp`;
-        await DenoFs.writeFile(xmlPath, enc.encode(vmXml(vm)));
-        const r = await run("virsh", ["-c", uri, "define", xmlPath]);
-        await DenoFs.remove(xmlPath).catch(() => {});
-        if (r.code !== 0) {
-          throw new Error(
-            `virsh define failed for ${vm.name}: ${r.stderr.slice(-500)}`,
-          );
+      if (previousState === "absent") {
+        actions.push("define");
+        if (apply) {
+          const xmlPath = await DenoFs.makeTempFile({
+            prefix: `${vm.name}-`,
+            suffix: ".xml",
+          });
+          await DenoFs.writeFile(xmlPath, enc.encode(vmXml(vm)));
+          const r = await run("virsh", ["-c", uri, "define", xmlPath]);
+          await DenoFs.remove(xmlPath).catch(() => {});
+          if (r.code !== 0) {
+            throw new Error(
+              `virsh define failed for ${vm.name}: ${r.stderr.slice(-500)}`,
+            );
+          }
         }
+      } else {
+        actions.push("skipDefineAlreadyExists");
       }
       if (["running", "reachable"].includes(vm.desiredState)) {
         actions.push("start");

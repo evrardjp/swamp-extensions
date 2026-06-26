@@ -1,0 +1,26 @@
+manifestVersion: 1
+name: "@evrardjp/qcow2-overlay-prep"
+version: "2026.06.25.1"
+description: >-
+  Generic qcow2 base image downloader and overlay disk preparer for Swamp.
+repository: "https://github.com/evrardjp/swamp-extensions"
+paths:
+  base: manifest
+models:
+  - models/qcow2_overlay_prep.ts
+reports: []
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+labels:
+  - qcow2
+  - qemu
+  - vm
+  - image
+  - overlay
+  - infrastructure
+dependencies: []

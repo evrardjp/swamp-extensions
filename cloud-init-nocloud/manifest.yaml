@@ -1,0 +1,28 @@
+manifestVersion: 1
+name: "@evrardjp/cloud-init-nocloud"
+version: "2026.06.25.1"
+description: >-
+  Generic cloud-init NoCloud seed ISO generator for Swamp. Renders user-data,
+  meta-data, and optional network-config into an ISO 9660 image with CIDATA
+  volume label, optionally writing the ISO to a host filesystem path.
+repository: "https://github.com/evrardjp/swamp-extensions"
+paths:
+  base: manifest
+models:
+  - models/cloud_init_nocloud.ts
+reports: []
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+labels:
+  - cloud-init
+  - nocloud
+  - iso
+  - vm
+  - provisioning
+  - infrastructure
+dependencies: []

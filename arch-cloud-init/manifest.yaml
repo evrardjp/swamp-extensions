@@ -1,0 +1,28 @@
+manifestVersion: 1
+name: "@evrardjp/arch-cloud-init"
+version: "2026.06.25.1"
+description: >-
+  Convenience Arch Linux VM image preparer for Swamp: downloads the Arch cloud
+  image, creates a qcow2 overlay, and writes a NoCloud seed ISO.
+repository: "https://github.com/evrardjp/swamp-extensions"
+paths:
+  base: manifest
+models:
+  - models/arch_cloud_init.ts
+reports: []
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+labels:
+  - arch-linux
+  - cloud-init
+  - nocloud
+  - qcow2
+  - qemu
+  - vm
+  - convenience
+dependencies: []
