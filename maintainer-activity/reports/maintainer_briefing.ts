@@ -1,9 +1,8 @@
 /**
  * Maintainer briefing report for @evrardjp/maintainer-activity.
  *
- * Produces a global briefing and machine-readable item summaries from recorded
- * lifecycle events, classifications, CI attention records, and agent session
- * logs.
+ * Renders a model-scope briefing from the project activity database resources:
+ * snapshots, CI statuses, and chronological activity events.
  *
  * @module
  */
@@ -19,6 +18,7 @@ type ReportCtx = {
   modelType?: { normalized?: string } | string;
   modelId?: string;
   definition?: { id?: string; name?: string };
+  globalArgs?: Record<string, unknown>;
   dataRepository?: {
     findAllForModel(modelType: unknown, modelId: string): Promise<DataEntry[]>;
     getContent(
@@ -30,110 +30,74 @@ type ReportCtx = {
   };
 };
 
-type LifecycleEvent = {
+type ActivityEvent = {
   id: string;
   repo: string;
-  itemType: "issue" | "pr" | "repo" | "project";
-  number?: number;
-  source: string;
-  actor: string;
+  subjectType: "repo" | "issue" | "pr" | "fork" | "project";
+  subjectNumber?: number;
   eventType: string;
+  source: string;
+  visibility: "public" | "private";
+  actor: string;
   summary: string;
   body?: string;
   createdAt: string;
   url?: string;
-  relatedSessionId?: string;
+  filePath?: string;
+  state?: string;
+  artifactRefs?: string[];
   tags?: string[];
 };
 
-type Classification = {
-  id: string;
+type PrSnapshot = {
   repo: string;
-  itemType: "issue" | "pr";
   number: number;
-  title?: string;
-  url?: string;
-  analyzedAt: string;
-  blockerStatus: string;
-  blockerActor?: string;
-  blockerReason?: string;
-  blockerConfidence?: number;
-  securityRelevant: boolean;
-  securitySignals?: string[];
-  inactive: boolean;
-  inactiveDays: number;
-  difficulty: string;
-  difficultyReason?: string;
-  reviewEffort: string;
-  reviewMinutes?: number;
-  reviewEffortReason?: string;
-  priorityScore: number;
-  recommendedAction?: string;
-  state?: string;
+  title: string;
+  state: string;
   merged?: boolean;
-  mergeable?: string;
+  draft?: boolean;
   author?: string;
-  isOwnPr?: boolean;
-  isDraft?: boolean;
   labels?: string[];
+  requestedReviewers?: string[];
+  reviewDecision?: string;
+  reviewersRequestingChanges?: string[];
+  mergeConflict?: boolean | "unknown";
   checksState?: string;
-  reviewState?: string;
-  lastCodeChangeAt?: string;
-  lastConversationAt?: string;
-  discussionCount?: number;
   additions?: number;
   deletions?: number;
   changedFiles?: number;
-  reviewedByMeSinceLastCodeChange?: boolean;
-  needsMyCodeFix?: boolean;
-  readyForMaintainerReview?: boolean;
-  quickWin?: boolean;
-  needsMaintainerDecision?: boolean;
-  recommendAuthorAction?: boolean;
-  tags?: string[];
+  createdAt?: string;
+  updatedAt?: string;
+  lastCodeChangeAt?: string | null;
+  lastConversationAt?: string | null;
+  url?: string;
+  syncedAt: string;
 };
 
-type CiAttention = {
-  id: string;
+type IssueSnapshot = {
   repo: string;
-  prNumber?: number;
-  workflow: string;
+  number: number;
+  title: string;
+  state: string;
+  author?: string;
+  labels?: string[];
+  updatedAt?: string;
+  lastConversationAt?: string | null;
+  url?: string;
+  syncedAt: string;
+};
+
+type CiStatusSnapshot = {
+  repo: string;
+  prNumber: number;
+  name: string;
   status?: string;
-  conclusion?: string;
+  conclusion?: string | null;
   url?: string;
-  logUrl?: string;
-  errorExcerpt?: string;
-  reason: string;
-  requiresMaintainerAttention: boolean;
-  observedAt: string;
-  tags?: string[];
-};
-
-type SessionLog = {
-  id: string;
-  sessionId: string;
-  startedAt?: string;
-  endedAt: string;
-  cwd?: string;
-  summary: string;
-  fullLog?: string;
-  relatedItems?: Array<{ repo: string; itemType: string; number?: number }>;
-  tags?: string[];
-};
-
-type ItemSummary = {
-  key: string;
-  repo: string;
-  itemType: string;
-  number?: number;
-  title?: string;
-  url?: string;
-  latestClassification?: Classification;
-  events: LifecycleEvent[];
-  ci: CiAttention[];
-  sessions: SessionLog[];
-  priorityScore: number;
-  reasons: string[];
+  detailsUrl?: string;
+  artifact?: string;
+  completedAt?: string | null;
+  syncedAt: string;
 };
 
 function normalizedType(
@@ -148,35 +112,8 @@ function tagsOf(entry: DataEntry): Record<string, string> {
   return entry.tags ?? entry.metadata?.tags ?? {};
 }
 
-function key(repo: string, itemType: string, number?: number): string {
-  return `${repo}#${itemType}${number ? `-${number}` : ""}`;
-}
-
 function esc(value: unknown): string {
   return String(value ?? "").replaceAll("|", "\\|").replaceAll("\n", " ");
-}
-
-function ciJobUrl(ci: CiAttention): string {
-  return String(ci.logUrl ?? ci.url ?? "");
-}
-
-function ciPrUrl(ci: CiAttention): string {
-  if (ci.prNumber) return `https://github.com/${ci.repo}/pull/${ci.prNumber}`;
-  return ci.url ?? "";
-}
-
-function renderCiAttentionSections(items: CiAttention[]): string[] {
-  if (items.length === 0) return ["_None._"];
-  return items.flatMap((ci) => [
-    `### ${ciPrUrl(ci)} @ ${ci.observedAt}`,
-    "",
-    `Workflow name: ${esc(ci.workflow)}`,
-    "",
-    `Failing job: ${ciJobUrl(ci)}`,
-    "",
-    `Error message: ${esc(ci.errorExcerpt ?? ci.reason)}`,
-    "",
-  ]);
 }
 
 function renderTable(headers: string[], rows: string[][]): string[] {
@@ -188,11 +125,7 @@ function renderTable(headers: string[], rows: string[][]): string[] {
   ];
 }
 
-function isSmokeTest(item: { tags?: string[] }): boolean {
-  return item.tags?.includes("smoke-test") ?? false;
-}
-
-async function loadBySpec<T>(
+async function loadLatestBySpec<T>(
   context: ReportCtx,
   entries: DataEntry[],
   spec: string,
@@ -219,47 +152,29 @@ async function loadBySpec<T>(
   return out;
 }
 
-function upsertItem(
-  map: Map<string, ItemSummary>,
-  repo: string,
-  itemType: string,
-  number?: number,
-): ItemSummary {
-  const itemKey = key(repo, itemType, number);
-  let item = map.get(itemKey);
-  if (!item) {
-    item = {
-      key: itemKey,
-      repo,
-      itemType,
-      number,
-      events: [],
-      ci: [],
-      sessions: [],
-      priorityScore: 0,
-      reasons: [],
-    };
-    map.set(itemKey, item);
-  }
-  return item;
+function daysSince(iso?: string | null): number {
+  if (!iso) return 9999;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return 9999;
+  return Math.max(0, Math.floor((Date.now() - d.getTime()) / 86_400_000));
 }
 
-function sortDescTime<T>(
-  items: T[],
-  getTime: (item: T) => string | undefined,
-): T[] {
-  return [...items].sort((a, b) =>
-    String(getTime(b) ?? "").localeCompare(String(getTime(a) ?? ""))
+function isFailing(ci: CiStatusSnapshot): boolean {
+  return ["failure", "cancelled", "timed_out", "action_required"].includes(
+    String(ci.conclusion ?? "").toLowerCase(),
   );
 }
 
-/** Global maintainer briefing report. */
+function prKey(repo: string, number: number): string {
+  return `${repo}#${number}`;
+}
+
 export const report = {
   name: "@evrardjp/maintainer-briefing",
   description:
-    "Daily maintainer briefing and PR/issue drill-down data from Swamp",
+    "Daily maintainer briefing from Swamp project activity snapshots and events",
   scope: "model" as const,
-  labels: ["maintainer", "briefing", "github", "pi", "agent"],
+  labels: ["maintainer", "briefing", "github", "activity", "project"],
 
   execute: async (context: ReportCtx) => {
     if (normalizedType(context.modelType) !== "@evrardjp/maintainer-activity") {
@@ -271,344 +186,162 @@ export const report = {
       context.modelId!,
     ) ?? [];
 
-    const events = sortDescTime(
-      await loadBySpec<LifecycleEvent>(context, entries, "lifecycleEvent"),
-      (event) => event.createdAt,
+    const includePrivate = context.globalArgs?.includePrivateEvents !== false;
+    const prs = await loadLatestBySpec<PrSnapshot>(
+      context,
+      entries,
+      "prSnapshot",
     );
-    const classifications = sortDescTime(
-      await loadBySpec<Classification>(context, entries, "classification"),
-      (classification) => classification.analyzedAt,
+    const issues = await loadLatestBySpec<IssueSnapshot>(
+      context,
+      entries,
+      "issueSnapshot",
     );
-    const ciAttention = sortDescTime(
-      await loadBySpec<CiAttention>(context, entries, "ciAttention"),
-      (ci) => ci.observedAt,
+    const ciStatuses = await loadLatestBySpec<CiStatusSnapshot>(
+      context,
+      entries,
+      "ciStatusSnapshot",
     );
-    const sessionLogs = sortDescTime(
-      await loadBySpec<SessionLog>(context, entries, "sessionLog"),
-      (session) => session.endedAt,
-    );
+    const events = (await loadLatestBySpec<ActivityEvent>(
+      context,
+      entries,
+      "activityEvent",
+    )).filter((e) => includePrivate || e.visibility !== "private")
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
-    const visibleEvents = events.filter((event) => !isSmokeTest(event));
-    const visibleClassifications = classifications.filter((classification) =>
-      !isSmokeTest(classification)
+    const openPrs = prs.filter((pr) =>
+      pr.state === "open" || pr.state === "OPEN"
     );
-    const visibleCiAttention = ciAttention.filter((ci) => !isSmokeTest(ci));
-    const visibleSessionLogs = sessionLogs.filter((session) =>
-      !isSmokeTest(session)
-    );
-
-    const itemMap = new Map<string, ItemSummary>();
-    for (const classification of visibleClassifications) {
-      const item = upsertItem(
-        itemMap,
-        classification.repo,
-        classification.itemType,
-        classification.number,
-      );
-      if (!item.latestClassification) {
-        item.latestClassification = classification;
-        item.title = classification.title;
-        item.url = classification.url;
-        item.priorityScore = classification.priorityScore;
-      }
-    }
-    for (const event of visibleEvents) {
-      upsertItem(itemMap, event.repo, event.itemType, event.number).events.push(
-        event,
-      );
-    }
-    for (const ci of visibleCiAttention) {
-      upsertItem(itemMap, ci.repo, ci.prNumber ? "pr" : "repo", ci.prNumber).ci
-        .push(ci);
-    }
-    for (const session of visibleSessionLogs) {
-      for (const ref of session.relatedItems ?? []) {
-        upsertItem(itemMap, ref.repo, ref.itemType, ref.number).sessions.push(
-          session,
-        );
-      }
+    const ciByPr = new Map<string, CiStatusSnapshot[]>();
+    for (const ci of ciStatuses) {
+      const key = prKey(ci.repo, ci.prNumber);
+      const list = ciByPr.get(key) ?? [];
+      list.push(ci);
+      ciByPr.set(key, list);
     }
 
-    const summaries = [...itemMap.values()];
-    for (const item of summaries) {
-      const c = item.latestClassification;
-      if (c?.securityRelevant) item.reasons.push("security-relevant");
-      if (
-        c?.blockerStatus &&
-        !["not_blocked", "unknown"].includes(c.blockerStatus)
-      ) item.reasons.push(c.blockerStatus);
-      if (c?.inactive) item.reasons.push(`inactive ${c.inactiveDays}d`);
-      if (item.ci.some((ci) => ci.requiresMaintainerAttention)) {
-        item.reasons.push("ci attention");
-      }
-      if (item.sessions.length > 0) item.reasons.push("agent-session context");
-      if (item.priorityScore === 0) {
-        item.priorityScore = c?.priorityScore ??
-          item.ci.length * 10 + item.events.length;
-      }
-    }
-
-    summaries.sort((a, b) =>
-      b.priorityScore - a.priorityScore || a.key.localeCompare(b.key)
+    const failingPrs = openPrs.filter((pr) =>
+      pr.checksState === "failure" ||
+      (ciByPr.get(prKey(pr.repo, pr.number)) ?? []).some(isFailing)
+    );
+    const changesRequested = openPrs.filter((pr) =>
+      pr.reviewDecision === "CHANGES_REQUESTED" ||
+      (pr.reviewersRequestingChanges?.length ?? 0) > 0
+    );
+    const conflicted = openPrs.filter((pr) => pr.mergeConflict === true);
+    const stale = openPrs.filter((pr) =>
+      daysSince(pr.lastConversationAt ?? pr.updatedAt) >= 14
+    );
+    const openIssues = issues.filter((issue) =>
+      issue.state === "open" || issue.state === "OPEN"
+    );
+    const staleIssues = openIssues.filter((issue) =>
+      daysSince(issue.lastConversationAt ?? issue.updatedAt) >= 30
     );
 
-    const noteworthy = summaries.filter((item) => item.reasons.length > 0)
-      .slice(0, 20);
-    const security = summaries.filter((item) =>
-      item.latestClassification?.securityRelevant
-    ).slice(0, 20);
-    const inactive = summaries.filter((item) =>
-      item.latestClassification?.inactive
-    );
-    const inactiveActiveInTwoDays = inactive.filter((item) =>
-      (item.latestClassification?.inactiveDays ?? 0) < 2
-    ).slice(0, 20);
-    const inactiveActiveThisWeek = inactive.filter((item) => {
-      const days = item.latestClassification?.inactiveDays ?? 0;
-      return days >= 2 && days < 7;
-    }).slice(0, 20);
-    const inactiveActiveLastWeek = inactive.filter((item) => {
-      const days = item.latestClassification?.inactiveDays ?? 0;
-      return days >= 7 && days < 14;
-    }).slice(0, 20);
-    const inactiveActiveLastMonth = inactive.filter((item) => {
-      const days = item.latestClassification?.inactiveDays ?? 0;
-      return days >= 14 && days < 30;
-    }).slice(0, 20);
-    const inactiveStale = inactive.filter((item) =>
-      (item.latestClassification?.inactiveDays ?? 0) >= 30
-    ).slice(0, 20);
-    const needsMyCodeFixes = summaries.filter((item) =>
-      item.latestClassification?.needsMyCodeFix
-    ).slice(0, 20);
-    const needsMyLongerReview = summaries.filter((item) =>
-      item.latestClassification?.readyForMaintainerReview &&
-      !item.latestClassification?.quickWin
-    ).slice(0, 20);
-    const quickWins = summaries.filter((item) =>
-      item.latestClassification?.quickWin &&
-      item.latestClassification?.readyForMaintainerReview
-    ).slice(0, 20);
-
-    const itemRows = (items: ItemSummary[]) =>
-      items.map((item) => [
-        esc(item.repo),
-        esc(`${item.itemType}${item.number ? ` #${item.number}` : ""}`),
-        esc(item.title ?? item.latestClassification?.title ?? ""),
-        String(item.priorityScore),
-        esc(item.reasons.join(", ")),
+    const prRows = (items: PrSnapshot[]) =>
+      items.map((pr) => [
+        esc(pr.repo),
+        esc(`#${pr.number}`),
+        esc(pr.title),
+        esc(pr.author ?? ""),
+        esc(pr.checksState ?? ""),
+        esc(pr.reviewDecision ?? ""),
+        esc((pr.reviewersRequestingChanges ?? []).join(", ")),
+        esc(daysSince(pr.lastConversationAt ?? pr.updatedAt)),
+        esc(pr.url ?? ""),
       ]);
-    const inactiveRecommendedAction = (item: ItemSummary): string => {
-      const c = item.latestClassification;
-      if (c?.checksState === "failure") return "Request the user to fix CI";
-      if (c?.reviewState === "changes_requested") {
-        return "Needs code change by author";
-      }
-      if (
-        c?.checksState === "success" && c?.reviewState !== "changes_requested"
-      ) {
-        return "Needs another review";
-      }
-      return c?.recommendedAction ?? "";
-    };
-    const inactiveOverallState = (item: ItemSummary): string => {
-      const c = item.latestClassification;
-      const state: string[] = [];
-      if (c?.reviewState === "changes_requested") {
-        state.push("has requested changes");
-      }
-      if (c?.checksState === "failure") state.push("CI is red");
-      if (
-        ["CONFLICTING", "conflicting", "dirty"].includes(c?.mergeable ?? "")
-      ) {
-        state.push("has merge conflicts");
-      }
-      if (state.length === 0) state.push("no requested changes / CI not red");
-      return state.join(", ");
-    };
-    const inactiveRows = (items: ItemSummary[]) =>
-      items.map((item) => [
-        esc(item.repo),
-        esc(`${item.itemType}${item.number ? ` #${item.number}` : ""}`),
-        esc(item.title ?? item.latestClassification?.title ?? ""),
-        esc(`${item.latestClassification?.inactiveDays ?? 0}d`),
-        esc(inactiveOverallState(item)),
-        esc(inactiveRecommendedAction(item)),
-      ]);
-    const reviewRows = (
-      items: ItemSummary[],
-      options: { includeRecommendedAction?: boolean } = {
-        includeRecommendedAction: true,
-      },
-    ) =>
-      items.map((item) => {
-        const c = item.latestClassification;
-        const row = [
-          esc(item.repo),
-          esc(`${item.itemType}${item.number ? ` #${item.number}` : ""}`),
-          esc(item.title ?? c?.title ?? ""),
-          esc(c?.state ?? ""),
-          esc(c?.author ?? ""),
-          esc(c?.checksState ?? ""),
-          esc(c?.lastCodeChangeAt ?? ""),
-          esc(c?.reviewedByMeSinceLastCodeChange ?? ""),
-          esc(c?.changedFiles ?? ""),
-          esc(((c?.additions ?? 0) + (c?.deletions ?? 0)) || ""),
-        ];
-        if (options.includeRecommendedAction) {
-          row.push(esc(c?.recommendedAction ?? ""));
-        }
-        return row;
-      });
+
+    const eventRows = events.slice(0, 30).map((event) => [
+      esc(event.createdAt),
+      esc(event.visibility),
+      esc(event.source),
+      esc(event.repo),
+      esc(
+        `${event.subjectType}${
+          event.subjectNumber ? ` #${event.subjectNumber}` : ""
+        }`,
+      ),
+      esc(event.actor),
+      esc(event.summary),
+    ]);
 
     const modelName = context.definition?.name ?? context.modelId ??
       "maintainer-activity";
     const lines = [
       `# Maintainer Briefing — ${modelName}`,
       "",
-      `Items: **${summaries.length}** · Events: **${visibleEvents.length}** · Classifications: **${visibleClassifications.length}** · CI attention: **${visibleCiAttention.length}** · Session logs: **${visibleSessionLogs.length}**`,
+      `PR snapshots: **${prs.length}** · Open PRs: **${openPrs.length}** · Issue snapshots: **${issues.length}** · Activity events: **${events.length}** · CI statuses: **${ciStatuses.length}**`,
       "",
-      "## Needs my code fixes",
+      "## Open PRs with failing CI",
       ...renderTable([
         "Repo",
-        "Item",
+        "PR",
         "Title",
-        "State",
         "Author",
         "CI",
-        "Last code change",
-        "Reviewed by me since code change",
-        "Files",
-        "Lines",
-        "Recommended action",
-      ], reviewRows(needsMyCodeFixes)),
+        "Review",
+        "Changes requested by",
+        "Idle days",
+        "URL",
+      ], prRows(failingPrs)),
       "",
-      "## Security relevant",
+      "## Open PRs with requested changes",
       ...renderTable([
         "Repo",
-        "Item",
+        "PR",
         "Title",
-        "Score",
-        "Reasons",
-      ], itemRows(security)),
-      "",
-      "## Quick review wins",
-      ...renderTable([
-        "Repo",
-        "Item",
-        "Title",
-        "State",
         "Author",
         "CI",
-        "Last code change",
-        "Reviewed by me since code change",
-        "Files",
-        "Lines",
-        "Recommended action",
-      ], reviewRows(quickWins)),
+        "Review",
+        "Changes requested by",
+        "Idle days",
+        "URL",
+      ], prRows(changesRequested)),
       "",
-      "## Needs my (longer) review",
+      "## Open PRs with merge conflicts",
       ...renderTable([
         "Repo",
-        "Item",
+        "PR",
         "Title",
-        "State",
         "Author",
         "CI",
-        "Last code change",
-        "Reviewed by me since code change",
-        "Files",
-        "Lines",
-      ], reviewRows(needsMyLongerReview, { includeRecommendedAction: false })),
+        "Review",
+        "Changes requested by",
+        "Idle days",
+        "URL",
+      ], prRows(conflicted)),
       "",
-      "## Active in the two days",
+      "## Stale open PRs",
       ...renderTable([
         "Repo",
-        "Item",
+        "PR",
         "Title",
-        "Inactive",
-        "Overall state",
-        "Recommended action",
-      ], inactiveRows(inactiveActiveInTwoDays)),
+        "Author",
+        "CI",
+        "Review",
+        "Changes requested by",
+        "Idle days",
+        "URL",
+      ], prRows(stale)),
       "",
-      "## Active this week",
-      ...renderTable([
-        "Repo",
-        "Item",
-        "Title",
-        "Inactive",
-        "Overall state",
-        "Recommended action",
-      ], inactiveRows(inactiveActiveThisWeek)),
-      "",
-      "## Active last week",
-      ...renderTable([
-        "Repo",
-        "Item",
-        "Title",
-        "Inactive",
-        "Overall state",
-        "Recommended action",
-      ], inactiveRows(inactiveActiveLastWeek)),
-      "",
-      "## Active last month",
-      ...renderTable([
-        "Repo",
-        "Item",
-        "Title",
-        "Inactive",
-        "Overall state",
-        "Recommended action",
-      ], inactiveRows(inactiveActiveLastMonth)),
-      "",
-      "## Stale",
-      ...renderTable([
-        "Repo",
-        "Item",
-        "Title",
-        "Inactive",
-        "Overall state",
-        "Recommended action",
-      ], inactiveRows(inactiveStale)),
-      "",
-      "## Noteworthy",
-      ...renderTable([
-        "Repo",
-        "Item",
-        "Title",
-        "Score",
-        "Reasons",
-      ], itemRows(noteworthy)),
-      "",
-      "## CI Attention",
-      ...renderCiAttentionSections(visibleCiAttention.slice(0, 20)),
-      "",
-      "## Recent Lifecycle / Agent Events",
+      "## Stale open issues",
       ...renderTable(
-        ["Time", "Source", "Repo", "Item", "Actor", "Summary"],
-        visibleEvents.slice(0, 30).map((event) => [
-          esc(event.createdAt),
-          esc(event.source),
-          esc(event.repo),
-          esc(`${event.itemType}${event.number ? ` #${event.number}` : ""}`),
-          esc(event.actor),
-          esc(event.summary),
+        ["Repo", "Issue", "Title", "Author", "Idle days", "URL"],
+        staleIssues.map((issue) => [
+          esc(issue.repo),
+          esc(`#${issue.number}`),
+          esc(issue.title),
+          esc(issue.author ?? ""),
+          esc(daysSince(issue.lastConversationAt ?? issue.updatedAt)),
+          esc(issue.url ?? ""),
         ]),
       ),
       "",
-      "## Recent Session Logs",
+      "## Recent activity events",
       ...renderTable(
-        ["Ended", "Session", "Related", "Summary"],
-        visibleSessionLogs.slice(0, 20).map((session) => [
-          esc(session.endedAt),
-          esc(session.sessionId),
-          esc(
-            (session.relatedItems ?? []).map((i) =>
-              `${i.repo} ${i.itemType}${i.number ? ` #${i.number}` : ""}`
-            ).join(", "),
-          ),
-          esc(session.summary),
-        ]),
+        ["Time", "Visibility", "Source", "Repo", "Subject", "Actor", "Summary"],
+        eventRows,
       ),
     ];
 
@@ -617,27 +350,19 @@ export const report = {
       json: {
         generatedAt: new Date().toISOString(),
         counts: {
-          items: summaries.length,
-          events: visibleEvents.length,
-          classifications: visibleClassifications.length,
-          ciAttention: visibleCiAttention.length,
-          sessionLogs: visibleSessionLogs.length,
+          prs: prs.length,
+          openPrs: openPrs.length,
+          issues: issues.length,
+          openIssues: openIssues.length,
+          events: events.length,
+          ciStatuses: ciStatuses.length,
         },
-        noteworthy,
-        security,
-        inactive,
-        inactiveActiveInTwoDays,
-        inactiveActiveThisWeek,
-        inactiveActiveLastWeek,
-        inactiveActiveLastMonth,
-        inactiveStale,
-        needsMyCodeFixes,
-        needsMyLongerReview,
-        quickWins,
-        ciAttention: visibleCiAttention,
-        recentEvents: visibleEvents.slice(0, 30),
-        recentSessionLogs: visibleSessionLogs.slice(0, 20),
-        items: summaries,
+        failingPrs,
+        changesRequested,
+        conflicted,
+        stalePrs: stale,
+        staleIssues,
+        recentEvents: events.slice(0, 30),
       },
     };
   },

@@ -1,16 +1,18 @@
 manifestVersion: 1
 name: "@evrardjp/ssh-ca"
-version: "2026.06.25.1"
+version: "2026.07.01.2"
 description: >-
   Swamp-native OpenSSH certificate authority lifecycle management for local labs:
-  root and subordinate CA keys, host/user certificate issuance, trust bundle
-  rendering, rotation, revocation metadata, and reconciliation.
+  one OpenSSH CA keypair per model, host/user certificate issuance,
+  @cert-authority/TrustedUserCAKeys generation, KRL generation, revocation data,
+  and inventory reporting.
 repository: "https://github.com/evrardjp/swamp-extensions"
 paths:
   base: manifest
 models:
   - models/ssh_ca.ts
-reports: []
+reports:
+  - reports/ssh_ca_inventory.ts
 workflows: []
 vaults: []
 drivers: []

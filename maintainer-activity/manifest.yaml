@@ -1,10 +1,10 @@
 manifestVersion: 1
 name: "@evrardjp/maintainer-activity"
-version: "2026.06.25.1"
+version: "2026.07.02.1"
 description: >-
-  Durable maintainer activity ledger and briefing reports for GitHub PR/issue
-  lifecycle events, CI attention, classifications, and distilled Pi agent-session
-  findings.
+  Swamp-backed GitHub project activity database and maintainer briefing reports:
+  repository/issue/PR/CI snapshots, chronological public/private activity events,
+  artifacts, PR dossiers, and private/manual/agent maintainer notes.
 repository: "https://github.com/evrardjp/swamp-extensions"
 paths:
   base: manifest
@@ -29,4 +29,6 @@ labels:
   - lifecycle
   - ci
   - reporting
+  - project-activity
+  - pr-dossier
 dependencies: []

@@ -1,53 +1,26 @@
-import {
-  assert,
-  assertEquals,
-  assertRejects,
-  assertStringIncludes,
-} from "jsr:@std/assert@1";
+import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 import { addDuration, model, serialFor } from "./ssh_ca.ts";
 
 type Stored = Map<string, Record<string, unknown>>;
-
-type TestGlobalArgs = {
-  caName: string;
-  vaultName: string;
-  hostSubCas: Array<{ name: string; usage: "host" }>;
-  userSubCas: Array<{ name: string; usage: "user" }>;
-  keyAlgorithm: "ed25519";
-  defaultHostValidity: string;
-  defaultUserValidity: string;
-  rootValidity: string;
-  hostSubCaValidity: string;
-  userSubCaValidity: string;
-  allowedPrincipals: string[];
-  serialStrategy: "monotonic";
-  metadataLabels: Record<string, string>;
-  sshKeygenBinary: string;
-};
 
 function testContext(stored: Stored = new Map()) {
   const writes: Array<
     { specName: string; name: string; data: Record<string, unknown> }
   > = [];
+  const secrets = new Map<string, string>();
   return {
     writes,
+    secrets,
     context: {
       globalArgs: {
         caName: "test-ca",
         vaultName: "test-vault",
-        hostSubCas: [{ name: "host-ca", usage: "host" }],
-        userSubCas: [{ name: "user-ca", usage: "user" }],
         keyAlgorithm: "ed25519",
-        defaultHostValidity: "30d",
-        defaultUserValidity: "24h",
-        rootValidity: "1y",
-        hostSubCaValidity: "90d",
-        userSubCaValidity: "30d",
-        allowedPrincipals: [],
+        defaultValidity: "30d",
         serialStrategy: "monotonic",
         metadataLabels: { test: "true" },
         sshKeygenBinary: "ssh-keygen",
-      } as TestGlobalArgs,
+      },
       logger: { info: () => {} },
       writeResource: async (
         specName: string,
@@ -59,6 +32,16 @@ function testContext(stored: Stored = new Map()) {
         return { name };
       },
       readResource: async (name: string) => stored.get(name) ?? null,
+      putSecret: async (vaultName: string, key: string, value: string) => {
+        secrets.set(`${vaultName}/${key}`, value);
+      },
+      readSecret: async (vaultName: string, key: string) => {
+        const value = secrets.get(`${vaultName}/${key}`);
+        if (value === undefined) {
+          throw new Error(`missing secret ${vaultName}/${key}`);
+        }
+        return value;
+      },
     },
   };
 }
@@ -123,96 +106,91 @@ Deno.test("monotonic serials are stable for the same seed", () => {
   );
 });
 
-Deno.test("init-root and ensure-subca create vaulted-sensitive CA metadata", async () => {
-  const { context, writes } = testContext();
-  await runMethod("init-root", { force: false }, context);
-  await runMethod("ensure-subca", {
-    name: "host-ca",
-    usage: "host",
-    force: false,
-  }, context);
-
-  assertEquals(writes[0].specName, "root");
-  assertStringIncludes(String(writes[0].data.publicKey), "ssh-ed25519");
+Deno.test("generate-keypair stores private key and passphrase in vault", async () => {
+  const { context, writes, secrets } = testContext();
+  await runMethod("generate-keypair", { force: false }, context);
+  const ca = writes.find((w) => w.specName === "ca" && w.name === "ca-current");
+  assert(ca);
+  assertStringIncludes(String(ca.data.publicKey), "ssh-ed25519");
   assertStringIncludes(
-    String(writes[0].data.privateKeyMaterial),
-    "BEGIN OPENSSH PRIVATE KEY",
+    String(ca.data.privateKeyVaultRef),
+    "vault.get('test-vault'",
   );
-  assertEquals(writes[1].specName, "subca");
-  assertEquals(
-    writes[1].data.parentRootFingerprint,
-    writes[0].data.fingerprint,
-  );
+  assert(secrets.has("test-vault/ssh-ca-test-ca-privateKey"));
+  assert(secrets.has("test-vault/ssh-ca-test-ca-passphrase"));
 });
 
-Deno.test("issue-host-cert signs a host public key and records public certificate metadata", async () => {
+Deno.test("issue-host-certificate signs with -h and stores certificate data", async () => {
   const { context, writes } = testContext();
-  await runMethod("init-root", { force: false }, context);
-  await runMethod("ensure-subca", {
-    name: "host-ca",
-    usage: "host",
-    force: false,
-  }, context);
-  const hostPublicKey = await generateSubjectPublicKey();
-
-  await runMethod("issue-host-cert", {
-    hostPublicKey,
+  await runMethod("generate-keypair", { force: false }, context);
+  const publicKey = await generateSubjectPublicKey();
+  await runMethod("issue-host-certificate", {
+    publicKey,
     principals: ["gerrit.local"],
-    subCaName: "host-ca",
-    keyId: "host-gerrit-local",
+    keyId: "gerrit-host",
     serial: 42,
   }, context);
-
-  const certWrite = writes.find((w) => w.specName === "hostcert");
-  assert(certWrite);
-  assertStringIncludes(
-    String(certWrite.data.certificate),
-    "-cert-v01@openssh.com",
-  );
-  assertEquals(certWrite.data.serial, 42);
-  assertEquals(certWrite.data.principals, ["gerrit.local"]);
+  const cert = writes.find((w) => w.specName === "certificate");
+  assert(cert);
+  assertEquals(cert.data.certificateType, "host");
+  assertEquals(cert.data.serial, 42);
+  assertStringIncludes(String(cert.data.certificate), "-cert-v01@openssh.com");
 });
 
-Deno.test("render-client-trust emits known_hosts CA marker lines", async () => {
+Deno.test("issue-user-certificate can store certificate in vault only", async () => {
+  const { context, writes, secrets } = testContext();
+  await runMethod("generate-keypair", { force: false }, context);
+  const publicKey = await generateSubjectPublicKey();
+  await runMethod("issue-user-certificate", {
+    publicKey,
+    principals: ["alice"],
+    keyId: "alice-login",
+    serial: 7,
+    outputTarget: "vault",
+  }, context);
+  const cert = writes.find((w) => w.specName === "certificate");
+  assert(cert);
+  assertEquals(cert.data.certificate, undefined);
+  assertStringIncludes(
+    String(cert.data.certificateVaultRef),
+    "vault.get('test-vault'",
+  );
+  assert(secrets.has("test-vault/ssh-ca-test-ca-cert-alice-login"));
+});
+
+Deno.test("generate-cert-authority emits a single @cert-authority line", async () => {
   const { context, writes } = testContext();
-  await runMethod("init-root", { force: false }, context);
-  await runMethod("ensure-subca", {
-    name: "host-ca",
-    usage: "host",
-    force: false,
-  }, context);
-  await runMethod("render-client-trust", {
-    hostPattern: "gerrit.local",
-    subCaNames: ["host-ca"],
-  }, context);
-
-  const trust = writes.find((w) => w.specName === "clienttrust");
-  assert(trust);
+  await runMethod("generate-keypair", { force: false }, context);
+  await runMethod(
+    "generate-cert-authority",
+    { hostPattern: "*.local" },
+    context,
+  );
+  const caLine = writes.find((w) => w.specName === "certificateauthority");
+  assert(caLine);
   assertStringIncludes(
-    String(trust.data.knownHosts),
-    "@cert-authority gerrit.local ssh-ed25519",
+    String(caLine.data.certAuthorityLine),
+    "@cert-authority *.local ssh-ed25519",
   );
 });
 
-Deno.test("allowed principal policy fails closed", async () => {
-  const { context } = testContext();
-  context.globalArgs.allowedPrincipals = ["allowed.local"];
-  await runMethod("init-root", { force: false }, context);
-  await runMethod("ensure-subca", {
-    name: "host-ca",
-    usage: "host",
-    force: false,
-  }, context);
-  const hostPublicKey = await generateSubjectPublicKey();
+Deno.test("generate-trustedusercakeys emits CA public key material", async () => {
+  const { context, writes } = testContext();
+  await runMethod("generate-keypair", { force: false }, context);
+  await runMethod("generate-trustedusercakeys", {}, context);
+  const trusted = writes.find((w) => w.specName === "trustedusercakeys");
+  assert(trusted);
+  assertStringIncludes(String(trusted.data.trustedUserCAKeys), "ssh-ed25519");
+});
 
-  await assertRejects(
-    () =>
-      runMethod("issue-host-cert", {
-        hostPublicKey,
-        principals: ["denied.local"],
-        subCaName: "host-ca",
-      }, context),
-    Error,
-    "not allowed",
-  );
+Deno.test("generate-revocation-list supports serial and key ID entries", async () => {
+  const { context, writes } = testContext();
+  await runMethod("generate-keypair", { force: false }, context);
+  await runMethod("generate-revocation-list", {
+    entries: [{ serial: 7 }, { keyId: "alice-login" }],
+  }, context);
+  const krl = writes.find((w) => w.specName === "keyrevocationlist");
+  assert(krl);
+  assertEquals(krl.data.krlFormat, "openssh-krl");
+  assert(String(krl.data.krlBase64).length > 0);
 });

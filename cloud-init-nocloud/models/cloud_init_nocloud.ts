@@ -222,7 +222,7 @@ const IsoSummarySchema = z.object({
 /** Generic cloud-init NoCloud ISO generator. */
 export const model = {
   type: "@evrardjp/cloud-init-nocloud",
-  version: "2026.06.25.1",
+  version: "2026.06.29.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     isoSummary: {

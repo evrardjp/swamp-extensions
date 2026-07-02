@@ -1,239 +1,128 @@
 # @evrardjp/maintainer-activity
 
-Durable maintainer activity ledger and briefing reports for Swamp.
+Swamp-backed GitHub project activity database and maintainer briefing reports.
 
-This extension stores the curated operational state a maintainer wants to see
-again tomorrow: GitHub PR/issue lifecycle events, CI failures needing attention,
-classifications, and distilled Pi agent-session findings. It complements
-`@evrardjp/pi-session-telemetry`: Pi telemetry is the high-volume raw stream;
-maintainer activity is the low-volume human-useful ledger.
+This extension stores durable project activity for one GitHub repository or
+closely related project scope per Swamp model instance. It keeps both:
 
-## Architecture
+1. **Snapshots** — current repository, issue, PR, changed-file, fork, and CI
+   state for dashboards/current-state reports.
+2. **Activity events** — chronological facts from GitHub and private/manual/agent
+   sources for timelines and historical reports.
 
-```text
-GitHub PR feed models             Pi session telemetry / agent conclusions
-  -> ingest_github_pr_feed          -> record_pi_session_finding
-              \                    /
-               -> @evrardjp/maintainer-activity model
-                    -> Swamp data resources
-                    -> @evrardjp/maintainer-briefing report
-```
+## Model and report types
 
-`maintainer-activity` and `maintainer-briefing` are different Swamp concepts:
+- Model: `@evrardjp/maintainer-activity`
+- Report: `@evrardjp/maintainer-briefing`
 
-- `@evrardjp/maintainer-activity` is the **model type**. A model instance such as
-  `maintainer-activity` owns the durable ledger and exposes methods that ingest
-  or record maintainer facts.
-- `@evrardjp/maintainer-briefing` is a **report** attached to that model. It does
-  not fetch GitHub itself; it reads the model's stored Swamp data and renders a
-  markdown/JSON view.
-
-In short: **model = data + methods**, **report = view over that data**. Refresh
-feed models and ingest into `maintainer-activity` before reading the report when
-you need a current daily briefing.
-
-The model intentionally stores curated records, not every raw event. Use it for
-answers to questions like:
-
-- What requires maintainer attention today?
-- Which PRs/issues are blocked?
-- Which CI failures need triage?
-- What did an agent session conclude about this item?
-
-## Swamp model
-
-Model type: `@evrardjp/maintainer-activity`
-
-Recommended instance name:
+Recommended pattern: create a separate model instance for each project/repo:
 
 ```bash
-swamp model create @evrardjp/maintainer-activity maintainer-activity
+swamp model create @evrardjp/maintainer-activity eso-external-secrets-activity \
+  --global-arg owner=external-secrets \
+  --global-arg repo=external-secrets \
+  --global-arg projectName="External Secrets Operator" \
+  --global-arg "githubToken=\${{ vault.get('local', 'GITHUB_TOKEN') }}"
 ```
 
-## Generated Swamp data
+## GitHub token requirements
 
-The model writes these resource specs:
+For public repositories, a fine-grained token with read-only repository access is
+enough for most ingestion:
 
-- `lifecycleEvent` — chronological event about a repo, issue, PR, project, or
-  session. Sources include `github`, `swamp`, `pi-agent-session`, `review-tool`,
-  and `manual`.
-- `classification` — current analysis of an issue/PR: blocker status,
-  difficulty, review effort, security relevance, inactivity, priority score, and
-  recommended action.
-- `ciAttention` — CI/workflow state that likely requires maintainer action.
-- `sessionLog` — optional summarized or full agent-session context tied to one
-  or more work items.
+| Capability | GitHub access needed |
+|---|---|
+| Repository metadata | Metadata: read |
+| Issues and issue comments | Issues: read |
+| Pull requests, reviews, review comments, changed files | Pull requests: read |
+| Checks / CI statuses | Checks: read; Actions: read if workflow runs/logs are ingested |
+| Forks | Metadata: read |
 
-Example `lifecycleEvent`:
+For private repositories, grant equivalent read access to that private
+repository.
 
-```json
-{
-  "repo": "owner/repo",
-  "itemType": "pr",
-  "number": 123,
-  "source": "pi-agent-session",
-  "actor": "pi",
-  "eventType": "maintainer-finding",
-  "summary": "Agent concluded CI failure likely needs maintainer triage",
-  "relatedSessionId": "session-example",
-  "tags": ["pi-session-telemetry"]
-}
-```
+Classic PAT equivalents:
 
-Example `classification`:
+- public-only: `public_repo` is usually sufficient;
+- private repositories: `repo` read access is usually required;
+- Actions logs/details may require Actions read access depending on API used.
 
-```json
-{
-  "repo": "owner/repo",
-  "itemType": "pr",
-  "number": 123,
-  "blockerStatus": "ci_blocked",
-  "blockerConfidence": 0.8,
-  "securityRelevant": false,
-  "inactive": false,
-  "difficulty": "unknown",
-  "reviewEffort": "unknown",
-  "priorityScore": 60,
-  "recommendedAction": "Inspect failing checks and decide whether maintainer action is needed"
-}
-```
+The model stores GitHub content in Swamp data, including comments, review
+bodies, file metadata, patch excerpts, CI details, and private maintainer/agent
+notes. Treat the Swamp repo/datastore according to the sensitivity of the
+repositories being ingested.
 
-## Bridge from Pi session telemetry
+## Data resources
 
-Use `@evrardjp/pi-session-telemetry` to capture normal Pi activity. When a Pi
-session yields a useful maintainer conclusion, bridge only the distilled finding
-into this model with `record_pi_session_finding`.
+Current-state resources:
+
+- `repoSnapshot`
+- `forkSnapshot`
+- `issueSnapshot`
+- `prSnapshot`
+- `prFileSnapshot`
+- `ciStatusSnapshot`
+
+Timeline/artifact resources:
+
+- `activityEvent` — public/private chronological timeline entries
+- `artifact` — large file data such as patches, logs, transcripts
+- `artifactIndex` — searchable metadata for artifacts
+- `prReport` — rendered PR dossier markdown and source metadata
+
+## Methods
+
+GitHub sync methods:
 
 ```bash
-swamp model method run maintainer-activity record_pi_session_finding \
-  --input 'finding:json={
-    "sessionId":"session-example",
-    "repo":"owner/repo",
-    "itemType":"pr",
-    "number":123,
-    "summary":"Agent concluded the failing e2e job is probably a flaky setup issue, but maintainer must decide whether it blocks merge",
-    "body":"Optional short detail. Do not paste raw private chat unless explicitly wanted.",
-    "recordSessionLog":true,
-    "sessionSummary":"Investigated PR #123 CI failure and identified likely flaky setup triage."
-  }'
+swamp model method run eso-external-secrets-activity sync_github_repo --input includeForkIndex=true
+swamp model method run eso-external-secrets-activity sync_github_fork_index
+swamp model method run eso-external-secrets-activity sync_github_recent_activity
+swamp model method run eso-external-secrets-activity sync_github_prs --input state=open
+swamp model method run eso-external-secrets-activity sync_github_issues --input state=open
+swamp model method run eso-external-secrets-activity sync_github_backfill --input since=2026-01-01 --input until=2026-07-01
 ```
 
-This writes:
-
-1. a `lifecycleEvent` with `source: "pi-agent-session"`
-2. `relatedSessionId` pointing back to the Pi telemetry session
-3. optionally a `sessionLog` linked to the repo/PR/issue
-
-Use this bridge instead of dumping all Pi telemetry into daily reports.
-
-## GitHub PR feed ingestion
-
-If `@mgreten/github-pr-feed` does not have cached events, refresh it first:
-
-```bash                                                                                                                                                                                                                                                                                                                                            
-swamp model method run gh-pr-feed-eso-eso refresh                                                                                                                                                                                                                                                                                                
-```    
-
-If a `@mgreten/github-pr-feed` model has cached PR events and snapshots, ingest
-it into the maintainer ledger:
+Manual/private records:
 
 ```bash
-swamp model method run maintainer-activity ingest_github_pr_feed \
-  --input feedModelId=<github-pr-feed-model-id> \
-  --input repo=owner/repo \
-  --input limit=5000 \
-  --input includeBots=true \                                                                                                                                                                                                                                                                                                                     
-  --input 'personalGithubHandles:json=["evrardjp","evrardj-roche"]'                                                                                                                                                                                                                                                                              
+swamp model method run eso-external-secrets-activity record_activity --stdin
+swamp model method run eso-external-secrets-activity record_artifact --stdin
 ```
 
-This creates:
-
-- `lifecycleEvent` entries for PR feed events
-- `ciAttention` entries for check failures
-- `classification` entries from latest PR snapshots
-
-## Manual records
-
-Record a lifecycle event:
+Render a stored-data-only PR dossier:
 
 ```bash
-swamp model method run maintainer-activity record_event \
-  --input 'event:json={
-    "repo":"owner/repo",
-    "itemType":"pr",
-    "number":123,
-    "source":"manual",
-    "actor":"maintainer",
-    "eventType":"decision",
-    "summary":"Do not merge until author answers the API compatibility question"
-  }'
+swamp model method run eso-external-secrets-activity render_pr_report \
+  --input prNumber=6530 \
+  --input includePrivate=true
+swamp data get eso-external-secrets-activity pr-report-external-secrets-external-secrets-6530 --json
 ```
 
-Record CI attention:
+## Fork model
+
+`sync_github_fork_index` records fork metadata in the current model only. It does
+**not** ingest full fork issue/PR/comment/review/file activity. If an important
+fork needs full tracking, create a separate `@evrardjp/maintainer-activity`
+model instance with `owner`/`repo` set to that fork.
+
+Cross-repository reports that aggregate upstream plus fork models must document
+their scope and deduplication policy, especially for commits and changed files
+that can appear in both a fork and the upstream PR.
+
+## Maintainer briefing report
+
+`@evrardjp/maintainer-briefing` is a model-scope report over stored Swamp data.
+It does not fetch GitHub itself.
 
 ```bash
-swamp model method run maintainer-activity record_ci_attention \
-  --input 'ci:json={
-    "repo":"owner/repo",
-    "prNumber":123,
-    "workflow":"e2e",
-    "conclusion":"failure",
-    "reason":"Repeated failure likely requires maintainer triage",
-    "requiresMaintainerAttention":true
-  }'
+swamp report get @evrardjp/maintainer-briefing --model maintainer-activity --markdown
+swamp report get @evrardjp/maintainer-briefing --model maintainer-activity --json
 ```
 
-## Report
-
-### Cached report
-The daily briefing is a report over the `maintainer-activity` model data.
-
-You can produce the cached report using:
-
-```bash                                                                                                                                                                                                                                                                                                                                            
-swamp report get @evrardjp/maintainer-briefing \                                                                                                                                                                                                                                                                                                 
-  --model maintainer-activity \                                                                                                                                                                                                                                                                                                                  
-  --markdown                                                                                                                                                                                                                                                                                                                                     
-```    
-
-### Refreshed/today's daily briefing (example: External-Secrets)
-
-For an up-to-date daily briefing, refresh the relevant GitHub PR feed first,
-then ingest it, then read the report:
-
-```bash
-#change directory to your swamp repo first
-swamp model method run gh-pr-feed-eso-eso refresh                                                                                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                                                                                                                                 
-swamp model method run maintainer-activity ingest_github_pr_feed \                                                                                                                                                                                                                                                                               
-  --input feedModelId=0e829358-6f1c-4172-8a09-2ec9f8923a39 \                                                                                                                                                                                                                                                                                     
-  --input repo=external-secrets/external-secrets \                                                                                                                                                                                                                                                                                               
-  --input limit=5000 \                                                                                                                                                                                                                                                                                                                           
-  --input includeBots=true \                                                                                                                                                                                                                                                                                                                     
-  --input 'personalGithubHandles:json=["evrardjp","evrardj-roche"]'                                                                                                                                                                                                                                                                              
-                                                                                                                                                                                                                                                                                                                                                 
-swamp report get @evrardjp/maintainer-briefing \                                                                                                                                                                                                                                                                                                 
-  --model maintainer-activity \                                                                                                                                                                                                                                                                                                                  
-  --markdown                                                                                                                                                                                                                                                                                                                                     
-```    
-
-Use `swamp report get ... --json` when an agent needs to filter or drill down
-programmatically. Only use the stored report without refreshing when you
-explicitly want cached data.
-
-The report currently surfaces:
-
-- urgent/noteworthy work items
-- security-relevant items
-- blocked or needs-input items
-- CI attention
-- inactive items
-- recent lifecycle/agent events
-- recent session logs
-
-It is a maintainer briefing view, not a full PR review queue yet. Planned useful
-additions include sections for "needs my code fixes", "ready for maintainer
-review", "quick wins", "needs maintainer decision", and "author action needed".
+The current report reads `prSnapshot`, `issueSnapshot`, `ciStatusSnapshot`, and
+`activityEvent` resources. It highlights failing CI, requested changes, merge
+conflicts, stale PRs/issues, and recent public/private activity events.
 
 ## Bundled maintainer skill
 
@@ -244,19 +133,17 @@ maintainer-daily-briefing/SKILL.md
 ```
 
 It tells agents how to fetch `@evrardjp/maintainer-briefing`, drill into a
-PR/issue, and record durable conclusions through `record_pi_session_finding`.
-It is included as an extension additional file for now. Registering it as a
-first-class Swamp `skills:` manifest entry currently requires a Swamp repo with a
-supported enrolled skill tool; this repo is primarily using Pi, so keeping the
-skill file alongside the extension avoids breaking extension validation while
-still keeping the procedure versioned with the model/report it operates.
+PR/issue, and record durable conclusions through `record_activity` and
+`record_artifact`.
 
 ## Development checks
 
 ```bash
 deno check models/maintainer_activity.ts reports/maintainer_briefing.ts
-swamp extension fmt manifest.yaml --check --repo-dir /path/to/swamp-repo
-TMPDIR=/tmp swamp extension push manifest.yaml --dry-run --json --repo-dir /path/to/swamp-repo
+deno test models/maintainer_activity_test.ts reports/maintainer_briefing_test.ts
+swamp extension fmt manifest.yaml --check --json
+swamp extension quality manifest.yaml --json
+swamp extension push manifest.yaml --dry-run --json
 ```
 
 Never publish without explicit maintainer approval.

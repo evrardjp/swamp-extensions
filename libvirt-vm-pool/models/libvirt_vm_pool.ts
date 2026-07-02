@@ -465,7 +465,7 @@ async function executePool(context: PoolContext, apply: boolean) {
 /** Desired-state reconciler for a local libvirt VM pool. Produces per-VM Swamp data for downstream SSH/config models. */
 export const model = {
   type: "@evrardjp/libvirt-vm-pool",
-  version: "2026.06.17.1",
+  version: "2026.06.29.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     vm: {

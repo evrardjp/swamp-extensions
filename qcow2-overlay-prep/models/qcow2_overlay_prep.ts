@@ -87,7 +87,7 @@ async function downloadFile(url: string, path: string): Promise<void> {
 /** Generic qcow2 overlay preparation model. */
 export const model = {
   type: "@evrardjp/qcow2-overlay-prep",
-  version: "2026.06.25.1",
+  version: "2026.06.29.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     prep: {

@@ -1,10 +1,9 @@
 /**
- * OpenSSH certificate authority lifecycle for Swamp-managed local labs.
+ * Strict OpenSSH CA lifecycle for Swamp-managed local labs.
  *
- * The model intentionally shells out only to `ssh-keygen` and persists private
- * key material only through fields marked sensitive, allowing Swamp to vault the
- * secret values while ordinary resources expose public keys, certificates,
- * fingerprints, serials, principals, and audit metadata.
+ * One model instance represents one OpenSSH CA keypair. There is no root CA or
+ * intermediate hierarchy because OpenSSH verifies certificates directly against
+ * a trusted CA public key. This model shells out only to `ssh-keygen`.
  *
  * @module
  */
@@ -16,6 +15,7 @@ const DenoFs = {
   remove: (path: string, opts?: { recursive?: boolean }) =>
     Deno.remove(path, opts).catch(() => {}),
   readTextFile: (path: string) => Deno.readTextFile(path),
+  readFile: (path: string) => Deno.readFile(path),
   writeTextFile: (path: string, data: string, opts?: { mode?: number }) =>
     Deno.writeTextFile(path, data, opts),
   chmod: (path: string, mode: number) => Deno.chmod(path, mode),
@@ -27,54 +27,33 @@ const IsoDateTimeSchema = z.string().refine(
     message: "Expected an ISO-8601 timestamp",
   },
 );
-
 const DurationSchema = z.string().regex(
   /^\d+(m|h|d|w|mo|y)$/,
   "Use a duration like 30m, 24h, 30d, 7w, 3mo, or 1y",
 );
-
 const KeyAlgorithmSchema = z.enum(["ed25519", "rsa", "ecdsa"]);
-const UsageSchema = z.enum(["host", "user"]);
-const CaStateSchema = z.enum([
-  "active",
-  "deprecated",
-  "deactivated",
-  "revoked",
-]);
+const CertificateTypeSchema = z.enum(["host", "user"]);
+const OutputTargetSchema = z.enum(["data", "vault", "both"]);
 const SerialStrategySchema = z.enum(["monotonic", "random"]);
 
-const SubCaDefinitionSchema = z.object({
-  name: z.string().min(1),
-  usage: UsageSchema,
-  validity: DurationSchema.optional(),
-  principals: z.array(z.string()).default([]),
+const VaultRefSchema = z.object({
+  vaultName: z.string().min(1),
+  key: z.string().min(1),
 });
 
 const GlobalArgsSchema = z.object({
-  caName: z.string().min(1).describe("Logical SSH CA name"),
-  vaultName: z.string().min(1).optional().describe(
-    "Swamp vault expected to hold sensitive output fields",
+  caName: z.string().min(1).describe("Logical OpenSSH CA name"),
+  vaultName: z.string().min(1).describe(
+    "Swamp vault for private keys, passphrases, and optional certificates",
   ),
-  rootKeyRef: z.string().optional().describe(
-    "Optional existing root key vault reference",
-  ),
-  hostSubCas: z.array(
-    SubCaDefinitionSchema.omit({ usage: true }).extend({
-      usage: z.literal("host").default("host"),
-    }),
-  ).default([]),
-  userSubCas: z.array(
-    SubCaDefinitionSchema.omit({ usage: true }).extend({
-      usage: z.literal("user").default("user"),
-    }),
-  ).default([]),
   keyAlgorithm: KeyAlgorithmSchema.default("ed25519"),
-  defaultHostValidity: DurationSchema.default("30d"),
-  defaultUserValidity: DurationSchema.default("24h"),
-  rootValidity: DurationSchema.default("1y"),
-  hostSubCaValidity: DurationSchema.default("90d"),
-  userSubCaValidity: DurationSchema.default("30d"),
-  allowedPrincipals: z.array(z.string()).default([]),
+  bits: z.number().int().positive().optional().describe(
+    "ssh-keygen -b bits; useful for rsa and ecdsa",
+  ),
+  comment: z.string().optional().describe(
+    "ssh-keygen -C comment; defaults to caName",
+  ),
+  defaultValidity: DurationSchema.default("30d"),
   serialStrategy: SerialStrategySchema.default("monotonic"),
   metadataLabels: z.record(z.string(), z.string()).default({}),
   sshKeygenBinary: z.string().default("ssh-keygen"),
@@ -98,121 +77,104 @@ type MethodContext = {
     name: string,
     version?: number,
   ) => Promise<Record<string, unknown> | null>;
+  putSecret?: (vaultName: string, key: string, value: string) => Promise<void>;
+  readSecret?: (vaultName: string, key: string) => Promise<string>;
 };
 
-const RootSchema = z.object({
+const CaSchema = z.object({
   caName: z.string(),
-  rootName: z.string(),
-  publicKey: z.string(),
-  privateKeyMaterial: z.string().meta({ sensitive: true }),
-  fingerprint: z.string(),
-  keyAlgorithm: KeyAlgorithmSchema,
-  createdAt: IsoDateTimeSchema,
-  validAfter: IsoDateTimeSchema,
-  validBefore: IsoDateTimeSchema,
-  state: CaStateSchema,
-  vaultName: z.string().optional(),
-  rootKeyRef: z.string().optional(),
-  metadataLabels: z.record(z.string(), z.string()),
-});
-
-const SubCaSchema = z.object({
-  caName: z.string(),
-  subCaName: z.string(),
-  usage: UsageSchema,
-  publicKey: z.string(),
-  privateKeyMaterial: z.string().meta({ sensitive: true }),
-  fingerprint: z.string(),
-  parentRootFingerprint: z.string(),
-  keyAlgorithm: KeyAlgorithmSchema,
-  createdAt: IsoDateTimeSchema,
-  validAfter: IsoDateTimeSchema,
-  validBefore: IsoDateTimeSchema,
-  state: CaStateSchema,
-  metadataLabels: z.record(z.string(), z.string()),
-});
-
-const CertSchema = z.object({
-  caName: z.string(),
-  certificateType: UsageSchema,
-  certificate: z.string(),
   publicKey: z.string(),
   publicKeyFingerprint: z.string(),
+  privateKeyVaultRef: z.string(),
+  passphraseVaultRef: z.string(),
+  keyAlgorithm: KeyAlgorithmSchema,
+  bits: z.number().int().positive().optional(),
+  comment: z.string(),
+  createdAt: IsoDateTimeSchema,
+  metadataLabels: z.record(z.string(), z.string()),
+});
+
+const CertificateSchema = z.object({
+  caName: z.string(),
+  certificateType: CertificateTypeSchema,
+  certificate: z.string().optional(),
+  certificateVaultRef: z.string().optional(),
+  subjectPublicKey: z.string(),
+  subjectPublicKeyFingerprint: z.string(),
   serial: z.number().int().nonnegative(),
   keyId: z.string(),
   principals: z.array(z.string()),
-  signerSubCaName: z.string(),
-  signerFingerprint: z.string(),
   validAfter: IsoDateTimeSchema,
   validBefore: IsoDateTimeSchema,
   issuedAt: IsoDateTimeSchema,
+  caFingerprint: z.string(),
   metadataLabels: z.record(z.string(), z.string()),
 });
 
-const ClientTrustBundleSchema = z.object({
+const CertAuthoritySchema = z.object({
   caName: z.string(),
   hostPattern: z.string(),
-  knownHosts: z.string(),
-  trustedHostCas: z.array(z.object({
-    subCaName: z.string(),
-    fingerprint: z.string(),
-    publicKey: z.string(),
-    state: CaStateSchema,
-  })),
-  renderedAt: IsoDateTimeSchema,
+  certAuthorityLine: z.string(),
+  caPublicKey: z.string(),
+  caFingerprint: z.string(),
+  generatedAt: IsoDateTimeSchema,
   metadataLabels: z.record(z.string(), z.string()),
 });
 
-const ServerUserCaTrustBundleSchema = z.object({
+const TrustedUserCAKeysSchema = z.object({
   caName: z.string(),
-  trustedUserCaKeys: z.string(),
-  trustedUserCas: z.array(z.object({
-    subCaName: z.string(),
-    fingerprint: z.string(),
-    publicKey: z.string(),
-    state: CaStateSchema,
-  })),
-  renderedAt: IsoDateTimeSchema,
+  trustedUserCAKeys: z.string(),
+  caPublicKey: z.string(),
+  caFingerprint: z.string(),
+  generatedAt: IsoDateTimeSchema,
   metadataLabels: z.record(z.string(), z.string()),
 });
 
-const ReconcileSchema = z.object({
-  caName: z.string(),
-  checkedAt: IsoDateTimeSchema,
-  status: z.enum(["ok", "warning"]),
-  findings: z.array(z.string()),
-  expiringSoon: z.array(
-    z.object({
-      name: z.string(),
-      kind: z.string(),
-      validBefore: IsoDateTimeSchema,
-    }),
-  ),
-  metadataLabels: z.record(z.string(), z.string()),
+const RevocationEntrySchema = z.object({
+  serial: z.number().int().positive().optional(),
+  keyId: z.string().min(1).optional(),
+  publicKey: z.string().min(1).optional(),
+  certificate: z.string().min(1).optional(),
+  targetDataName: z.string().min(1).optional(),
 });
 
-const RotationSchema = z.object({
+type RevocationEntry = z.infer<typeof RevocationEntrySchema>;
+
+type CertificateData = z.infer<typeof CertificateSchema>;
+type CaData = z.infer<typeof CaSchema>;
+type IssueCertificateMethodArgs = {
+  publicKey?: string;
+  publicKeyDataName?: string;
+  publicKeyVault?: z.infer<typeof VaultRefSchema>;
+  principals: string[];
+  keyId?: string;
+  serial?: number;
+  validity?: string;
+  options?: string[];
+  outputTarget?: "data" | "vault" | "both";
+  certificateVaultKey?: string;
+};
+
+const KeyRevocationListSchema = z.object({
   caName: z.string(),
-  usage: UsageSchema,
-  oldSubCaName: z.string(),
-  newSubCaName: z.string(),
-  overlapUntil: IsoDateTimeSchema,
-  rotatedAt: IsoDateTimeSchema,
+  caFingerprint: z.string(),
+  krlBase64: z.string(),
+  krlFormat: z.literal("openssh-krl"),
+  entries: z.array(RevocationEntrySchema),
+  generatedAt: IsoDateTimeSchema,
   metadataLabels: z.record(z.string(), z.string()),
 });
 
 const RevocationSchema = z.object({
   caName: z.string(),
-  targetKind: z.enum(["certificate", "subca"]),
-  target: z.string(),
+  caFingerprint: z.string(),
   reason: z.string(),
   revokedAt: IsoDateTimeSchema,
-  krl: z.string().optional(),
+  entries: z.array(RevocationEntrySchema),
+  krlBase64: z.string(),
+  krlFormat: z.literal("openssh-krl"),
   metadataLabels: z.record(z.string(), z.string()),
 });
-
-type RootData = z.infer<typeof RootSchema>;
-type SubCaData = z.infer<typeof SubCaSchema>;
 
 async function runSshKeygen(
   binary: string,
@@ -239,11 +201,37 @@ async function runSshKeygen(
   return { stdout, stderr };
 }
 
+async function runSwamp(
+  args: string[],
+  input?: string,
+): Promise<{ stdout: string; stderr: string }> {
+  const command = new DenoCommand("swamp", {
+    args,
+    stdin: input === undefined ? "null" : "piped",
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const child = command.spawn();
+  if (input !== undefined) {
+    const writer = child.stdin.getWriter();
+    await writer.write(new TextEncoder().encode(input));
+    await writer.close();
+  }
+  const result = await child.output();
+  const stdout = new TextDecoder().decode(result.stdout);
+  const stderr = new TextDecoder().decode(result.stderr);
+  if (result.code !== 0) {
+    throw new Error(
+      `swamp ${args.join(" ")} failed: ${stderr || stdout}`.slice(0, 1200),
+    );
+  }
+  return { stdout, stderr };
+}
+
 function now(): Date {
   return new Date();
 }
 
-/** Add a compact operational duration (for example 24h or 30d) to a Date. */
 export function addDuration(from: Date, duration: string): Date {
   const match = /^(\d+)(m|h|d|w|mo|y)$/.exec(duration);
   if (!match) throw new Error(`Invalid duration: ${duration}`);
@@ -268,14 +256,12 @@ function validitySpec(validAfter: Date, validBefore: Date): string {
   return `${fmt(validAfter)}:${fmt(validBefore)}`;
 }
 
-/** Return a certificate serial number using the configured serial strategy. */
 export function serialFor(
   strategy: z.infer<typeof SerialStrategySchema>,
   seed: string,
 ): number {
   if (strategy === "random") {
-    const bytes = crypto.getRandomValues(new Uint32Array(1));
-    return bytes[0];
+    return crypto.getRandomValues(new Uint32Array(1))[0];
   }
   let hash = 2166136261;
   for (const char of seed) {
@@ -292,45 +278,59 @@ function safeName(value: string): string {
   ) || "default";
 }
 
-async function fingerprint(
-  binary: string,
-  publicKeyPath: string,
-): Promise<string> {
-  const { stdout } = await runSshKeygen(binary, ["-l", "-f", publicKeyPath]);
-  const parts = stdout.trim().split(/\s+/);
-  return parts[1] ?? stdout.trim();
+function vaultRef(vaultName: string, key: string): string {
+  return `\${{ vault.get('${vaultName}', '${key}') }}`;
 }
 
-async function generateKeyPair(
-  binary: string,
-  algorithm: string,
-  comment: string,
-): Promise<{
-  publicKey: string;
-  privateKeyMaterial: string;
-  fingerprint: string;
-}> {
-  const dir = await DenoFs.makeTempDir();
-  const keyPath = `${dir}/key`;
-  try {
-    await runSshKeygen(binary, [
-      "-q",
-      "-t",
-      algorithm,
-      "-N",
-      "",
-      "-C",
-      comment,
-      "-f",
-      keyPath,
-    ]);
-    const publicKey = await DenoFs.readTextFile(`${keyPath}.pub`);
-    const privateKeyMaterial = await DenoFs.readTextFile(keyPath);
-    const fp = await fingerprint(binary, `${keyPath}.pub`);
-    return { publicKey: publicKey.trim(), privateKeyMaterial, fingerprint: fp };
-  } finally {
-    await DenoFs.remove(dir, { recursive: true });
-  }
+function parseVaultRef(ref: string): { vaultName: string; key: string } | null {
+  const match = /^\$\{\{\s*vault\.get\('([^']+)'\s*,\s*'([^']+)'\)\s*\}\}$/
+    .exec(ref.trim());
+  return match ? { vaultName: match[1], key: match[2] } : null;
+}
+
+async function putSecret(
+  context: MethodContext,
+  key: string,
+  value: string,
+): Promise<string> {
+  const vaultName = context.globalArgs.vaultName;
+  if (context.putSecret) await context.putSecret(vaultName, key, value);
+  else await runSwamp(["vault", "put", vaultName, key, "--json"], value);
+  return vaultRef(vaultName, key);
+}
+
+async function readSecret(
+  context: MethodContext,
+  vaultName: string,
+  key: string,
+): Promise<string> {
+  if (context.readSecret) return await context.readSecret(vaultName, key);
+  const { stdout } = await runSwamp([
+    "vault",
+    "read-secret",
+    vaultName,
+    key,
+    "--force",
+    "--json",
+  ]);
+  return (JSON.parse(stdout) as { value: string }).value;
+}
+
+async function resolveVaultRef(
+  context: MethodContext,
+  valueOrRef: string,
+): Promise<string> {
+  const parsed = parseVaultRef(valueOrRef);
+  return parsed
+    ? await readSecret(context, parsed.vaultName, parsed.key)
+    : valueOrRef;
+}
+
+function randomPassphrase(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let raw = "";
+  for (const byte of bytes) raw += String.fromCharCode(byte);
+  return btoa(raw);
 }
 
 async function writePrivateKey(
@@ -357,60 +357,165 @@ async function writePublicKey(
   return path;
 }
 
-function ensureAllowedPrincipals(requested: string[], allowed: string[]): void {
-  if (requested.length === 0) {
-    throw new Error("At least one principal is required");
-  }
-  if (allowed.length === 0) return;
-  const allowedSet = new Set(allowed);
-  const denied = requested.filter((p) => !allowedSet.has(p));
-  if (denied.length > 0) {
-    throw new Error(`Principal(s) not allowed by policy: ${denied.join(", ")}`);
+async function fingerprint(binary: string, publicKey: string): Promise<string> {
+  const dir = await DenoFs.makeTempDir();
+  try {
+    const path = await writePublicKey(dir, "key", publicKey);
+    const { stdout } = await runSshKeygen(binary, ["-l", "-f", path]);
+    return stdout.trim().split(/\s+/)[1] ?? stdout.trim();
+  } finally {
+    await DenoFs.remove(dir, { recursive: true });
   }
 }
 
-async function readRoot(context: MethodContext): Promise<RootData> {
-  const raw = await context.readResource?.("root-current");
-  if (!raw) throw new Error("Root CA not initialized. Run init-root first.");
-  return RootSchema.parse(raw);
-}
-
-async function readSubCa(
-  context: MethodContext,
-  name: string,
-): Promise<SubCaData> {
-  const raw = await context.readResource?.(`subca-${safeName(name)}`);
+async function readCa(context: MethodContext): Promise<CaData> {
+  const raw = await context.readResource?.("ca-current");
   if (!raw) {
-    throw new Error(`Sub-CA '${name}' does not exist. Run ensure-subca first.`);
-  }
-  const subCa = SubCaSchema.parse(raw);
-  if (subCa.state !== "active" && subCa.state !== "deprecated") {
     throw new Error(
-      `Sub-CA '${name}' is ${subCa.state} and cannot sign certificates`,
+      "CA keypair not initialized. Run generate-keypair or import-keypair first.",
     );
   }
-  return subCa;
+  return CaSchema.parse(raw);
 }
 
-async function signCertificate(args: {
-  binary: string;
-  usage: "host" | "user";
-  caPrivateKey: string;
+async function resolvePublicKey(context: MethodContext, args: {
+  publicKey?: string;
+  publicKeyDataName?: string;
+  publicKeyVault?: z.infer<typeof VaultRefSchema>;
+}): Promise<string> {
+  if (args.publicKey) return args.publicKey.trim();
+  if (args.publicKeyVault) {
+    return (await readSecret(
+      context,
+      args.publicKeyVault.vaultName,
+      args.publicKeyVault.key,
+    )).trim();
+  }
+  if (args.publicKeyDataName) {
+    const raw = await context.readResource?.(args.publicKeyDataName);
+    if (!raw) {
+      throw new Error(`Public key data '${args.publicKeyDataName}' not found`);
+    }
+    if (typeof raw.publicKey === "string") return raw.publicKey.trim();
+    if (typeof raw.subjectPublicKey === "string") {
+      return raw.subjectPublicKey.trim();
+    }
+    throw new Error(
+      `Data '${args.publicKeyDataName}' does not contain publicKey or subjectPublicKey`,
+    );
+  }
+  throw new Error(
+    "Provide one of publicKey, publicKeyDataName, or publicKeyVault",
+  );
+}
+
+async function resolveCertificateOrPublicKeyFile(
+  context: MethodContext,
+  dir: string,
+  entry: RevocationEntry,
+  index: number,
+): Promise<string | null> {
+  let material = entry.certificate ?? entry.publicKey;
+  if (!material && entry.targetDataName) {
+    const raw = await context.readResource?.(entry.targetDataName);
+    if (!raw) {
+      throw new Error(
+        `Revocation target data '${entry.targetDataName}' not found`,
+      );
+    }
+    const cert = CertificateSchema.safeParse(raw);
+    if (cert.success) {
+      material = cert.data.certificate ??
+        (cert.data.certificateVaultRef
+          ? await resolveVaultRef(context, cert.data.certificateVaultRef)
+          : undefined);
+    } else if (typeof raw.publicKey === "string") material = raw.publicKey;
+    else if (typeof raw.certificate === "string") material = raw.certificate;
+  }
+  if (!material) return null;
+  const path = `${dir}/revoked-${index}.pub`;
+  await DenoFs.writeTextFile(
+    path,
+    material.endsWith("\n") ? material : `${material}\n`,
+  );
+  return path;
+}
+
+function base64Encode(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+async function generateKrl(
+  context: MethodContext,
+  ca: CaData,
+  entries: RevocationEntry[],
+): Promise<string> {
+  if (entries.length === 0) {
+    throw new Error("At least one revocation entry is required");
+  }
+  const dir = await DenoFs.makeTempDir();
+  try {
+    const caPub = await writePublicKey(dir, "ca", ca.publicKey);
+    const krlPath = `${dir}/revoked.krl`;
+    const specLines: string[] = [];
+    const fileArgs: string[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (entry.serial !== undefined) specLines.push(`serial: ${entry.serial}`);
+      if (entry.keyId) specLines.push(`id: ${entry.keyId}`);
+      const materialPath = await resolveCertificateOrPublicKeyFile(
+        context,
+        dir,
+        entry,
+        i,
+      );
+      if (materialPath) fileArgs.push(materialPath);
+    }
+    const args = ["-q", "-k", "-f", krlPath, "-s", caPub];
+    if (specLines.length > 0) {
+      const specPath = `${dir}/revocations.krlspec`;
+      await DenoFs.writeTextFile(specPath, `${specLines.join("\n")}\n`);
+      args.push(specPath);
+    }
+    args.push(...fileArgs);
+    if (specLines.length === 0 && fileArgs.length === 0) {
+      throw new Error(
+        "No serial, keyId, publicKey, certificate, or targetDataName material found",
+      );
+    }
+    await runSshKeygen(context.globalArgs.sshKeygenBinary, args);
+    return base64Encode(await DenoFs.readFile(krlPath));
+  } finally {
+    await DenoFs.remove(dir, { recursive: true });
+  }
+}
+
+async function signCertificate(context: MethodContext, ca: CaData, args: {
+  certificateType: "host" | "user";
   publicKey: string;
   principals: string[];
-  serial: number;
   keyId: string;
+  serial: number;
   validAfter: Date;
   validBefore: Date;
+  options: string[];
 }): Promise<string> {
   const dir = await DenoFs.makeTempDir();
   try {
-    const caKeyPath = await writePrivateKey(dir, "ca", args.caPrivateKey);
-    const publicKeyPath = await writePublicKey(dir, "subject", args.publicKey);
-    const certArgs = [
+    const privateKey = await resolveVaultRef(context, ca.privateKeyVaultRef);
+    const passphrase = await resolveVaultRef(context, ca.passphraseVaultRef);
+    const caKeyPath = await writePrivateKey(dir, "ca", privateKey);
+    const subjectPath = await writePublicKey(dir, "subject", args.publicKey);
+    const keygenArgs = [
       "-q",
       "-s",
       caKeyPath,
+      "-P",
+      passphrase,
       "-I",
       args.keyId,
       "-z",
@@ -418,688 +523,488 @@ async function signCertificate(args: {
       "-V",
       validitySpec(args.validAfter, args.validBefore),
     ];
-    if (args.usage === "host") certArgs.push("-h");
-    certArgs.push("-n", args.principals.join(","), publicKeyPath);
-    await runSshKeygen(args.binary, certArgs);
+    if (args.certificateType === "host") keygenArgs.push("-h");
+    for (const option of args.options) keygenArgs.push("-O", option);
+    if (args.principals.length > 0) {
+      keygenArgs.push("-n", args.principals.join(","));
+    }
+    keygenArgs.push(subjectPath);
+    await runSshKeygen(context.globalArgs.sshKeygenBinary, keygenArgs);
     return (await DenoFs.readTextFile(`${dir}/subject-cert.pub`)).trim();
   } finally {
     await DenoFs.remove(dir, { recursive: true });
   }
 }
 
-async function publicKeyFingerprint(
-  binary: string,
-  publicKey: string,
-): Promise<string> {
-  const dir = await DenoFs.makeTempDir();
-  try {
-    const publicKeyPath = await writePublicKey(dir, "key", publicKey);
-    return await fingerprint(binary, publicKeyPath);
-  } finally {
-    await DenoFs.remove(dir, { recursive: true });
-  }
-}
-
-function publicSubCaView(
-  subCa: SubCaData,
-): {
-  subCaName: string;
-  fingerprint: string;
-  publicKey: string;
-  state: z.infer<typeof CaStateSchema>;
-} {
-  return {
-    subCaName: subCa.subCaName,
-    fingerprint: subCa.fingerprint,
-    publicKey: subCa.publicKey,
-    state: subCa.state,
+async function issueCertificate(args: {
+  certificateType: "host" | "user";
+  publicKey?: string;
+  publicKeyDataName?: string;
+  publicKeyVault?: z.infer<typeof VaultRefSchema>;
+  principals: string[];
+  keyId?: string;
+  serial?: number;
+  validity?: string;
+  options?: string[];
+  outputTarget?: "data" | "vault" | "both";
+  certificateVaultKey?: string;
+}, context: MethodContext): Promise<{ dataHandles: Array<{ name: string }> }> {
+  const ca = await readCa(context);
+  const issuedAt = now();
+  const publicKey = await resolvePublicKey(context, args);
+  const keyId = args.keyId ??
+    `${context.globalArgs.caName}:${args.certificateType}:${
+      args.principals.join(",")
+    }:${issuedAt.toISOString()}`;
+  const serial = args.serial ??
+    serialFor(context.globalArgs.serialStrategy, keyId);
+  const validBefore = addDuration(
+    issuedAt,
+    args.validity ?? context.globalArgs.defaultValidity,
+  );
+  const certificate = await signCertificate(context, ca, {
+    certificateType: args.certificateType,
+    publicKey,
+    principals: args.principals,
+    keyId,
+    serial,
+    validAfter: issuedAt,
+    validBefore,
+    options: args.options ?? [],
+  });
+  const outputTarget = args.outputTarget ?? "data";
+  const certificateVaultRef = outputTarget !== "data"
+    ? await putSecret(
+      context,
+      args.certificateVaultKey ??
+        `ssh-ca-${safeName(context.globalArgs.caName)}-cert-${safeName(keyId)}`,
+      certificate,
+    )
+    : undefined;
+  const data: CertificateData = {
+    caName: context.globalArgs.caName,
+    certificateType: args.certificateType,
+    certificate: outputTarget === "vault" ? undefined : certificate,
+    certificateVaultRef,
+    subjectPublicKey: publicKey,
+    subjectPublicKeyFingerprint: await fingerprint(
+      context.globalArgs.sshKeygenBinary,
+      publicKey,
+    ),
+    serial,
+    keyId,
+    principals: args.principals,
+    validAfter: issuedAt.toISOString(),
+    validBefore: validBefore.toISOString(),
+    issuedAt: issuedAt.toISOString(),
+    caFingerprint: ca.publicKeyFingerprint,
+    metadataLabels: context.globalArgs.metadataLabels,
   };
+  const handle = await context.writeResource(
+    "certificate",
+    `cert-${safeName(keyId)}`,
+    data,
+  );
+  return { dataHandles: [handle] };
 }
 
-/** Swamp model definition for managing OpenSSH CA keys and certificates. */
 export const model = {
   type: "@evrardjp/ssh-ca",
-  version: "2026.06.25.1",
+  version: "2026.07.01.2",
   globalArguments: GlobalArgsSchema,
   resources: {
-    root: {
+    ca: {
       description:
-        "SSH root CA metadata; private key field is sensitive/vaulted",
-      schema: RootSchema,
+        "OpenSSH CA public metadata; private key and passphrase are vault references",
+      schema: CaSchema,
       lifetime: "infinite",
-      garbageCollection: 20,
+      garbageCollection: 50,
     },
-    subca: {
-      description:
-        "SSH subordinate CA metadata; private key field is sensitive/vaulted",
-      schema: SubCaSchema,
-      lifetime: "infinite",
-      garbageCollection: 100,
-    },
-    hostcert: {
-      description:
-        "Issued OpenSSH host certificate and non-secret issuance metadata",
-      schema: CertSchema.extend({ certificateType: z.literal("host") }),
-      lifetime: "infinite",
-      garbageCollection: 500,
-    },
-    usercert: {
-      description:
-        "Issued OpenSSH user certificate and non-secret issuance metadata",
-      schema: CertSchema.extend({ certificateType: z.literal("user") }),
+    certificate: {
+      description: "Issued OpenSSH host/user certificate and issuance metadata",
+      schema: CertificateSchema,
       lifetime: "infinite",
       garbageCollection: 1000,
     },
-    clienttrust: {
-      description:
-        "known_hosts trust bundle containing active host CA marker lines",
-      schema: ClientTrustBundleSchema,
+    certificateauthority: {
+      description: "OpenSSH known_hosts @cert-authority line for this CA",
+      schema: CertAuthoritySchema,
       lifetime: "infinite",
       garbageCollection: 100,
     },
-    serverusertrust: {
-      description: "TrustedUserCAKeys material for OpenSSH-compatible servers",
-      schema: ServerUserCaTrustBundleSchema,
-      lifetime: "infinite",
-      garbageCollection: 100,
-    },
-    reconcile: {
-      description: "SSH CA state reconciliation result",
-      schema: ReconcileSchema,
-      lifetime: "30d",
-      garbageCollection: 50,
-    },
-    rotation: {
-      description: "Subordinate CA rotation event",
-      schema: RotationSchema,
+    trustedusercakeys: {
+      description: "OpenSSH TrustedUserCAKeys material for this CA",
+      schema: TrustedUserCAKeysSchema,
       lifetime: "infinite",
       garbageCollection: 100,
     },
     revocation: {
-      description: "Certificate revocation or sub-CA deactivation event",
+      description:
+        "OpenSSH certificate/key revocation event including generated KRL",
       schema: RevocationSchema,
+      lifetime: "infinite",
+      garbageCollection: 500,
+    },
+    keyrevocationlist: {
+      description: "OpenSSH binary Key Revocation List (KRL), base64 encoded",
+      schema: KeyRevocationListSchema,
       lifetime: "infinite",
       garbageCollection: 500,
     },
   },
   methods: {
-    "init-root": {
+    "generate-keypair": {
       description:
-        "Create or read the self-signed root SSH CA key and metadata",
-      arguments: z.object({ force: z.boolean().default(false) }),
-      execute: async (args: { force: boolean }, context: MethodContext) => {
-        context.logger.info("Initializing SSH root CA", {
-          caName: context.globalArgs.caName,
-        });
-        if (!args.force) {
-          const existing = await context.readResource?.("root-current");
-          if (existing) {
-            const handle = await context.writeResource(
-              "root",
-              "root-current",
-              existing,
-            );
-            return { dataHandles: [handle] };
-          }
-        }
-        const createdAt = now();
-        const validBefore = addDuration(
-          createdAt,
-          context.globalArgs.rootValidity,
-        );
-        const key = await generateKeyPair(
-          context.globalArgs.sshKeygenBinary,
-          context.globalArgs.keyAlgorithm,
-          `${context.globalArgs.caName} root`,
-        );
-        const root: RootData = {
-          caName: context.globalArgs.caName,
-          rootName: "root",
-          publicKey: key.publicKey,
-          privateKeyMaterial: key.privateKeyMaterial,
-          fingerprint: key.fingerprint,
-          keyAlgorithm: context.globalArgs.keyAlgorithm,
-          createdAt: createdAt.toISOString(),
-          validAfter: createdAt.toISOString(),
-          validBefore: validBefore.toISOString(),
-          state: "active",
-          vaultName: context.globalArgs.vaultName,
-          rootKeyRef: context.globalArgs.rootKeyRef,
-          metadataLabels: context.globalArgs.metadataLabels,
-        };
-        const handle = await context.writeResource(
-          "root",
-          "root-current",
-          root,
-        );
-        context.logger.info("Initialized SSH root CA", {
-          fingerprint: root.fingerprint,
-        });
-        return { dataHandles: [handle] };
-      },
-    },
-    "ensure-subca": {
-      description: "Create or reconcile a subordinate host or user SSH CA",
+        "Generate this OpenSSH CA keypair with ssh-keygen and store private key/passphrase in the Swamp vault",
       arguments: z.object({
-        name: z.string().min(1),
-        usage: UsageSchema,
-        validity: DurationSchema.optional(),
+        algorithm: KeyAlgorithmSchema.optional(),
+        bits: z.number().int().positive().optional(),
+        comment: z.string().optional(),
+        passphraseVaultKey: z.string().optional(),
+        privateKeyVaultKey: z.string().optional(),
         force: z.boolean().default(false),
       }),
       execute: async (
         args: {
-          name: string;
-          usage: "host" | "user";
-          validity?: string;
+          algorithm?: "ed25519" | "rsa" | "ecdsa";
+          bits?: number;
+          comment?: string;
+          passphraseVaultKey?: string;
+          privateKeyVaultKey?: string;
           force: boolean;
         },
         context: MethodContext,
       ) => {
-        context.logger.info("Ensuring SSH subordinate CA", {
-          name: args.name,
-          usage: args.usage,
+        context.logger.info("Generating OpenSSH CA keypair", {
+          caName: context.globalArgs.caName,
         });
-        const instance = `subca-${safeName(args.name)}`;
         if (!args.force) {
-          const existing = await context.readResource?.(instance);
+          const existing = await context.readResource?.("ca-current");
           if (existing) {
-            const handle = await context.writeResource(
-              "subca",
-              instance,
-              existing,
-            );
-            return { dataHandles: [handle] };
+            return {
+              dataHandles: [
+                await context.writeResource("ca", "ca-current", existing),
+              ],
+            };
           }
         }
-        const root = await readRoot(context);
-        const createdAt = now();
-        const validity = args.validity ??
-          (args.usage === "host"
-            ? context.globalArgs.hostSubCaValidity
-            : context.globalArgs.userSubCaValidity);
-        const key = await generateKeyPair(
-          context.globalArgs.sshKeygenBinary,
-          context.globalArgs.keyAlgorithm,
-          `${context.globalArgs.caName} ${args.name} ${args.usage} subca`,
-        );
-        const subCa: SubCaData = {
-          caName: context.globalArgs.caName,
-          subCaName: args.name,
-          usage: args.usage,
-          publicKey: key.publicKey,
-          privateKeyMaterial: key.privateKeyMaterial,
-          fingerprint: key.fingerprint,
-          parentRootFingerprint: root.fingerprint,
-          keyAlgorithm: context.globalArgs.keyAlgorithm,
-          createdAt: createdAt.toISOString(),
-          validAfter: createdAt.toISOString(),
-          validBefore: addDuration(createdAt, validity).toISOString(),
-          state: "active",
-          metadataLabels: context.globalArgs.metadataLabels,
-        };
-        const handle = await context.writeResource("subca", instance, subCa);
-        context.logger.info("Ensured SSH subordinate CA", {
-          name: args.name,
-          fingerprint: subCa.fingerprint,
-        });
-        return { dataHandles: [handle] };
+        const algorithm = args.algorithm ?? context.globalArgs.keyAlgorithm;
+        const bits = args.bits ?? context.globalArgs.bits;
+        const comment = args.comment ?? context.globalArgs.comment ??
+          context.globalArgs.caName;
+        const passphrase = randomPassphrase();
+        const dir = await DenoFs.makeTempDir();
+        try {
+          const keyPath = `${dir}/ca`;
+          const keygenArgs = [
+            "-q",
+            "-t",
+            algorithm,
+            "-N",
+            passphrase,
+            "-C",
+            comment,
+            "-f",
+            keyPath,
+          ];
+          if (bits !== undefined) keygenArgs.splice(4, 0, "-b", String(bits));
+          await runSshKeygen(context.globalArgs.sshKeygenBinary, keygenArgs);
+          const publicKey = (await DenoFs.readTextFile(`${keyPath}.pub`))
+            .trim();
+          const privateKey = await DenoFs.readTextFile(keyPath);
+          const privateKeyVaultRef = await putSecret(
+            context,
+            args.privateKeyVaultKey ??
+              `ssh-ca-${safeName(context.globalArgs.caName)}-privateKey`,
+            privateKey,
+          );
+          const passphraseVaultRef = await putSecret(
+            context,
+            args.passphraseVaultKey ??
+              `ssh-ca-${safeName(context.globalArgs.caName)}-passphrase`,
+            passphrase,
+          );
+          const ca: CaData = {
+            caName: context.globalArgs.caName,
+            publicKey,
+            publicKeyFingerprint: await fingerprint(
+              context.globalArgs.sshKeygenBinary,
+              publicKey,
+            ),
+            privateKeyVaultRef,
+            passphraseVaultRef,
+            keyAlgorithm: algorithm,
+            bits,
+            comment,
+            createdAt: now().toISOString(),
+            metadataLabels: context.globalArgs.metadataLabels,
+          };
+          return {
+            dataHandles: [await context.writeResource("ca", "ca-current", ca)],
+          };
+        } finally {
+          await DenoFs.remove(dir, { recursive: true });
+        }
       },
     },
-    "issue-host-cert": {
+    "import-keypair": {
       description:
-        "Sign an OpenSSH host public key with an active host subordinate CA",
+        "Import an existing OpenSSH CA private/public key into the Swamp vault/data model",
       arguments: z.object({
-        hostPublicKey: z.string().min(1),
-        principals: z.array(z.string().min(1)).min(1),
-        validity: DurationSchema.optional(),
-        subCaName: z.string().min(1),
-        keyId: z.string().optional(),
-        serial: z.number().int().nonnegative().optional(),
+        privateKey: z.string().min(1).optional(),
+        privateKeyVault: VaultRefSchema.optional(),
+        passphrase: z.string().default(""),
+        publicKey: z.string().min(1),
+        algorithm: KeyAlgorithmSchema.optional(),
+        bits: z.number().int().positive().optional(),
+        comment: z.string().optional(),
+        privateKeyVaultKey: z.string().optional(),
+        passphraseVaultKey: z.string().optional(),
       }),
       execute: async (
         args: {
-          hostPublicKey: string;
-          principals: string[];
-          validity?: string;
-          subCaName: string;
-          keyId?: string;
-          serial?: number;
+          privateKey?: string;
+          privateKeyVault?: z.infer<typeof VaultRefSchema>;
+          passphrase: string;
+          publicKey: string;
+          algorithm?: "ed25519" | "rsa" | "ecdsa";
+          bits?: number;
+          comment?: string;
+          privateKeyVaultKey?: string;
+          passphraseVaultKey?: string;
         },
         context: MethodContext,
       ) => {
-        context.logger.info("Issuing SSH host certificate", {
-          subCaName: args.subCaName,
-        });
-        ensureAllowedPrincipals(
-          args.principals,
-          context.globalArgs.allowedPrincipals,
-        );
-        const subCa = await readSubCa(context, args.subCaName);
-        if (subCa.usage !== "host") {
-          throw new Error(
-            `Sub-CA '${args.subCaName}' is for ${subCa.usage}, not host certificates`,
-          );
+        const privateKey = args.privateKey ??
+          (args.privateKeyVault
+            ? await readSecret(
+              context,
+              args.privateKeyVault.vaultName,
+              args.privateKeyVault.key,
+            )
+            : undefined);
+        if (!privateKey) {
+          throw new Error("import-keypair needs privateKey or privateKeyVault");
         }
-        const issuedAt = now();
-        const keyId = args.keyId ??
-          `${context.globalArgs.caName}:host:${
-            args.principals.join(",")
-          }:${issuedAt.toISOString()}`;
-        const serial = args.serial ??
-          serialFor(context.globalArgs.serialStrategy, keyId);
-        const validBefore = addDuration(
-          issuedAt,
-          args.validity ?? context.globalArgs.defaultHostValidity,
+        const privateKeyVaultRef = await putSecret(
+          context,
+          args.privateKeyVaultKey ??
+            `ssh-ca-${safeName(context.globalArgs.caName)}-privateKey`,
+          privateKey,
         );
-        const certificate = await signCertificate({
-          binary: context.globalArgs.sshKeygenBinary,
-          usage: "host",
-          caPrivateKey: subCa.privateKeyMaterial,
-          publicKey: args.hostPublicKey,
-          principals: args.principals,
-          serial,
-          keyId,
-          validAfter: issuedAt,
-          validBefore,
-        });
-        const publicKeyFp = await publicKeyFingerprint(
-          context.globalArgs.sshKeygenBinary,
-          args.hostPublicKey,
+        const passphraseVaultRef = await putSecret(
+          context,
+          args.passphraseVaultKey ??
+            `ssh-ca-${safeName(context.globalArgs.caName)}-passphrase`,
+          args.passphrase,
         );
-        const data = {
+        const ca: CaData = {
           caName: context.globalArgs.caName,
-          certificateType: "host" as const,
-          certificate,
-          publicKey: args.hostPublicKey.trim(),
-          publicKeyFingerprint: publicKeyFp,
-          serial,
-          keyId,
-          principals: args.principals,
-          signerSubCaName: subCa.subCaName,
-          signerFingerprint: subCa.fingerprint,
-          validAfter: issuedAt.toISOString(),
-          validBefore: validBefore.toISOString(),
-          issuedAt: issuedAt.toISOString(),
+          publicKey: args.publicKey.trim(),
+          publicKeyFingerprint: await fingerprint(
+            context.globalArgs.sshKeygenBinary,
+            args.publicKey,
+          ),
+          privateKeyVaultRef,
+          passphraseVaultRef,
+          keyAlgorithm: args.algorithm ?? context.globalArgs.keyAlgorithm,
+          bits: args.bits ?? context.globalArgs.bits,
+          comment: args.comment ?? context.globalArgs.comment ??
+            context.globalArgs.caName,
+          createdAt: now().toISOString(),
           metadataLabels: context.globalArgs.metadataLabels,
         };
-        const handle = await context.writeResource(
-          "hostcert",
-          `hostcert-${safeName(keyId)}`,
-          data,
-        );
-        return { dataHandles: [handle] };
+        return {
+          dataHandles: [await context.writeResource("ca", "ca-current", ca)],
+        };
       },
     },
-    "issue-user-cert": {
-      description:
-        "Sign an OpenSSH user public key with an active user subordinate CA",
+    "issue-host-certificate": {
+      description: "Sign an OpenSSH host certificate with ssh-keygen -s ... -h",
       arguments: z.object({
-        userPublicKey: z.string().min(1),
+        publicKey: z.string().min(1).optional(),
+        publicKeyDataName: z.string().min(1).optional(),
+        publicKeyVault: VaultRefSchema.optional(),
         principals: z.array(z.string().min(1)).min(1),
-        validity: DurationSchema.optional(),
-        subCaName: z.string().min(1),
         keyId: z.string().optional(),
         serial: z.number().int().nonnegative().optional(),
-        role: z.string().optional(),
+        validity: DurationSchema.optional(),
+        options: z.array(z.string()).default([]).describe(
+          "ssh-keygen -O option values",
+        ),
+        outputTarget: OutputTargetSchema.default("data"),
+        certificateVaultKey: z.string().optional(),
       }),
       execute: async (
-        args: {
-          userPublicKey: string;
-          principals: string[];
-          validity?: string;
-          subCaName: string;
-          keyId?: string;
-          serial?: number;
-          role?: string;
-        },
+        args: IssueCertificateMethodArgs,
         context: MethodContext,
-      ) => {
-        context.logger.info("Issuing SSH user certificate", {
-          subCaName: args.subCaName,
-          role: args.role,
-        });
-        ensureAllowedPrincipals(
-          args.principals,
-          context.globalArgs.allowedPrincipals,
-        );
-        const subCa = await readSubCa(context, args.subCaName);
-        if (subCa.usage !== "user") {
-          throw new Error(
-            `Sub-CA '${args.subCaName}' is for ${subCa.usage}, not user certificates`,
-          );
-        }
-        const issuedAt = now();
-        const keyId = args.keyId ??
-          `${context.globalArgs.caName}:user:${
-            args.principals.join(",")
-          }:${issuedAt.toISOString()}`;
-        const serial = args.serial ??
-          serialFor(context.globalArgs.serialStrategy, keyId);
-        const validBefore = addDuration(
-          issuedAt,
-          args.validity ?? context.globalArgs.defaultUserValidity,
-        );
-        const certificate = await signCertificate({
-          binary: context.globalArgs.sshKeygenBinary,
-          usage: "user",
-          caPrivateKey: subCa.privateKeyMaterial,
-          publicKey: args.userPublicKey,
-          principals: args.principals,
-          serial,
-          keyId,
-          validAfter: issuedAt,
-          validBefore,
-        });
-        const publicKeyFp = await publicKeyFingerprint(
-          context.globalArgs.sshKeygenBinary,
-          args.userPublicKey,
-        );
-        const data = {
-          caName: context.globalArgs.caName,
-          certificateType: "user" as const,
-          certificate,
-          publicKey: args.userPublicKey.trim(),
-          publicKeyFingerprint: publicKeyFp,
-          serial,
-          keyId,
-          principals: args.principals,
-          signerSubCaName: subCa.subCaName,
-          signerFingerprint: subCa.fingerprint,
-          validAfter: issuedAt.toISOString(),
-          validBefore: validBefore.toISOString(),
-          issuedAt: issuedAt.toISOString(),
-          metadataLabels: {
-            ...context.globalArgs.metadataLabels,
-            ...(args.role ? { role: args.role } : {}),
-          },
-        };
-        const handle = await context.writeResource(
-          "usercert",
-          `usercert-${safeName(keyId)}`,
-          data,
-        );
-        return { dataHandles: [handle] };
-      },
+      ) =>
+        await issueCertificate({ ...args, certificateType: "host" }, context),
     },
-    "render-client-trust": {
-      description:
-        "Render known_hosts CA marker trust for active host subordinate CAs",
+    "issue-user-certificate": {
+      description: "Sign an OpenSSH user certificate with ssh-keygen -s",
       arguments: z.object({
-        hostPattern: z.string().min(1),
-        subCaNames: z.array(z.string().min(1)).default([]),
+        publicKey: z.string().min(1).optional(),
+        publicKeyDataName: z.string().min(1).optional(),
+        publicKeyVault: VaultRefSchema.optional(),
+        principals: z.array(z.string().min(1)).min(1),
+        keyId: z.string().optional(),
+        serial: z.number().int().nonnegative().optional(),
+        validity: DurationSchema.optional(),
+        options: z.array(z.string()).default([]).describe(
+          "ssh-keygen -O option values",
+        ),
+        outputTarget: OutputTargetSchema.default("data"),
+        certificateVaultKey: z.string().optional(),
       }),
       execute: async (
-        args: { hostPattern: string; subCaNames: string[] },
+        args: IssueCertificateMethodArgs,
+        context: MethodContext,
+      ) =>
+        await issueCertificate({ ...args, certificateType: "user" }, context),
+    },
+    "generate-cert-authority": {
+      description:
+        "Generate an OpenSSH known_hosts @cert-authority line for this CA",
+      arguments: z.object({ hostPattern: z.string().min(1) }),
+      execute: async (
+        args: { hostPattern: string },
         context: MethodContext,
       ) => {
-        context.logger.info("Rendering SSH client trust bundle", {
-          hostPattern: args.hostPattern,
-        });
-        const names = args.subCaNames.length > 0
-          ? args.subCaNames
-          : context.globalArgs.hostSubCas.map((c) => c.name);
-        const cas =
-          (await Promise.all(names.map((name) => readSubCa(context, name))))
-            .filter((ca) =>
-              ca.usage === "host" && ca.state !== "deactivated" &&
-              ca.state !== "revoked"
-            );
-        const knownHosts =
-          cas.map((ca) => `@cert-authority ${args.hostPattern} ${ca.publicKey}`)
-            .join("\n") + (cas.length ? "\n" : "");
+        const ca = await readCa(context);
         const data = {
           caName: context.globalArgs.caName,
           hostPattern: args.hostPattern,
-          knownHosts,
-          trustedHostCas: cas.map(publicSubCaView),
-          renderedAt: now().toISOString(),
+          certAuthorityLine:
+            `@cert-authority ${args.hostPattern} ${ca.publicKey}`,
+          caPublicKey: ca.publicKey,
+          caFingerprint: ca.publicKeyFingerprint,
+          generatedAt: now().toISOString(),
           metadataLabels: context.globalArgs.metadataLabels,
         };
-        const handle = await context.writeResource(
-          "clienttrust",
-          `clienttrust-${safeName(args.hostPattern)}`,
-          data,
-        );
-        return { dataHandles: [handle] };
+        return {
+          dataHandles: [
+            await context.writeResource(
+              "certificateauthority",
+              `cert-authority-${safeName(args.hostPattern)}`,
+              data,
+            ),
+          ],
+        };
       },
     },
-    "render-server-user-ca-trust": {
+    "generate-trustedusercakeys": {
+      description: "Generate OpenSSH TrustedUserCAKeys material for this CA",
+      arguments: z.object({}),
+      execute: async (_args: Record<string, never>, context: MethodContext) => {
+        const ca = await readCa(context);
+        const data = {
+          caName: context.globalArgs.caName,
+          trustedUserCAKeys: `${ca.publicKey}\n`,
+          caPublicKey: ca.publicKey,
+          caFingerprint: ca.publicKeyFingerprint,
+          generatedAt: now().toISOString(),
+          metadataLabels: context.globalArgs.metadataLabels,
+        };
+        return {
+          dataHandles: [
+            await context.writeResource(
+              "trustedusercakeys",
+              "trustedusercakeys-current",
+              data,
+            ),
+          ],
+        };
+      },
+    },
+    "revoke-certificate": {
       description:
-        "Render TrustedUserCAKeys material for active user subordinate CAs",
+        "Record revocation entries and generate an OpenSSH KRL for this CA",
       arguments: z.object({
-        subCaNames: z.array(z.string().min(1)).default([]),
-      }),
-      execute: async (
-        args: { subCaNames: string[] },
-        context: MethodContext,
-      ) => {
-        context.logger.info("Rendering SSH server user CA trust bundle");
-        const names = args.subCaNames.length > 0
-          ? args.subCaNames
-          : context.globalArgs.userSubCas.map((c) => c.name);
-        const cas =
-          (await Promise.all(names.map((name) => readSubCa(context, name))))
-            .filter((ca) =>
-              ca.usage === "user" && ca.state !== "deactivated" &&
-              ca.state !== "revoked"
-            );
-        const data = {
-          caName: context.globalArgs.caName,
-          trustedUserCaKeys: cas.map((ca) => ca.publicKey).join("\n") +
-            (cas.length ? "\n" : ""),
-          trustedUserCas: cas.map(publicSubCaView),
-          renderedAt: now().toISOString(),
-          metadataLabels: context.globalArgs.metadataLabels,
-        };
-        const handle = await context.writeResource(
-          "serverusertrust",
-          "serverusertrust-current",
-          data,
-        );
-        return { dataHandles: [handle] };
-      },
-    },
-    "reconcile-certs": {
-      description: "Verify known CA state and report expiry warnings",
-      arguments: z.object({ warnWithin: DurationSchema.default("7d") }),
-      execute: async (args: { warnWithin: string }, context: MethodContext) => {
-        context.logger.info("Reconciling SSH CA state");
-        const findings: string[] = [];
-        const expiringSoon: Array<
-          { name: string; kind: string; validBefore: string }
-        > = [];
-        const root = await readRoot(context).catch((error) => {
-          findings.push(error.message);
-          return null;
-        });
-        const threshold = addDuration(now(), args.warnWithin).getTime();
-        if (root && Date.parse(root.validBefore) <= threshold) {
-          expiringSoon.push({
-            name: root.rootName,
-            kind: "root",
-            validBefore: root.validBefore,
-          });
-        }
-        for (
-          const def of [
-            ...context.globalArgs.hostSubCas,
-            ...context.globalArgs.userSubCas,
-          ]
-        ) {
-          const subCa = await readSubCa(context, def.name).catch((error) => {
-            findings.push(error.message);
-            return null;
-          });
-          if (subCa && Date.parse(subCa.validBefore) <= threshold) {
-            expiringSoon.push({
-              name: subCa.subCaName,
-              kind: `${subCa.usage}-subca`,
-              validBefore: subCa.validBefore,
-            });
-          }
-        }
-        const data = {
-          caName: context.globalArgs.caName,
-          checkedAt: now().toISOString(),
-          status: findings.length === 0 ? "ok" as const : "warning" as const,
-          findings,
-          expiringSoon,
-          metadataLabels: context.globalArgs.metadataLabels,
-        };
-        const handle = await context.writeResource(
-          "reconcile",
-          "reconcile-current",
-          data,
-        );
-        return { dataHandles: [handle] };
-      },
-    },
-    "rotate-subca": {
-      description: "Create a replacement sub-CA and record the overlap window",
-      arguments: z.object({
-        oldSubCaName: z.string().min(1),
-        newSubCaName: z.string().min(1),
-        overlap: DurationSchema.default("7d"),
-        validity: DurationSchema.optional(),
-      }),
-      execute: async (
-        args: {
-          oldSubCaName: string;
-          newSubCaName: string;
-          overlap: string;
-          validity?: string;
-        },
-        context: MethodContext,
-      ) => {
-        context.logger.info("Rotating SSH subordinate CA", {
-          oldSubCaName: args.oldSubCaName,
-          newSubCaName: args.newSubCaName,
-        });
-        const oldSubCa = await readSubCa(context, args.oldSubCaName);
-        const createdAt = now();
-        const key = await generateKeyPair(
-          context.globalArgs.sshKeygenBinary,
-          context.globalArgs.keyAlgorithm,
-          `${context.globalArgs.caName} ${args.newSubCaName} ${oldSubCa.usage} subca`,
-        );
-        const newSubCa: SubCaData = {
-          caName: context.globalArgs.caName,
-          subCaName: args.newSubCaName,
-          usage: oldSubCa.usage,
-          publicKey: key.publicKey,
-          privateKeyMaterial: key.privateKeyMaterial,
-          fingerprint: key.fingerprint,
-          parentRootFingerprint: oldSubCa.parentRootFingerprint,
-          keyAlgorithm: context.globalArgs.keyAlgorithm,
-          createdAt: createdAt.toISOString(),
-          validAfter: createdAt.toISOString(),
-          validBefore: addDuration(
-            createdAt,
-            args.validity ??
-              (oldSubCa.usage === "host"
-                ? context.globalArgs.hostSubCaValidity
-                : context.globalArgs.userSubCaValidity),
-          ).toISOString(),
-          state: "active",
-          metadataLabels: context.globalArgs.metadataLabels,
-        };
-        const deprecatedOld = { ...oldSubCa, state: "deprecated" as const };
-        const overlapUntil = addDuration(createdAt, args.overlap).toISOString();
-        const handles = [
-          await context.writeResource(
-            "subca",
-            `subca-${safeName(args.oldSubCaName)}`,
-            deprecatedOld,
-          ),
-          await context.writeResource(
-            "subca",
-            `subca-${safeName(args.newSubCaName)}`,
-            newSubCa,
-          ),
-          await context.writeResource(
-            "rotation",
-            `rotation-${safeName(args.oldSubCaName)}-${
-              safeName(args.newSubCaName)
-            }`,
-            {
-              caName: context.globalArgs.caName,
-              usage: oldSubCa.usage,
-              oldSubCaName: args.oldSubCaName,
-              newSubCaName: args.newSubCaName,
-              overlapUntil,
-              rotatedAt: createdAt.toISOString(),
-              metadataLabels: context.globalArgs.metadataLabels,
-            },
-          ),
-        ];
-        return { dataHandles: handles };
-      },
-    },
-    "revoke-cert": {
-      description: "Record certificate revocation metadata by serial/key id",
-      arguments: z.object({
-        target: z.string().min(1),
         reason: z.string().min(1),
+        entries: z.array(RevocationEntrySchema).min(1),
       }),
       execute: async (
-        args: { target: string; reason: string },
+        args: { reason: string; entries: RevocationEntry[] },
         context: MethodContext,
       ) => {
-        context.logger.info("Recording SSH certificate revocation", {
-          target: args.target,
-        });
+        const ca = await readCa(context);
+        const krlBase64 = await generateKrl(context, ca, args.entries);
         const data = {
           caName: context.globalArgs.caName,
-          targetKind: "certificate" as const,
-          target: args.target,
+          caFingerprint: ca.publicKeyFingerprint,
           reason: args.reason,
           revokedAt: now().toISOString(),
+          entries: args.entries,
+          krlBase64,
+          krlFormat: "openssh-krl" as const,
           metadataLabels: context.globalArgs.metadataLabels,
         };
-        const handle = await context.writeResource(
-          "revocation",
-          `revocation-cert-${safeName(args.target)}`,
-          data,
-        );
-        return { dataHandles: [handle] };
+        return {
+          dataHandles: [
+            await context.writeResource(
+              "revocation",
+              `revocation-${safeName(args.reason)}-${Date.now()}`,
+              data,
+            ),
+          ],
+        };
       },
     },
-    "deactivate-subca": {
+    "generate-revocation-list": {
       description:
-        "Mark a subordinate CA as deactivated and record revocation metadata",
-      arguments: z.object({
-        subCaName: z.string().min(1),
-        reason: z.string().min(1),
-      }),
+        "Generate an OpenSSH KRL for this CA without adding a revocation event reason",
+      arguments: z.object({ entries: z.array(RevocationEntrySchema).min(1) }),
       execute: async (
-        args: { subCaName: string; reason: string },
+        args: { entries: RevocationEntry[] },
         context: MethodContext,
       ) => {
-        context.logger.info("Deactivating SSH subordinate CA", {
-          subCaName: args.subCaName,
-        });
-        const subCa = await readSubCa(context, args.subCaName);
-        const deactivated = { ...subCa, state: "deactivated" as const };
-        const handles = [
-          await context.writeResource(
-            "subca",
-            `subca-${safeName(args.subCaName)}`,
-            deactivated,
-          ),
-          await context.writeResource(
-            "revocation",
-            `revocation-subca-${safeName(args.subCaName)}`,
-            {
-              caName: context.globalArgs.caName,
-              targetKind: "subca" as const,
-              target: args.subCaName,
-              reason: args.reason,
-              revokedAt: now().toISOString(),
-              metadataLabels: context.globalArgs.metadataLabels,
-            },
-          ),
-        ];
-        return { dataHandles: handles };
+        const ca = await readCa(context);
+        const data = {
+          caName: context.globalArgs.caName,
+          caFingerprint: ca.publicKeyFingerprint,
+          krlBase64: await generateKrl(context, ca, args.entries),
+          krlFormat: "openssh-krl" as const,
+          entries: args.entries,
+          generatedAt: now().toISOString(),
+          metadataLabels: context.globalArgs.metadataLabels,
+        };
+        return {
+          dataHandles: [
+            await context.writeResource(
+              "keyrevocationlist",
+              "krl-current",
+              data,
+            ),
+          ],
+        };
+      },
+    },
+    "describe-ca": {
+      description:
+        "Produce a Swamp data summary of this CA, active certificates, and OpenSSH configuration snippets",
+      arguments: z.object({ hostPattern: z.string().default("*") }),
+      execute: async (
+        args: { hostPattern: string },
+        context: MethodContext,
+      ) => {
+        const ca = await readCa(context);
+        const certs: CertificateData[] = [];
+        // Method contexts expose point reads only today, so this method records the CA and config snippets.
+        // The companion report reads all model data to list certificates.
+        const data = {
+          caName: context.globalArgs.caName,
+          ca,
+          activeCertificates: certs,
+          knownHostsCertAuthority:
+            `@cert-authority ${args.hostPattern} ${ca.publicKey}`,
+          trustedUserCAKeys: `${ca.publicKey}\n`,
+          generatedAt: now().toISOString(),
+          metadataLabels: context.globalArgs.metadataLabels,
+        };
+        return {
+          dataHandles: [await context.writeResource("ca", "ca-summary", data)],
+        };
       },
     },
   },

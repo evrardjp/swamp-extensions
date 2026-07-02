@@ -195,7 +195,7 @@ const PrepResultSchema = z.object({
 /** Arch Linux cloud-init image prep: downloads base image, creates qcow2 overlay, and generates NoCloud seed ISO. Idempotent — skips steps that are already complete. */
 export const model = {
   type: "@evrardjp/arch-cloud-init",
-  version: "2026.06.25.1",
+  version: "2026.06.29.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     prep: {

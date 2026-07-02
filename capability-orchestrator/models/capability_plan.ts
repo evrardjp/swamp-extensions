@@ -122,7 +122,7 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
 
 export const model = {
   type: "@evrardjp/capability-plan",
-  version: "2026.06.17.1",
+  version: "2026.06.29.1",
   globalArguments: z.object({}),
   resources: {
     plan: {

@@ -307,7 +307,7 @@ async function writeSpecializedResources(
 /** Model that stores pi session telemetry events for reporting. */
 export const model = {
   type: "@evrardjp/pi-session-telemetry",
-  version: "2026.06.17.1",
+  version: "2026.06.29.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     event: {

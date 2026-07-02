@@ -47,7 +47,7 @@ function validateCatalog(catalog: Record<string, CapabilitySpec>) {
 
 export const model = {
   type: "@evrardjp/capability-catalog",
-  version: "2026.06.17.1",
+  version: "2026.06.29.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     capability: {

@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@evrardjp/pi-session-telemetry"
-version: "2026.06.17.1"
+version: "2026.06.29.1"
 description: >-
   Privacy-safe Pi coding-agent session telemetry ingestion and reporting for
   Swamp. Captures useful metadata, usage, tool, message, and session signals

@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@evrardjp/arch-cloud-init"
-version: "2026.06.25.1"
+version: "2026.06.29.1"
 description: >-
   Convenience Arch Linux VM image preparer for Swamp: downloads the Arch cloud
   image, creates a qcow2 overlay, and writes a NoCloud seed ISO.

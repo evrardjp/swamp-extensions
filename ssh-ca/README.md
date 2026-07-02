@@ -1,64 +1,228 @@
 # @evrardjp/ssh-ca
 
-Swamp-native OpenSSH certificate authority lifecycle management for local labs.
+Strict OpenSSH certificate authority lifecycle management for Swamp.
 
-This extension manages OpenSSH CA keys and certificates as Swamp model data. It
-uses only `ssh-keygen` for key generation, signing, and fingerprint inspection.
-Private CA key material is emitted only through fields marked sensitive so Swamp
-stores it in the configured vault; normal data contains public keys,
-certificates, fingerprints, serials, principals, trust bundles, and audit
-metadata.
+One `@evrardjp/ssh-ca` model instance represents one actual OpenSSH CA keypair.
+There is no root CA and no intermediate CA hierarchy because OpenSSH validates a
+host/user certificate directly against a trusted CA public key.
+
+Private CA keys, CA key passphrases, and optionally issued certificates are stored
+in the configured Swamp vault. Public metadata, public keys, certificate
+metadata, `@cert-authority` lines, `TrustedUserCAKeys` material, and base64 KRLs
+are stored as Swamp data so other extensions can consume and deploy them.
 
 ## Model
 
 - Type: `@evrardjp/ssh-ca`
 - File: `models/ssh_ca.ts`
 
+## OpenSSH concepts
+
+- **CA keypair** — a normal OpenSSH private/public keypair used with
+  `ssh-keygen -s` to sign certificates.
+- **Host certificate** — signed with `ssh-keygen -s <ca_key> -h ...`.
+- **User certificate** — signed with `ssh-keygen -s <ca_key> ...` without `-h`.
+- **`@cert-authority` line** — client-side `known_hosts` syntax for trusting a
+  CA public key for host certificates.
+- **`TrustedUserCAKeys`** — server-side `sshd_config` setting pointing to a file
+  containing CA public keys trusted for user certificates.
+- **KRL** — OpenSSH Key Revocation List, generated with `ssh-keygen -k`.
+
 ## Methods
 
-- `init-root` — create or read the root SSH CA key.
-- `ensure-subca` — create or reconcile host/user subordinate CAs.
-- `issue-host-cert` — sign a host public key.
-- `issue-user-cert` — sign a user public key.
-- `render-client-trust` — render `known_hosts` `@cert-authority` lines.
-- `render-server-user-ca-trust` — render `TrustedUserCAKeys` material.
-- `reconcile-certs` — report missing/expiring CA state.
-- `rotate-subca` — create replacement sub-CA and record overlap metadata.
-- `revoke-cert` — record certificate revocation metadata.
-- `deactivate-subca` — deactivate a subordinate CA.
+### `generate-keypair`
 
-## Example
+Generate this model's OpenSSH CA keypair with `ssh-keygen`.
+
+Parameters:
+
+- `algorithm`: `ed25519`, `rsa`, or `ecdsa` (default from global args)
+- `bits`: optional `ssh-keygen -b` value
+- `comment`: optional `ssh-keygen -C` comment
+- `passphraseVaultKey`: optional vault key for generated passphrase
+- `privateKeyVaultKey`: optional vault key for generated private key
+- `force`: regenerate even if `ca-current` exists
+
+Example:
 
 ```bash
-swamp extension source add /var/home/evrardjp/git/evrardjp/swamp-extensions/ssh-ca --only models
+swamp model method run gerrit-host-ca generate-keypair \
+  --input algorithm=ed25519 \
+  --input comment=gerrit-host-ca
+```
 
-swamp model @evrardjp/ssh-ca method run init-root lab-ssh-ca \
-  --input caName=lab-ssh-ca \
-  --input hostSubCas:json='[{"name":"local-host-ca","usage":"host"}]' \
-  --input userSubCas:json='[{"name":"local-user-ca","usage":"user"}]'
+Outputs:
 
-swamp model method run lab-ssh-ca ensure-subca \
-  --input name=local-host-ca \
-  --input usage=host
+- `ca-current` Swamp data containing public key, fingerprint, algorithm, comment,
+  and vault refs
+- private key in vault
+- generated passphrase in vault
 
-ssh-keygen -q -t ed25519 -N '' -C gerrit.local -f /tmp/gerrit-host
-swamp model method run lab-ssh-ca issue-host-cert \
-  --input hostPublicKey="$(cat /tmp/gerrit-host.pub)" \
-  --input principals:json='["gerrit.local"]' \
-  --input subCaName=local-host-ca \
-  --input keyId=gerrit.local
+### `import-keypair`
 
-swamp model method run lab-ssh-ca render-client-trust \
-  --input hostPattern=gerrit.local \
-  --input subCaNames:json='["local-host-ca"]'
+Import an existing OpenSSH CA private/public key.
+
+Parameters:
+
+- `privateKey` or `privateKeyVault`
+- `passphrase`
+- `publicKey`
+- optional `algorithm`, `bits`, `comment`
+
+Example:
+
+```bash
+swamp model method run imported-ca import-keypair \
+  --input privateKeyVault.vaultName=local \
+  --input privateKeyVault.key=my-existing-ca-private-key \
+  --input passphrase='...' \
+  --input publicKey="$(cat ca.pub)" \
+  --input algorithm=ed25519
+```
+
+### `issue-host-certificate`
+
+Sign a host public key with this CA using `ssh-keygen -s ... -h`.
+
+Parameters:
+
+- one public key source:
+  - `publicKey`
+  - `publicKeyDataName`
+  - `publicKeyVault.vaultName` + `publicKeyVault.key`
+- `principals`: host principals for `ssh-keygen -n`
+- `keyId`: certificate identity for `ssh-keygen -I`
+- `serial`: optional `ssh-keygen -z` serial
+- `validity`: optional duration like `30d`
+- `options`: optional array of raw `ssh-keygen -O` options
+- `outputTarget`: `data`, `vault`, or `both`
+- `certificateVaultKey`: optional vault key when storing cert in vault
+
+Example:
+
+```bash
+swamp model method run gerrit-host-ca issue-host-certificate \
+  --input publicKey="$(cat /tmp/gerrit-host.pub)" \
+  --input 'principals:json=["gerrit.local"]' \
+  --input keyId=gerrit-host \
+  --input serial=1001 \
+  --input validity=30d \
+  --input outputTarget=both
+```
+
+### `issue-user-certificate`
+
+Sign a user public key with this CA using `ssh-keygen -s` without `-h`.
+
+Same parameters as `issue-host-certificate`.
+
+Example:
+
+```bash
+swamp model method run platform-user-ca issue-user-certificate \
+  --input publicKey="$(cat /tmp/alice.pub)" \
+  --input 'principals:json=["alice"]' \
+  --input keyId=alice-login \
+  --input serial=2001 \
+  --input validity=24h \
+  --input outputTarget=vault
+```
+
+### `generate-cert-authority`
+
+Generate one OpenSSH `known_hosts` `@cert-authority` line for this CA public key.
+This does not write to a remote machine.
+
+Example:
+
+```bash
+swamp model method run gerrit-host-ca generate-cert-authority \
+  --input hostPattern='*.local'
+```
+
+Output data contains:
+
+```text
+@cert-authority *.local ssh-ed25519 AAAA...
+```
+
+### `generate-trustedusercakeys`
+
+Generate OpenSSH `TrustedUserCAKeys` file content for this CA public key. This
+does not write to a remote machine.
+
+Example:
+
+```bash
+swamp model method run platform-user-ca generate-trustedusercakeys
+```
+
+### `revoke-certificate`
+
+Record a revocation event and generate an OpenSSH KRL for this CA.
+
+Supported entry mechanisms:
+
+- `serial`
+- `keyId`
+- `publicKey`
+- `certificate`
+- `targetDataName` pointing to Swamp data containing a certificate/public key
+
+Example:
+
+```bash
+swamp model method run platform-user-ca revoke-certificate \
+  --input reason='alice key compromised' \
+  --input 'entries:json=[{"serial":2001},{"keyId":"alice-login"}]'
+```
+
+### `generate-revocation-list`
+
+Generate an OpenSSH KRL without recording a revocation reason.
+
+Example:
+
+```bash
+swamp model method run platform-user-ca generate-revocation-list \
+  --input 'entries:json=[{"targetDataName":"cert-alice-login"}]'
+```
+
+The KRL is binary and is stored as base64 Swamp data in `krlBase64` with
+`krlFormat: openssh-krl`.
+
+### `describe-ca`
+
+Produce a summary data item for this CA with example OpenSSH config snippets.
+The inventory report is richer and reads all CA model data.
+
+## Report
+
+The extension registers `@evrardjp/ssh-ca-inventory`.
+
+It summarizes all `@evrardjp/ssh-ca` model instances in the repo:
+
+- CA public keys
+- fingerprints
+- algorithms/comments
+- issued certificates
+- KRL/revocation data
+- example `known_hosts` `@cert-authority` configuration
+- example `TrustedUserCAKeys` file content
+
+Example:
+
+```bash
+swamp report get @evrardjp/ssh-ca-inventory --model gerrit-host-ca --markdown
 ```
 
 ## Security notes
 
-- Do not pass existing host or user private keys to this model for signing;
-  signing methods take public keys only.
-- The only supported external helper is `ssh-keygen`.
-- The model does not configure Gerrit or sshd directly; consumers should use the
-  emitted trust bundle resources.
-- OpenSSH certificates are not X.509 chains. Consumers must trust the active
-  host/user CA public keys directly.
+- The model invokes `ssh-keygen` only.
+- Private CA keys are stored in the Swamp vault.
+- Generated CA passphrases are stored in the Swamp vault by default.
+- Certificate material can be stored in Swamp data, in the vault, or both.
+- This extension produces data only. It does not configure SSH clients/servers or
+  write remote files.
+- To enforce revocation, another extension must decode `krlBase64`, write the KRL
+  to a target path, and configure `RevokedKeys` for `ssh`/`sshd` as appropriate.
