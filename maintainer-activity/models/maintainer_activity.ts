@@ -165,9 +165,9 @@ const ActivityEventSchema = z.object({
   createdAt: IsoDateTime,
   url: z.string().optional(),
   filePath: z.string().optional(),
-  line: z.number().optional(),
-  startLine: z.number().optional(),
-  endLine: z.number().optional(),
+  line: z.number().nullable().optional(),
+  startLine: z.number().nullable().optional(),
+  endLine: z.number().nullable().optional(),
   diffHunk: z.string().optional(),
   state: z.string().optional(),
   label: z.string().optional(),
@@ -203,6 +203,15 @@ const RecordArtifactArgsSchema = z.object({
 });
 const StateEnumSchema = z.enum(["open", "closed", "all"]);
 const StateArgSchema = StateEnumSchema.default("open");
+const PrDetailOptionsSchema = z.object({
+  includeFiles: z.boolean().default(true),
+  includePatchArtifacts: z.boolean().default(false),
+  includeReviews: z.boolean().default(true),
+  includeReviewComments: z.boolean().default(true),
+  includeIssueComments: z.boolean().default(true),
+  includeChecks: z.boolean().default(true),
+  includeTimeline: z.boolean().default(true),
+});
 
 function requireGithubProject(
   g: GlobalArgs,
@@ -953,8 +962,9 @@ async function readJson(
 
 export const model = {
   type: "@evrardjp/maintainer-activity",
-  version: "2026.07.02.1",
+  version: "2026.07.02.2",
   globalArguments: GlobalArgsSchema,
+  reports: ["@evrardjp/maintainer-briefing"],
   resources: {
     repoSnapshot: {
       description: "Current repository metadata",
@@ -1105,17 +1115,10 @@ export const model = {
     sync_github_prs: {
       description:
         "Fetch PR snapshots, files, reviews, comments, timeline, and CI status",
-      arguments: z.object({
+      arguments: PrDetailOptionsSchema.extend({
         state: StateArgSchema,
         since: z.string().optional(),
         limit: z.number().int().positive().optional(),
-        includeFiles: z.boolean().default(true),
-        includePatchArtifacts: z.boolean().default(false),
-        includeReviews: z.boolean().default(true),
-        includeReviewComments: z.boolean().default(true),
-        includeIssueComments: z.boolean().default(true),
-        includeChecks: z.boolean().default(true),
-        includeTimeline: z.boolean().default(true),
       }),
       execute: async (args: any, ctx: any) => {
         const g = ctx.globalArgs;
@@ -1130,6 +1133,23 @@ export const model = {
           handles.push(...await syncPrDetails(ctx, pr, args));
         }
         return { dataHandles: handles };
+      },
+    },
+    sync_github_pr_by_number: {
+      description:
+        "Fetch exactly one PR by number, regardless of state, including files, reviews, comments, timeline, and CI status",
+      arguments: PrDetailOptionsSchema.extend({
+        prNumber: z.number().int().positive(),
+      }),
+      execute: async (args: any, ctx: any) => {
+        const { prNumber, ...detailOptions } = args;
+        return {
+          dataHandles: await syncPrDetails(
+            ctx,
+            { number: prNumber },
+            detailOptions,
+          ),
+        };
       },
     },
     sync_github_recent_activity: {
@@ -1212,7 +1232,10 @@ export const model = {
           ),
         ];
         handles.push(
-          ...await syncForkIndex(ctx, { includeConfiguredKnownForks: true }),
+          ...await syncForkIndex(ctx, {
+            includeConfiguredKnownForks: true,
+            limit: args.limit,
+          }),
         );
         const prState = args.includeClosed ? args.state : "open";
         let prs = await ghPages<any>(g, `/repos/${g.owner}/${g.repo}/pulls`, {
@@ -1362,35 +1385,53 @@ export const model = {
           "## Timeline",
           "",
         );
+        const actorWidth = 32;
+        const fixedActor = (actor: unknown) => {
+          const value = String(actor ?? "unknown");
+          return value.length > actorWidth
+            ? `${value.slice(0, actorWidth - 1)}…`
+            : value.padEnd(actorWidth, " ");
+        };
+        const singleLine = (value: unknown, max = 500) => {
+          const text = String(value ?? "")
+            .replace(/\r?\n/g, " / ")
+            .replace(/\s+/g, " ")
+            .trim();
+          return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+        };
+        const detailsFor = (e: any) => {
+          const details = [`visibility=${e.visibility}`];
+          if (e.filePath) {
+            details.push(
+              `file=${e.filePath}${e.line ? `:${e.line}` : ""}`,
+            );
+          }
+          if (e.body) details.push(`body="${singleLine(e.body)}"`);
+          for (const a of e.artifactRefs ?? []) {
+            details.push(
+              `artifact=swamp data get ${ctx.definition.name} ${a}`,
+            );
+          }
+          return details.join("; ");
+        };
         let day = "";
+        let hour = "";
         for (const e of events) {
           const d = e.createdAt.slice(0, 10);
+          const h = e.createdAt.slice(11, 13);
           if (d !== day) {
             day = d;
+            hour = "";
             lines.push(`### ${day}`, "");
           }
+          if (h !== hour) {
+            hour = h;
+            lines.push(`#### ${hour}:00`, "");
+          }
           lines.push(
-            `#### ${e.createdAt.slice(11, 16)} — ${e.summary}`,
-            `**Actor:** ${e.actor}  `,
-            `**Visibility:** ${e.visibility}  `,
+            `${e.createdAt.slice(11, 16)} - ${fixedActor(e.actor)} - ${e.summary} - ${detailsFor(e)}`,
+            "",
           );
-          if (e.filePath) {
-            lines.push(
-              `**File:** \`${e.filePath}\`${e.line ? `:${e.line}` : ""}  `,
-            );
-          }
-          if (e.body) {
-            lines.push(
-              "",
-              `> ${String(e.body).split(/\r?\n/).slice(0, 8).join("\n> ")}`,
-            );
-          }
-          for (const a of e.artifactRefs ?? []) {
-            lines.push(
-              `**Artifact:** \`swamp data get ${ctx.definition.name} ${a}\``,
-            );
-          }
-          lines.push("");
         }
         lines.push(
           "## Reference",

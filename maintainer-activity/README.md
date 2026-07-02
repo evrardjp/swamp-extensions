@@ -193,6 +193,32 @@ swamp model method run eso-external-secrets-activity sync_github_prs \
     --report @evrardjp/maintainer-briefing
 ```
 
+(Optional): Sync the rest of the PRs, issues, etc.
+   swamp model method run eso-external-secrets-activity sync_github_prs \
+     --input state=open \
+     --input limit=20 \
+     --input includeFiles=true \
+     --input includeReviews=true \
+     --input includeReviewComments=true \
+     --input includeIssueComments=true \
+     --input includeChecks=true \
+     --input includeTimeline=true
+
+   swamp model method run eso-external-secrets-activity sync_github_issues \
+     --input state=open \
+     --input limit=20 \
+     --input includeComments=true \
+     --input includeTimeline=true
+
+ For repair/history:
+
+ ```bash
+   swamp model method run eso-external-secrets-activity sync_github_backfill \
+     --input since=2026-06-01 \
+     --input until=2026-07-02 \
+     --input limit=100
+ ```
+
 5. Read the briefing:
 
 ```bash
@@ -214,4 +240,40 @@ swamp data query 'modelName == "eso-external-secrets-activity" && specName == "p
     | jq -r '.content.markdown'
 ```
 
-If that works, next step is schedule a frequent workflow for sync_github_recent_activity and a nightly bounded sync_github_backfill.
+### Deep dive into data
+
+First, render the PR report:
+
+```bash
+  swamp model method run eso-external-secrets-activity render_pr_report \
+    --input prNumber=6546
+```
+
+You will see a command listing the overall structure of data. Read it with:
+
+```bash
+swamp data get eso-external-secrets-activity \
+    pr-report-external-secrets-external-secrets-6546 \
+    --json | jq -r '.content.markdown'
+```
+
+Useful raw inspection commands:
+
+```bash
+# PR snapshots
+swamp data query 'modelName == "eso-external-secrets-activity" && specName == "prSnapshot"' \
+  --select '{"name": name, "version": version, "number": attributes.number, "title": attributes.title, "state": attributes.state, "checksState": attributes.checksState, "reviewDecision": attributes.reviewDecision, "url": attributes.url}'
+
+# Activity events for PR 6546
+swamp data query 'modelName == "eso-external-secrets-activity" && specName == "activityEvent" && attributes.subjectType == "pr" && attributes.subjectNumber == 6546' \
+  --select '{"time": attributes.createdAt, "type": attributes.eventType, "actor": attributes.actor, "summary": attributes.summary, "file": attributes.filePath}'
+
+# Changed files for PR 6546
+swamp data query 'modelName == "eso-external-secrets-activity" && specName == "prFileSnapshot" && attributes.prNumber == 6546' \
+  --select '{"path": attributes.path, "status": attributes.statusShort, "additions": attributes.additions, "deletions": attributes.deletions}'
+
+# CI statuses for PR 6546
+swamp data query 'modelName == "eso-external-secrets-activity" && specName == "ciStatusSnapshot" && attributes.prNumber == 6546' \
+  --select '{"name": attributes.name, "status": attributes.status, "conclusion": attributes.conclusion, "url": attributes.url}'
+```
+

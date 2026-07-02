@@ -9,33 +9,56 @@
 
 type Json = Record<string, unknown>;
 
-type ReportCtx = {
-  repoDir?: string;
+type DataMetadata = {
+  name?: string;
+  version?: number;
+  specName?: string;
+  tags?: Record<string, string>;
 };
 
-async function swamp(
-  repoDir: string | undefined,
-  args: string[],
-): Promise<Json> {
-  const result = await new Deno.Command("swamp", {
-    args,
-    cwd: repoDir,
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  const stdout = new TextDecoder().decode(result.stdout);
-  const stderr = new TextDecoder().decode(result.stderr);
-  if (result.code !== 0) {
-    throw new Error(`swamp ${args.join(" ")} failed: ${stderr || stdout}`);
-  }
-  return JSON.parse(stdout) as Json;
+type ReportCtx = {
+  modelType: string;
+  modelId: string;
+  definition: { name: string };
+  dataRepository: {
+    findAllForModel: (
+      modelType: string,
+      modelId: string,
+    ) => Promise<DataMetadata[]>;
+    getContent: (
+      modelType: string,
+      modelId: string,
+      dataName: string,
+      version?: number,
+    ) => Promise<Uint8Array | null>;
+  };
+};
+
+function parseJson(bytes: Uint8Array | null): Json | null {
+  if (!bytes) return null;
+  const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed as Json
+    : null;
 }
 
-function contentOf(data: Json): Json | null {
-  const content = data.content;
-  return content && typeof content === "object" && !Array.isArray(content)
-    ? content as Json
-    : null;
+async function readData(
+  context: ReportCtx,
+  item: DataMetadata,
+): Promise<Json | null> {
+  if (!item.name) return null;
+  return await parseJson(
+    await context.dataRepository.getContent(
+      context.modelType,
+      context.modelId,
+      item.name,
+      item.version,
+    ),
+  );
+}
+
+function specName(item: DataMetadata): string {
+  return String(item.specName ?? item.tags?.specName ?? "");
 }
 
 function esc(value: unknown): string {
@@ -58,135 +81,74 @@ export const report = {
   scope: "model" as const,
   labels: ["ssh", "openssh", "ca", "inventory"],
   execute: async (context: ReportCtx) => {
-    const search = await swamp(context.repoDir, [
-      "model",
-      "search",
-      "@evrardjp/ssh-ca",
-      "--json",
-    ]);
-    const models = Array.isArray(search.results)
-      ? search.results as Json[]
-      : [];
-    const inventory: Json[] = [];
+    const allData = await context.dataRepository.findAllForModel(
+      context.modelType,
+      context.modelId,
+    );
+    const caItem = allData.find((item) => item.name === "ca-current") ??
+      allData.find((item) => specName(item) === "ca");
+    const ca = caItem ? await readData(context, caItem) : null;
 
-    for (const model of models) {
-      const name = String(model.name ?? "");
-      if (!name) continue;
-      let ca: Json | null = null;
-      try {
-        ca = contentOf(
-          await swamp(context.repoDir, [
-            "data",
-            "get",
-            name,
-            "ca-current",
-            "--json",
-          ]),
-        );
-      } catch {
-        ca = null;
+    const certificates: Json[] = [];
+    const krls: Json[] = [];
+    for (const item of allData) {
+      if (!item.name) continue;
+      const spec = specName(item);
+      if (
+        spec !== "certificate" && spec !== "keyrevocationlist" &&
+        spec !== "revocation"
+      ) {
+        continue;
       }
-      const certRows: Json[] = [];
-      const krlRows: Json[] = [];
-      try {
-        const listed = await swamp(context.repoDir, [
-          "data",
-          "query",
-          `modelName == \"${name}\"`,
-          "--json",
-        ]);
-        const results = Array.isArray(listed.results)
-          ? listed.results as Json[]
-          : [];
-        for (const item of results) {
-          const specName = item.specName ??
-            (item.tags as Json | undefined)?.specName;
-          const dataName = String(item.name ?? "");
-          if (!dataName) continue;
-          if (specName === "certificate") {
-            const cert = contentOf(
-              await swamp(context.repoDir, [
-                "data",
-                "get",
-                name,
-                dataName,
-                "--json",
-              ]),
-            );
-            if (cert) certRows.push({ dataName, ...cert });
-          }
-          if (specName === "keyrevocationlist" || specName === "revocation") {
-            const krl = contentOf(
-              await swamp(context.repoDir, [
-                "data",
-                "get",
-                name,
-                dataName,
-                "--json",
-              ]),
-            );
-            if (krl) krlRows.push({ dataName, ...krl });
-          }
-        }
-      } catch {
-        // Keep partial CA inventory useful even when data listing fails.
-      }
-      inventory.push({
-        modelName: name,
-        ca,
-        certificates: certRows,
-        krls: krlRows,
-      });
+      const content = await readData(context, item);
+      if (!content) continue;
+      const withName = { dataName: item.name, ...content };
+      if (spec === "certificate") certificates.push(withName);
+      else krls.push(withName);
     }
 
-    const caRows = inventory.map((entry) => {
-      const ca = entry.ca as Json | null;
-      return [
-        esc(entry.modelName),
-        esc(ca?.caName),
-        esc(ca?.keyAlgorithm),
-        esc(ca?.publicKeyFingerprint),
-        esc(ca?.publicKey),
-      ];
-    });
+    const inventory = [{
+      modelName: context.definition.name,
+      ca,
+      certificates,
+      krls,
+    }];
 
-    const certRows = inventory.flatMap((entry) => {
-      const certs = Array.isArray(entry.certificates)
-        ? entry.certificates as Json[]
-        : [];
-      return certs.map((cert) => [
-        esc(entry.modelName),
-        esc(cert.certificateType),
-        esc(cert.keyId),
-        esc(cert.serial),
-        esc((cert.principals as unknown[] | undefined)?.join(",")),
-        esc(cert.validBefore),
-        esc(cert.certificateVaultRef ? "vault" : "data"),
-      ]);
-    });
+    const caRows = [[
+      esc(context.definition.name),
+      esc(ca?.caName),
+      esc(ca?.keyAlgorithm),
+      esc(ca?.publicKeyFingerprint),
+      esc(ca?.publicKey),
+    ]];
 
-    const krlRows = inventory.flatMap((entry) => {
-      const krls = Array.isArray(entry.krls) ? entry.krls as Json[] : [];
-      return krls.map((krl) => [
-        esc(entry.modelName),
-        esc(krl.dataName),
-        esc(krl.krlFormat),
-        esc((String(krl.krlBase64 ?? "")).length),
-      ]);
-    });
+    const certRows = certificates.map((cert) => [
+      esc(context.definition.name),
+      esc(cert.certificateType),
+      esc(cert.keyId),
+      esc(cert.serial),
+      esc((cert.principals as unknown[] | undefined)?.join(",")),
+      esc(cert.validBefore),
+      esc(cert.certificateVaultRef ? "vault" : "data"),
+    ]);
 
-    const config = inventory.flatMap((entry) => {
-      const ca = entry.ca as Json | null;
-      if (!ca?.publicKey) return [];
-      return [
-        `# ${entry.modelName}`,
-        `# known_hosts @cert-authority example`,
+    const krlRows = krls.map((krl) => [
+      esc(context.definition.name),
+      esc(krl.dataName),
+      esc(krl.krlFormat),
+      esc((String(krl.krlBase64 ?? "")).length),
+    ]);
+
+    const config = ca?.publicKey
+      ? [
+        `# ${context.definition.name}`,
+        "# known_hosts @cert-authority example",
         `@cert-authority *.example.local ${ca.publicKey}`,
-        `# sshd_config TrustedUserCAKeys file content`,
+        "# sshd_config TrustedUserCAKeys file content",
         `${ca.publicKey}`,
         "",
-      ];
-    }).join("\n");
+      ].join("\n")
+      : "";
 
     const markdown = [
       "# OpenSSH CA Inventory",

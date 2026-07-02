@@ -22,6 +22,7 @@ function recordingContext() {
         knownForks: [],
         defaultBackfillWindowDays: 90,
         personalGithubHandles: [],
+        githubToken: undefined as string | undefined,
       },
       definition: { name: "activity" },
       writeResource: async (
@@ -94,6 +95,77 @@ Deno.test("record_artifact writes artifact file and index", async () => {
   assertEquals(writes[0].data.name, "artifact-pr-42-session");
   assertEquals(writes[0].data.repo, "owner/repo");
   assertEquals(writes[0].data.contentType, "text/markdown");
+});
+
+Deno.test("sync_github_pr_by_number fetches exactly one PR directly", async () => {
+  const { writes, context } = recordingContext();
+  context.globalArgs.githubToken = "gh-token";
+  const requestedUrls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request) => {
+    const url = String(input);
+    requestedUrls.push(url);
+    if (url.includes("/repos/owner/repo/pulls/42")) {
+      return new Response(
+        JSON.stringify({
+          number: 42,
+          title: "Add feature",
+          state: "closed",
+          merged: true,
+          merged_at: "2026-07-01T12:00:00.000Z",
+          draft: false,
+          user: { login: "alice" },
+          base: { ref: "main" },
+          head: {
+            ref: "feature",
+            sha: "abc123",
+            repo: {
+              full_name: "alice/repo",
+              pushed_at: "2026-07-01T11:30:00.000Z",
+            },
+          },
+          labels: [{ name: "kind/feature" }],
+          assignees: [],
+          requested_reviewers: [],
+          mergeable: true,
+          additions: 10,
+          deletions: 2,
+          changed_files: 1,
+          created_at: "2026-07-01T10:00:00.000Z",
+          updated_at: "2026-07-01T11:00:00.000Z",
+          closed_at: "2026-07-01T12:00:00.000Z",
+          html_url: "https://github.com/owner/repo/pull/42",
+          node_id: "PR_kw42",
+        }),
+        { status: 200 },
+      );
+    }
+    return new Response("unexpected URL", { status: 500 });
+  };
+  try {
+    const result = await model.methods.sync_github_pr_by_number.execute({
+      prNumber: 42,
+      includeFiles: false,
+      includePatchArtifacts: false,
+      includeReviews: false,
+      includeReviewComments: false,
+      includeIssueComments: false,
+      includeChecks: false,
+      includeTimeline: false,
+    }, context);
+
+    assertEquals(requestedUrls.length, 1);
+    assertEquals(requestedUrls[0].includes("/repos/owner/repo/pulls/42"), true);
+    assertEquals(requestedUrls[0].includes("state="), false);
+    assertEquals(result.dataHandles.length, 2);
+    assertEquals(writes.some((w) => w.specName === "prSnapshot"), true);
+    assertEquals(
+      writes.find((w) => w.specName === "prSnapshot")?.data.state,
+      "closed",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 Deno.test("render_pr_report reads new activity database resources", async () => {

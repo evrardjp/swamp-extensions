@@ -41,6 +41,27 @@ const VaultRefSchema = z.object({
   key: z.string().min(1),
 });
 
+const GenerateKeypairArgsSchema = z.object({
+  algorithm: KeyAlgorithmSchema.optional(),
+  bits: z.number().int().positive().optional(),
+  comment: z.string().optional(),
+  passphraseVaultKey: z.string().optional(),
+  privateKeyVaultKey: z.string().optional().meta({ sensitive: true }),
+  force: z.boolean().default(false),
+});
+
+const ImportKeypairArgsSchema = z.object({
+  privateKey: z.string().min(1).optional().meta({ sensitive: true }),
+  privateKeyVault: VaultRefSchema.optional().meta({ sensitive: true }),
+  passphrase: z.string().default("").meta({ sensitive: true }),
+  publicKey: z.string().min(1),
+  algorithm: KeyAlgorithmSchema.optional(),
+  bits: z.number().int().positive().optional(),
+  comment: z.string().optional(),
+  privateKeyVaultKey: z.string().optional().meta({ sensitive: true }),
+  passphraseVaultKey: z.string().optional(),
+});
+
 const GlobalArgsSchema = z.object({
   caName: z.string().min(1).describe("Logical OpenSSH CA name"),
   vaultName: z.string().min(1).describe(
@@ -85,8 +106,8 @@ const CaSchema = z.object({
   caName: z.string(),
   publicKey: z.string(),
   publicKeyFingerprint: z.string(),
-  privateKeyVaultRef: z.string(),
-  passphraseVaultRef: z.string(),
+  privateKeyVaultRef: z.string().meta({ sensitive: true }),
+  passphraseVaultRef: z.string().meta({ sensitive: true }),
   keyAlgorithm: KeyAlgorithmSchema,
   bits: z.number().int().positive().optional(),
   comment: z.string(),
@@ -142,6 +163,8 @@ type RevocationEntry = z.infer<typeof RevocationEntrySchema>;
 
 type CertificateData = z.infer<typeof CertificateSchema>;
 type CaData = z.infer<typeof CaSchema>;
+type GenerateKeypairMethodArgs = z.infer<typeof GenerateKeypairArgsSchema>;
+type ImportKeypairMethodArgs = z.infer<typeof ImportKeypairArgsSchema>;
 type IssueCertificateMethodArgs = {
   publicKey?: string;
   publicKeyDataName?: string;
@@ -173,6 +196,16 @@ const RevocationSchema = z.object({
   entries: z.array(RevocationEntrySchema),
   krlBase64: z.string(),
   krlFormat: z.literal("openssh-krl"),
+  metadataLabels: z.record(z.string(), z.string()),
+});
+
+const CaSummarySchema = z.object({
+  caName: z.string(),
+  ca: CaSchema,
+  activeCertificates: z.array(CertificateSchema),
+  knownHostsCertAuthority: z.string(),
+  trustedUserCAKeys: z.string(),
+  generatedAt: IsoDateTimeSchema,
   metadataLabels: z.record(z.string(), z.string()),
 });
 
@@ -651,28 +684,21 @@ export const model = {
       lifetime: "infinite",
       garbageCollection: 500,
     },
+    casummary: {
+      description:
+        "Summary of this CA, active certificates, and OpenSSH configuration snippets",
+      schema: CaSummarySchema,
+      lifetime: "30d",
+      garbageCollection: 50,
+    },
   },
   methods: {
     "generate-keypair": {
       description:
         "Generate this OpenSSH CA keypair with ssh-keygen and store private key/passphrase in the Swamp vault",
-      arguments: z.object({
-        algorithm: KeyAlgorithmSchema.optional(),
-        bits: z.number().int().positive().optional(),
-        comment: z.string().optional(),
-        passphraseVaultKey: z.string().optional(),
-        privateKeyVaultKey: z.string().optional(),
-        force: z.boolean().default(false),
-      }),
+      arguments: GenerateKeypairArgsSchema,
       execute: async (
-        args: {
-          algorithm?: "ed25519" | "rsa" | "ecdsa";
-          bits?: number;
-          comment?: string;
-          passphraseVaultKey?: string;
-          privateKeyVaultKey?: string;
-          force: boolean;
-        },
+        args: GenerateKeypairMethodArgs,
         context: MethodContext,
       ) => {
         context.logger.info("Generating OpenSSH CA keypair", {
@@ -750,29 +776,9 @@ export const model = {
     "import-keypair": {
       description:
         "Import an existing OpenSSH CA private/public key into the Swamp vault/data model",
-      arguments: z.object({
-        privateKey: z.string().min(1).optional(),
-        privateKeyVault: VaultRefSchema.optional(),
-        passphrase: z.string().default(""),
-        publicKey: z.string().min(1),
-        algorithm: KeyAlgorithmSchema.optional(),
-        bits: z.number().int().positive().optional(),
-        comment: z.string().optional(),
-        privateKeyVaultKey: z.string().optional(),
-        passphraseVaultKey: z.string().optional(),
-      }),
+      arguments: ImportKeypairArgsSchema,
       execute: async (
-        args: {
-          privateKey?: string;
-          privateKeyVault?: z.infer<typeof VaultRefSchema>;
-          passphrase: string;
-          publicKey: string;
-          algorithm?: "ed25519" | "rsa" | "ecdsa";
-          bits?: number;
-          comment?: string;
-          privateKeyVaultKey?: string;
-          passphraseVaultKey?: string;
-        },
+        args: ImportKeypairMethodArgs,
         context: MethodContext,
       ) => {
         const privateKey = args.privateKey ??
@@ -1003,7 +1009,9 @@ export const model = {
           metadataLabels: context.globalArgs.metadataLabels,
         };
         return {
-          dataHandles: [await context.writeResource("ca", "ca-summary", data)],
+          dataHandles: [
+            await context.writeResource("casummary", "ca-summary", data),
+          ],
         };
       },
     },
