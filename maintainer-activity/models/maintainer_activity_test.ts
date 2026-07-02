@@ -21,6 +21,7 @@ function recordingContext() {
         includePrivateEvents: true,
         knownForks: [],
         defaultBackfillWindowDays: 90,
+        staleInactivityDays: 15,
         personalGithubHandles: [],
         githubToken: undefined as string | undefined,
       },
@@ -166,6 +167,177 @@ Deno.test("sync_github_pr_by_number fetches exactly one PR directly", async () =
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+Deno.test("classify_stale_candidates writes classification events for stale snapshots", async () => {
+  const encoder = new TextEncoder();
+  const entries = [
+    {
+      name: "pr-owner-repo-1-snapshot",
+      version: 1,
+      tags: { specName: "prSnapshot" },
+      value: {
+        repo: "owner/repo",
+        number: 1,
+        title: "Needs attention",
+        state: "open",
+        labels: ["kind/bug"],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-10T00:00:00.000Z",
+        lastConversationAt: "2026-01-10T00:00:00.000Z",
+        lastCodeChangeAt: "2026-01-10T00:00:00.000Z",
+        syncedAt: "2026-04-20T00:00:00.000Z",
+        url: "https://github.com/owner/repo/pull/1",
+      },
+    },
+    {
+      name: "issue-owner-repo-2-snapshot",
+      version: 1,
+      tags: { specName: "issueSnapshot" },
+      value: {
+        repo: "owner/repo",
+        number: 2,
+        title: "Already stale",
+        state: "open",
+        labels: ["Stale"],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-10T00:00:00.000Z",
+        lastConversationAt: "2026-01-10T00:00:00.000Z",
+        syncedAt: "2026-04-20T00:00:00.000Z",
+      },
+    },
+    {
+      name: "issue-owner-repo-3-snapshot",
+      version: 1,
+      tags: { specName: "issueSnapshot" },
+      value: {
+        repo: "owner/repo",
+        number: 3,
+        title: "Too new",
+        state: "open",
+        labels: [],
+        createdAt: "2026-04-01T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        lastConversationAt: "2026-04-15T00:00:00.000Z",
+        syncedAt: "2026-04-20T00:00:00.000Z",
+      },
+    },
+  ];
+  const contentByName = new Map(
+    entries.map((entry) => [
+      `${entry.name}:${entry.version}`,
+      encoder.encode(JSON.stringify(entry.value)),
+    ]),
+  );
+  const { writes, context } = recordingContext();
+  const classifyContext = {
+    ...context,
+    modelType: "@evrardjp/maintainer-activity",
+    modelId: "model-id",
+    dataRepository: {
+      findAllForModel: async () =>
+        entries.map(({ name, version, tags }) => ({ name, version, tags })),
+      getContent: async (
+        _modelType: unknown,
+        _modelId: string,
+        dataName: string,
+        version?: number,
+      ) => contentByName.get(`${dataName}:${version}`) ?? null,
+    },
+  };
+
+  const result = await model.methods.classify_stale_candidates.execute({
+    asOf: "2026-04-20T00:00:00.000Z",
+  }, classifyContext);
+
+  assertEquals(result.dataHandles.length, 1);
+  assertEquals(result.summary.candidateCount, 1);
+  assertEquals(writes.length, 1);
+  assertEquals(writes[0].specName, "activityEvent");
+  assertEquals(writes[0].data.eventType, "classification_stale_candidate");
+  assertEquals(writes[0].data.subjectType, "pr");
+  assertEquals(writes[0].data.subjectNumber, 1);
+  assertEquals(writes[0].data.label, "Stale");
+});
+
+Deno.test("clear_stale_candidates writes clear events for active stale snapshots", async () => {
+  const encoder = new TextEncoder();
+  const entries = [
+    {
+      name: "issue-owner-repo-4-snapshot",
+      version: 1,
+      tags: { specName: "issueSnapshot" },
+      value: {
+        repo: "owner/repo",
+        number: 4,
+        title: "Active again",
+        state: "open",
+        labels: ["Stale"],
+        createdAt: "2026-04-01T00:00:00.000Z",
+        updatedAt: "2026-04-18T00:00:00.000Z",
+        lastConversationAt: "2026-04-18T00:00:00.000Z",
+        syncedAt: "2026-04-20T00:00:00.000Z",
+        url: "https://github.com/owner/repo/issues/4",
+      },
+    },
+    {
+      name: "event-owner-repo-issue-4-stale",
+      version: 1,
+      tags: { specName: "activityEvent" },
+      value: {
+        id: "stale-4",
+        repo: "owner/repo",
+        subjectType: "issue",
+        subjectNumber: 4,
+        eventType: "classification_stale_candidate",
+        source: "test",
+        visibility: "private",
+        actor: "swamp",
+        summary: "classified stale",
+        createdAt: "2026-04-01T00:00:00.000Z",
+        state: "stale:2026-03-01T00:00:00.000Z:15",
+        label: "Stale",
+        artifactRefs: [],
+        tags: ["classification", "stale"],
+      },
+    },
+  ];
+  const contentByName = new Map(
+    entries.map((entry) => [
+      `${entry.name}:${entry.version}`,
+      encoder.encode(JSON.stringify(entry.value)),
+    ]),
+  );
+  const { writes, context } = recordingContext();
+  const clearContext = {
+    ...context,
+    modelType: "@evrardjp/maintainer-activity",
+    modelId: "model-id",
+    dataRepository: {
+      findAllForModel: async () =>
+        entries.map(({ name, version, tags }) => ({ name, version, tags })),
+      getContent: async (
+        _modelType: unknown,
+        _modelId: string,
+        dataName: string,
+        version?: number,
+      ) => contentByName.get(`${dataName}:${version}`) ?? null,
+    },
+  };
+
+  const result = await model.methods.clear_stale_candidates.execute({
+    asOf: "2026-04-20T00:00:00.000Z",
+  }, clearContext);
+
+  assertEquals(result.dataHandles.length, 1);
+  assertEquals(result.summary.clearedCount, 1);
+  assertEquals(writes.length, 1);
+  assertEquals(
+    writes[0].data.eventType,
+    "classification_stale_candidate_cleared",
+  );
+  assertEquals(writes[0].data.subjectType, "issue");
+  assertEquals(writes[0].data.subjectNumber, 4);
 });
 
 Deno.test("render_pr_report reads new activity database resources", async () => {

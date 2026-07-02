@@ -1,4 +1,4 @@
-// deno-lint-ignore-file no-explicit-any require-await no-unused-vars prefer-const
+// deno-lint-ignore-file no-explicit-any require-await prefer-const
 /**
  * Swamp-backed GitHub project activity ledger.
  *
@@ -31,6 +31,9 @@ const GlobalArgsSchema = z.object({
     "Whether reports include private/manual/agent events by default",
   ),
   defaultBackfillWindowDays: z.number().int().positive().default(90),
+  staleInactivityDays: z.number().int().positive().default(15).describe(
+    "Number of days without conversation or code changes before an open PR/issue becomes a stale candidate",
+  ),
   personalGithubHandles: z.array(z.string()).default([
     "evrardjp",
     "evrardj-roche",
@@ -212,6 +215,14 @@ const PrDetailOptionsSchema = z.object({
   includeChecks: z.boolean().default(true),
   includeTimeline: z.boolean().default(true),
 });
+const ClassifyStaleCandidatesArgsSchema = z.object({
+  includePrs: z.boolean().default(true),
+  includeIssues: z.boolean().default(true),
+  staleLabel: z.string().min(1).default("Stale"),
+  maxCandidates: z.number().int().positive().optional(),
+  asOf: IsoDateTime.optional(),
+  dryRun: z.boolean().default(false),
+});
 
 function requireGithubProject(
   g: GlobalArgs,
@@ -335,6 +346,9 @@ async function ghPages<T>(
 
 type WriteContext = {
   globalArgs: GlobalArgs;
+  modelType?: string;
+  modelId?: string;
+  dataRepository?: any;
   writeResource: (
     specName: string,
     name: string,
@@ -960,9 +974,322 @@ async function readJson(
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
+type StaleCandidate = {
+  subjectType: "pr" | "issue";
+  number: number;
+  title: string;
+  url?: string;
+  labels: string[];
+  lastActivityAt: string;
+  inactiveDays: number;
+};
+
+function hasLabel(labels: string[] | undefined, label: string): boolean {
+  const wanted = label.toLowerCase();
+  return (labels ?? []).some((l) => l.toLowerCase() === wanted);
+}
+
+function staleActivityAt(snapshot: any, subjectType: "pr" | "issue"): string {
+  if (subjectType === "pr") {
+    return maxIso([
+      snapshot.lastConversationAt,
+      snapshot.lastCodeChangeAt,
+      snapshot.updatedAt,
+      snapshot.createdAt,
+    ]) ?? snapshot.createdAt;
+  }
+  return maxIso([
+    snapshot.lastConversationAt,
+    snapshot.updatedAt,
+    snapshot.createdAt,
+  ]) ?? snapshot.createdAt;
+}
+
+async function latestSnapshotsByNumber(
+  ctx: WriteContext,
+  entries: any[],
+  specName: "prSnapshot" | "issueSnapshot",
+): Promise<Map<number, any>> {
+  const byNumber = new Map<number, { entry: any; value: any }>();
+  for (const entry of entries.filter((e) => tagsOf(e).specName === specName)) {
+    const value = await readJson(
+      ctx.dataRepository,
+      ctx.modelType!,
+      ctx.modelId!,
+      entry,
+    );
+    if (!value?.number) continue;
+    const existing = byNumber.get(value.number);
+    if (!existing || (entry.version ?? 0) > (existing.entry.version ?? 0)) {
+      byNumber.set(value.number, { entry, value });
+    }
+  }
+  return new Map([...byNumber].map(([number, item]) => [number, item.value]));
+}
+
+async function classifyStaleCandidates(
+  ctx: WriteContext,
+  args: z.infer<typeof ClassifyStaleCandidatesArgsSchema>,
+): Promise<{ dataHandles: DataHandle[]; candidates: StaleCandidate[] }> {
+  if (!ctx.dataRepository || !ctx.modelType || !ctx.modelId) {
+    throw new Error(
+      "dataRepository, modelType, and modelId are required to classify stale candidates",
+    );
+  }
+  const repo = repoFullName(ctx.globalArgs);
+  const asOfIso = args.asOf ?? nowIso();
+  const asOf = new Date(asOfIso);
+  if (Number.isNaN(asOf.getTime())) {
+    throw new Error(`Invalid asOf timestamp: ${asOfIso}`);
+  }
+  const thresholdDays = ctx.globalArgs.staleInactivityDays ?? 15;
+  const entries = await ctx.dataRepository.findAllForModel(
+    ctx.modelType,
+    ctx.modelId,
+  );
+  const existingClassifications = new Set<string>();
+  for (
+    const entry of entries.filter((e: any) =>
+      tagsOf(e).specName === "activityEvent"
+    )
+  ) {
+    const event = await readJson(
+      ctx.dataRepository,
+      ctx.modelType,
+      ctx.modelId,
+      entry,
+    );
+    if (event?.eventType !== "classification_stale_candidate") continue;
+    if (event?.repo !== repo) continue;
+    existingClassifications.add(
+      `${event.subjectType}:${event.subjectNumber}:${event.state ?? ""}:${
+        event.label ?? ""
+      }`,
+    );
+  }
+
+  const candidates: StaleCandidate[] = [];
+  const collect = async (
+    specName: "prSnapshot" | "issueSnapshot",
+    subjectType: "pr" | "issue",
+  ) => {
+    const snapshots = await latestSnapshotsByNumber(ctx, entries, specName);
+    for (const snapshot of snapshots.values()) {
+      if (snapshot.repo !== repo || snapshot.state !== "open") continue;
+      const labels = labelsOf(snapshot);
+      if (hasLabel(labels, args.staleLabel)) continue;
+      const lastActivityAt = staleActivityAt(snapshot, subjectType);
+      const inactiveDays = inactiveDaysSince(asOf, lastActivityAt);
+      if (inactiveDays < thresholdDays) continue;
+      candidates.push({
+        subjectType,
+        number: snapshot.number,
+        title: snapshot.title,
+        url: snapshot.url,
+        labels,
+        lastActivityAt,
+        inactiveDays,
+      });
+    }
+  };
+  if (args.includePrs) await collect("prSnapshot", "pr");
+  if (args.includeIssues) await collect("issueSnapshot", "issue");
+  candidates.sort((a, b) =>
+    a.lastActivityAt.localeCompare(b.lastActivityAt) ||
+    a.subjectType.localeCompare(b.subjectType) ||
+    a.number - b.number
+  );
+  const selected = args.maxCandidates
+    ? candidates.slice(0, args.maxCandidates)
+    : candidates;
+  if (args.dryRun) return { dataHandles: [], candidates: selected };
+
+  const handles: DataHandle[] = [];
+  for (const candidate of selected) {
+    const state = `stale:${candidate.lastActivityAt}:${thresholdDays}`;
+    const dedupeKey =
+      `${candidate.subjectType}:${candidate.number}:${state}:${args.staleLabel}`;
+    if (existingClassifications.has(dedupeKey)) continue;
+    handles.push(
+      await writeActivityEvent(ctx, {
+        id: safeName("stale-candidate", [
+          repo,
+          candidate.subjectType,
+          candidate.number,
+          thresholdDays,
+          candidate.lastActivityAt,
+        ]),
+        repo,
+        subjectType: candidate.subjectType,
+        subjectNumber: candidate.number,
+        eventType: "classification_stale_candidate",
+        source: "maintainer-activity/classify_stale_candidates",
+        visibility: visibility(ctx.globalArgs),
+        actor: "swamp",
+        summary:
+          `${candidate.subjectType.toUpperCase()} #${candidate.number} classified as stale candidate (${candidate.inactiveDays}d inactive >= ${thresholdDays}d)`,
+        body: JSON.stringify(
+          {
+            title: candidate.title,
+            url: candidate.url,
+            staleLabel: args.staleLabel,
+            staleInactivityDays: thresholdDays,
+            lastActivityAt: candidate.lastActivityAt,
+            inactiveDays: candidate.inactiveDays,
+            asOf: asOfIso,
+          },
+          null,
+          2,
+        ),
+        createdAt: asOfIso,
+        url: candidate.url,
+        state,
+        label: args.staleLabel,
+        artifactRefs: [],
+        tags: ["classification", "stale", "stale-candidate"],
+      }),
+    );
+    existingClassifications.add(dedupeKey);
+  }
+  return { dataHandles: handles, candidates: selected };
+}
+
+async function clearStaleCandidates(
+  ctx: WriteContext,
+  args: z.infer<typeof ClassifyStaleCandidatesArgsSchema>,
+): Promise<{ dataHandles: DataHandle[]; candidates: StaleCandidate[] }> {
+  if (!ctx.dataRepository || !ctx.modelType || !ctx.modelId) {
+    throw new Error(
+      "dataRepository, modelType, and modelId are required to clear stale candidates",
+    );
+  }
+  const repo = repoFullName(ctx.globalArgs);
+  const asOfIso = args.asOf ?? nowIso();
+  const asOf = new Date(asOfIso);
+  if (Number.isNaN(asOf.getTime())) {
+    throw new Error(`Invalid asOf timestamp: ${asOfIso}`);
+  }
+  const thresholdDays = ctx.globalArgs.staleInactivityDays ?? 15;
+  const entries = await ctx.dataRepository.findAllForModel(
+    ctx.modelType,
+    ctx.modelId,
+  );
+  const priorStale = new Set<string>();
+  const existingClears = new Set<string>();
+  for (
+    const entry of entries.filter((e: any) =>
+      tagsOf(e).specName === "activityEvent"
+    )
+  ) {
+    const event = await readJson(
+      ctx.dataRepository,
+      ctx.modelType,
+      ctx.modelId,
+      entry,
+    );
+    if (event?.repo !== repo) continue;
+    if (event?.label !== args.staleLabel) continue;
+    const key = `${event.subjectType}:${event.subjectNumber}`;
+    if (event?.eventType === "classification_stale_candidate") {
+      priorStale.add(key);
+    }
+    if (event?.eventType === "classification_stale_candidate_cleared") {
+      existingClears.add(`${key}:${event.state ?? ""}:${event.label ?? ""}`);
+    }
+  }
+
+  const candidates: StaleCandidate[] = [];
+  const collect = async (
+    specName: "prSnapshot" | "issueSnapshot",
+    subjectType: "pr" | "issue",
+  ) => {
+    const snapshots = await latestSnapshotsByNumber(ctx, entries, specName);
+    for (const snapshot of snapshots.values()) {
+      if (snapshot.repo !== repo || snapshot.state !== "open") continue;
+      const labels = labelsOf(snapshot);
+      const key = `${subjectType}:${snapshot.number}`;
+      if (!hasLabel(labels, args.staleLabel) && !priorStale.has(key)) continue;
+      const lastActivityAt = staleActivityAt(snapshot, subjectType);
+      const inactiveDays = inactiveDaysSince(asOf, lastActivityAt);
+      if (inactiveDays >= thresholdDays) continue;
+      candidates.push({
+        subjectType,
+        number: snapshot.number,
+        title: snapshot.title,
+        url: snapshot.url,
+        labels,
+        lastActivityAt,
+        inactiveDays,
+      });
+    }
+  };
+  if (args.includePrs) await collect("prSnapshot", "pr");
+  if (args.includeIssues) await collect("issueSnapshot", "issue");
+  candidates.sort((a, b) =>
+    b.lastActivityAt.localeCompare(a.lastActivityAt) ||
+    a.subjectType.localeCompare(b.subjectType) ||
+    a.number - b.number
+  );
+  const selected = args.maxCandidates
+    ? candidates.slice(0, args.maxCandidates)
+    : candidates;
+  if (args.dryRun) return { dataHandles: [], candidates: selected };
+
+  const handles: DataHandle[] = [];
+  for (const candidate of selected) {
+    const state = `active:${candidate.lastActivityAt}:${thresholdDays}`;
+    const key = `${candidate.subjectType}:${candidate.number}`;
+    const dedupeKey = `${key}:${state}:${args.staleLabel}`;
+    if (existingClears.has(dedupeKey)) continue;
+    handles.push(
+      await writeActivityEvent(ctx, {
+        id: safeName("stale-candidate-cleared", [
+          repo,
+          candidate.subjectType,
+          candidate.number,
+          thresholdDays,
+          candidate.lastActivityAt,
+        ]),
+        repo,
+        subjectType: candidate.subjectType,
+        subjectNumber: candidate.number,
+        eventType: "classification_stale_candidate_cleared",
+        source: "maintainer-activity/clear_stale_candidates",
+        visibility: visibility(ctx.globalArgs),
+        actor: "swamp",
+        summary:
+          `${candidate.subjectType.toUpperCase()} #${candidate.number} cleared as stale candidate (${candidate.inactiveDays}d inactive < ${thresholdDays}d)`,
+        body: JSON.stringify(
+          {
+            title: candidate.title,
+            url: candidate.url,
+            staleLabel: args.staleLabel,
+            staleInactivityDays: thresholdDays,
+            lastActivityAt: candidate.lastActivityAt,
+            inactiveDays: candidate.inactiveDays,
+            asOf: asOfIso,
+            note:
+              "This clears Swamp's stale classification only. Remove the GitHub label with a GitHub-labeling method when that mutation is added.",
+          },
+          null,
+          2,
+        ),
+        createdAt: asOfIso,
+        url: candidate.url,
+        state,
+        label: args.staleLabel,
+        artifactRefs: [],
+        tags: ["classification", "stale", "stale-candidate", "cleared"],
+      }),
+    );
+    existingClears.add(dedupeKey);
+  }
+  return { dataHandles: handles, candidates: selected };
+}
+
 export const model = {
   type: "@evrardjp/maintainer-activity",
-  version: "2026.07.02.2",
+  version: "2026.07.03.1",
   globalArguments: GlobalArgsSchema,
   reports: ["@evrardjp/maintainer-briefing"],
   resources: {
@@ -1273,6 +1600,44 @@ export const model = {
         return { dataHandles: handles };
       },
     },
+    classify_stale_candidates: {
+      description:
+        "Classify open PRs/issues with no recent activity as stale candidates from stored snapshots",
+      arguments: ClassifyStaleCandidatesArgsSchema,
+      execute: async (args: any, ctx: any) => {
+        const parsed = ClassifyStaleCandidatesArgsSchema.parse(args);
+        const result = await classifyStaleCandidates(ctx, parsed);
+        return {
+          dataHandles: result.dataHandles,
+          summary: {
+            candidateCount: result.candidates.length,
+            classifiedCount: result.dataHandles.length,
+            staleInactivityDays: ctx.globalArgs.staleInactivityDays ?? 15,
+            dryRun: parsed.dryRun,
+          },
+          candidates: result.candidates,
+        };
+      },
+    },
+    clear_stale_candidates: {
+      description:
+        "Clear Swamp stale-candidate classifications for PRs/issues that became active again",
+      arguments: ClassifyStaleCandidatesArgsSchema,
+      execute: async (args: any, ctx: any) => {
+        const parsed = ClassifyStaleCandidatesArgsSchema.parse(args);
+        const result = await clearStaleCandidates(ctx, parsed);
+        return {
+          dataHandles: result.dataHandles,
+          summary: {
+            candidateCount: result.candidates.length,
+            clearedCount: result.dataHandles.length,
+            staleInactivityDays: ctx.globalArgs.staleInactivityDays ?? 15,
+            dryRun: parsed.dryRun,
+          },
+          candidates: result.candidates,
+        };
+      },
+    },
     record_activity: {
       description: "Append one caller-provided public/private activity event",
       arguments: RecordActivityArgsSchema,
@@ -1429,7 +1794,9 @@ export const model = {
             lines.push(`#### ${hour}:00`, "");
           }
           lines.push(
-            `${e.createdAt.slice(11, 16)} - ${fixedActor(e.actor)} - ${e.summary} - ${detailsFor(e)}`,
+            `${e.createdAt.slice(11, 16)} - ${
+              fixedActor(e.actor)
+            } - ${e.summary} - ${detailsFor(e)}`,
             "",
           );
         }

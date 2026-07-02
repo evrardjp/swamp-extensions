@@ -22,8 +22,13 @@ swamp model create @evrardjp/maintainer-activity eso-external-secrets-activity \
   --global-arg owner=external-secrets \
   --global-arg repo=external-secrets \
   --global-arg projectName="External Secrets Operator" \
+  --global-arg staleInactivityDays=15 \
   --global-arg "githubToken=\${{ vault.get('local', 'GITHUB_TOKEN') }}"
 ```
+
+`staleInactivityDays` is the model-level threshold for stale candidate
+classification. It defaults to `15` and is intentionally a model argument rather
+than a per-run override so scheduled classification stays consistent.
 
 ## GitHub token requirements
 
@@ -82,6 +87,173 @@ swamp model method run eso-external-secrets-activity sync_github_prs --input sta
 swamp model method run eso-external-secrets-activity sync_github_issues --input state=open
 swamp model method run eso-external-secrets-activity sync_github_backfill --input since=2026-01-01 --input until=2026-07-01
 ```
+
+Classifier methods:
+
+```bash
+# Classify open PRs/issues whose latest conversation/code activity is older
+# than the model's staleInactivityDays threshold and that do not already carry
+# the Stale label. This writes activityEvent records only; it does not mutate
+# GitHub labels.
+swamp model method run eso-external-secrets-activity classify_stale_candidates
+
+# Preview candidates without writing activity events.
+swamp model method run eso-external-secrets-activity classify_stale_candidates \
+  --input dryRun=true
+
+# Clear Swamp-side stale classifications for PRs/issues that became active again
+# (or still carry the Stale label but no longer meet the inactivity threshold).
+# This records a classification_stale_candidate_cleared activityEvent; it does
+# not remove GitHub labels yet.
+swamp model method run eso-external-secrets-activity clear_stale_candidates
+```
+
+### Stale candidate classification
+
+`classify_stale_candidates` is a deterministic classifier over already-synced
+Swamp data. It does not call GitHub directly and does not apply or remove GitHub
+labels.
+
+Selection rules:
+
+- considers open `prSnapshot` and `issueSnapshot` records;
+- uses the latest snapshot for each PR/issue number;
+- skips items already carrying the configured stale label, `Stale` by default;
+- for PRs, activity is the latest of `lastConversationAt`, `lastCodeChangeAt`,
+  `updatedAt`, and `createdAt`;
+- for issues, activity is the latest of `lastConversationAt`, `updatedAt`, and
+  `createdAt`;
+- classifies when inactive days are greater than or equal to the model-level
+  `staleInactivityDays` threshold, default `15`.
+
+The method writes one `activityEvent` per new classification:
+
+- `eventType: classification_stale_candidate`
+- `label: Stale`
+- tags: `classification`, `stale`, `stale-candidate`
+
+Manual classification examples:
+
+```bash
+# Refresh current data first, then classify.
+swamp model method run eso-external-secrets-activity sync_github_recent_activity \
+  --input lookbackMinutes=1440
+swamp model method run eso-external-secrets-activity classify_stale_candidates
+
+# Only PRs, preview-only, at most 10 candidates.
+swamp model method run eso-external-secrets-activity classify_stale_candidates \
+  --input includeIssues=false \
+  --input maxCandidates=10 \
+  --input dryRun=true
+```
+
+`clear_stale_candidates` records the inverse Swamp-side classification when an
+item becomes active again. It considers items that either carry the stale label
+or have a prior Swamp stale classification, then records a clear event when the
+latest activity is newer than the `staleInactivityDays` threshold.
+
+The method writes:
+
+- `eventType: classification_stale_candidate_cleared`
+- `label: Stale`
+- tags: `classification`, `stale`, `stale-candidate`, `cleared`
+
+Manual clear examples:
+
+```bash
+# Preview clear events.
+swamp model method run eso-external-secrets-activity clear_stale_candidates \
+  --input dryRun=true
+
+# Record clear events.
+swamp model method run eso-external-secrets-activity clear_stale_candidates
+```
+
+Important: `clear_stale_candidates` only clears the Swamp-side classification.
+If a GitHub `Stale` label has already been applied by another tool, this method
+will not remove it. Add a future GitHub-label mutation method, with write-capable
+token scopes, to keep GitHub labels in sync.
+
+### Daily scheduled stale classification workflow
+
+Recommended daily automation is a Swamp workflow that refreshes recent activity,
+classifies stale candidates, then clears classifications for items that became
+active again.
+
+Create the workflow scaffold first so Swamp assigns the ID:
+
+```bash
+swamp workflow create maintainer-stale-classification-daily --json
+```
+
+Edit the generated `workflows/workflow-<id>.yaml`, preserve the generated `id`,
+and use this shape:
+
+```yaml
+id: <generated-by-swamp>
+name: maintainer-stale-classification-daily
+description: Refresh recent maintainer activity and update Swamp-side stale classifications every day.
+version: 1
+tags:
+  domain: maintainer-activity
+  cadence: daily
+trigger:
+  schedule: "0 6 * * *"
+reports:
+  skip:
+    - "@evrardjp/maintainer-briefing"
+jobs:
+  - name: classify-stale
+    description: Refresh recent GitHub activity, mark stale candidates, and clear stale marks for active items.
+    steps:
+      - name: sync-recent-activity
+        task:
+          type: model_method
+          modelIdOrName: eso-external-secrets-activity
+          methodName: sync_github_recent_activity
+          inputs:
+            lookbackMinutes: 1440
+            includeOpenPrs: true
+            includeRecentlyUpdatedIssues: true
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+      - name: classify-stale-candidates
+        task:
+          type: model_method
+          modelIdOrName: eso-external-secrets-activity
+          methodName: classify_stale_candidates
+        dependsOn:
+          - step: sync-recent-activity
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+      - name: clear-active-stale-candidates
+        task:
+          type: model_method
+          modelIdOrName: eso-external-secrets-activity
+          methodName: clear_stale_candidates
+        dependsOn:
+          - step: classify-stale-candidates
+            condition:
+              type: succeeded
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+```
+
+Validate and run manually:
+
+```bash
+swamp workflow validate maintainer-stale-classification-daily --json
+swamp workflow run maintainer-stale-classification-daily
+```
+
+The `trigger.schedule` field is a cron expression. `"0 6 * * *"` means daily at
+06:00 according to the scheduler environment. The workflow remains runnable on
+demand with `swamp workflow run` even when it also has a schedule.
 
 Manual/private records:
 
@@ -219,7 +391,22 @@ swamp model method run eso-external-secrets-activity sync_github_prs \
      --input limit=100
  ```
 
-5. Read the briefing:
+5. Classify stale candidates and clear stale classifications for recently
+   active items:
+
+```bash
+# Preview first.
+swamp model method run eso-external-secrets-activity classify_stale_candidates \
+    --input dryRun=true
+swamp model method run eso-external-secrets-activity clear_stale_candidates \
+    --input dryRun=true
+
+# Record Swamp-side classification events.
+swamp model method run eso-external-secrets-activity classify_stale_candidates
+swamp model method run eso-external-secrets-activity clear_stale_candidates
+```
+
+6. Read the briefing:
 
 ```bash
 swamp report get @evrardjp/maintainer-briefing \
@@ -227,7 +414,7 @@ swamp report get @evrardjp/maintainer-briefing \
     --markdown
 ```
 
-6. Pick a synced PR and render a dossier:
+7. Pick a synced PR and render a dossier:
 
 ```bash
 swamp data query 'modelName == "eso-external-secrets-activity" && specName == "prSnapshot"' \

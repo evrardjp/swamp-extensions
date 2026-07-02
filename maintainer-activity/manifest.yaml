@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@evrardjp/maintainer-activity"
-version: "2026.07.02.2"
+version: "2026.07.03.1"
 description: >-
   Swamp-backed GitHub project activity database and maintainer briefing reports:
   repository/issue/PR/CI snapshots, chronological public/private activity events,
