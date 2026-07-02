@@ -147,3 +147,71 @@ swamp extension push manifest.yaml --dry-run --json
 ```
 
 Never publish without explicit maintainer approval.
+
+## End to end usage
+
+```bash
+cd $YOUR_SWAMP_REPO
+```
+
+1. Ensure token exists:
+
+```bash
+swamp vault put local GITHUB_TOKEN <your-token>
+```
+
+2. Create a per-repo activity model:
+
+```bash
+swamp model create @evrardjp/maintainer-activity eso-external-secrets-activity \
+    --global-arg owner=external-secrets \
+    --global-arg repo=external-secrets \
+    --global-arg projectName="External Secrets Operator" \
+    --global-arg "githubToken=\${{ vault.get('local', 'GITHUB_TOKEN') }}"
+```
+
+3. Smoke-test metadata sync:
+
+```bash
+swamp model method run eso-external-secrets-activity sync_github_repo \
+    --input includeForkIndex=true \
+    --report @evrardjp/maintainer-briefing
+```
+
+4. Sync a small PR sample:
+
+```bash
+swamp model method run eso-external-secrets-activity sync_github_prs \
+    --input state=open \
+    --input limit=3 \
+    --input includeFiles=true \
+    --input includeReviews=true \
+    --input includeReviewComments=true \
+    --input includeIssueComments=true \
+    --input includeChecks=true \
+    --input includeTimeline=true \
+    --report @evrardjp/maintainer-briefing
+```
+
+5. Read the briefing:
+
+```bash
+swamp report get @evrardjp/maintainer-briefing \
+    --model eso-external-secrets-activity \
+    --markdown
+```
+
+6. Pick a synced PR and render a dossier:
+
+```bash
+swamp data query 'modelName == "eso-external-secrets-activity" && specName == "prSnapshot"' \
+    --select '{"number": attributes.number, "title": attributes.title, "url": attributes.url}'
+
+  swamp model method run eso-external-secrets-activity render_pr_report \
+    --input prNumber=<PR_NUMBER>
+
+  swamp data get eso-external-secrets-activity pr-report-external-secrets-external-secrets-<PR_NUMBER> --json \
+    | jq -r '.content.markdown'
+```
+
+If that works, next step is schedule a frequent workflow for sync_github_recent_activity and a nightly bounded sync_github_backfill.
