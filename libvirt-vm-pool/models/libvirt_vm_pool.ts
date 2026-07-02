@@ -135,18 +135,58 @@ const DesiredStateSchema = z.enum([
   "running",
   "reachable",
 ]);
+const BootstrapSSHUserSchema = z.object({
+  username: z.string().default("admin"),
+  publicKeyPath: z.string().default("~/.ssh/id_ed25519.pub"),
+});
+
+const SshHostCertificateSchema = z.object({
+  ca: z.string().min(1),
+  principals: z.array(z.string().min(1)).min(1),
+  hostKeyPath: z.string().default("/etc/ssh/ssh_host_ed25519_key.pub"),
+  hostCertificatePath: z.string().default("/etc/ssh/ssh_host_ed25519_key-cert.pub"),
+});
+
+const RuntimeUserSchema = z.object({
+  username: z.string().min(1),
+  groups: z.array(z.string().min(1)).default([]),
+  sshCertificate: z.object({
+    ca: z.string().min(1),
+    principals: z.array(z.string().min(1)).min(1),
+  }).optional(),
+});
+
+const SshCertificateAuthoritiesSchema = z.object({
+  host: z.array(z.object({
+    name: z.string().min(1),
+    model: z.string().min(1),
+    clientKnownHostsPatterns: z.array(z.string().min(1)).default([]),
+  })).default([]),
+  user: z.array(z.object({
+    name: z.string().min(1),
+    model: z.string().min(1),
+    trustedUserCAKeysPath: z.string().default("/etc/ssh/lab_user_ca.pub"),
+  })).default([]),
+}).default({ host: [], user: [] });
+
 const VmSpecSchema = z.object({
   name: z.string(),
   desiredState: DesiredStateSchema.default("reachable"),
   hostname: z.string().optional(),
+  fqdn: z.string().optional(),
+  serviceFqdn: z.string().optional(),
   ipAddress: z.string().describe(
     "Static IP address without prefix length, e.g. 192.168.164.12",
   ),
   prefixLength: z.number().int().default(24),
   gateway: z.string(),
   nameserver: z.string(),
+  // Deprecated compatibility fields. Prefer bootstrapSSHUser.
   sshUser: z.string().default("admin"),
   sshPubKeyPath: z.string().default("~/.ssh/id_ed25519.pub"),
+  bootstrapSSHUser: BootstrapSSHUserSchema.optional(),
+  sshHostCertificate: SshHostCertificateSchema.optional(),
+  runtimeUsers: z.array(RuntimeUserSchema).default([]),
   memoryMiB: z.number().int().default(2048),
   vcpus: z.number().int().default(2),
   diskSizeGb: z.number().int().default(20),
@@ -163,16 +203,22 @@ const VmSpecSchema = z.object({
 type VmSpec = z.infer<typeof VmSpecSchema>;
 const GlobalArgsSchema = z.object({
   uri: z.string().default("qemu:///system"),
+  sshCertificateAuthorities: SshCertificateAuthoritiesSchema,
   vms: z.array(VmSpecSchema).min(1),
 });
 const VmResultSchema = z.object({
   name: z.string(),
   hostname: z.string(),
+  fqdn: z.string().optional(),
+  serviceFqdn: z.string().optional(),
   desiredState: DesiredStateSchema,
   previousState: z.string(),
   currentState: z.string(),
   ipAddress: z.string(),
   sshUser: z.string(),
+  bootstrapSSHUser: BootstrapSSHUserSchema,
+  sshHostCertificate: SshHostCertificateSchema.optional(),
+  runtimeUsers: z.array(RuntimeUserSchema),
   capabilities: z.array(z.string()),
   diskPath: z.string(),
   isoPath: z.string(),
@@ -290,7 +336,11 @@ async function ensureImage(vm: VmSpec, actions: string[]): Promise<void> {
   }
   const isoPath = `${vm.imagesDir}/${vm.name}-cloud-init.iso`;
   if (!(await DenoFs.stat(isoPath).catch(() => null))) {
-    const keyPath = vm.sshPubKeyPath.replace(
+    const bootstrap = vm.bootstrapSSHUser ?? {
+      username: vm.sshUser,
+      publicKeyPath: vm.sshPubKeyPath,
+    };
+    const keyPath = bootstrap.publicKeyPath.replace(
       /^~/,
       DenoFs.env.get("HOME") ?? "",
     );
@@ -314,7 +364,7 @@ async function ensureImage(vm: VmSpec, actions: string[]): Promise<void> {
     const userData = [
       "#cloud-config",
       "users:",
-      `  - name: ${vm.sshUser}`,
+      `  - name: ${bootstrap.username}`,
       "    sudo: ALL=(ALL) NOPASSWD:ALL",
       "    groups: [wheel]",
       "    shell: /bin/bash",
@@ -417,13 +467,21 @@ async function reconcile(
   return {
     name: vm.name,
     hostname: vm.hostname ?? vm.name,
+    fqdn: vm.fqdn,
+    serviceFqdn: vm.serviceFqdn,
     desiredState: vm.desiredState,
     previousState,
     currentState: vm.desiredState === "absent" && apply && errors.length === 0
       ? "absent"
       : currentState,
     ipAddress: vm.ipAddress,
-    sshUser: vm.sshUser,
+    sshUser: vm.bootstrapSSHUser?.username ?? vm.sshUser,
+    bootstrapSSHUser: vm.bootstrapSSHUser ?? {
+      username: vm.sshUser,
+      publicKeyPath: vm.sshPubKeyPath,
+    },
+    sshHostCertificate: vm.sshHostCertificate,
+    runtimeUsers: vm.runtimeUsers,
     capabilities: vm.capabilities,
     diskPath,
     isoPath,
@@ -465,7 +523,7 @@ async function executePool(context: PoolContext, apply: boolean) {
 /** Desired-state reconciler for a local libvirt VM pool. Produces per-VM Swamp data for downstream SSH/config models. */
 export const model = {
   type: "@evrardjp/libvirt-vm-pool",
-  version: "2026.06.29.1",
+  version: "2026.07.02.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     vm: {

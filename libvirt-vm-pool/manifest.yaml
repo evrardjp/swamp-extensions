@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@evrardjp/libvirt-vm-pool"
-version: "2026.06.29.1"
+version: "2026.07.02.1"
 description: >-
   Desired-state local libvirt VM pool reconciler for Swamp. Defines, starts,
   removes, and publishes per-VM connection facts for downstream SSH/config

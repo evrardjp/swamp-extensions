@@ -4,8 +4,8 @@ Desired-state local libvirt VM pool reconciler for Swamp.
 
 This model owns the VM substrate layer only: libvirt domain lifecycle, cloud-init
 seed/disk creation, power state, and connection facts. App packages, services,
-certificates, templates, and verification should stay in downstream SSH/config
-models and workflows.
+SSH CA issuance, SSH daemon configuration, templates, and verification should
+stay in downstream SSH/config models and workflows.
 
 ## Model type
 
@@ -26,15 +26,57 @@ Declare the pool in the model definition's `globalArguments.vms` list:
 ```yaml
 globalArguments:
   uri: qemu:///system
+
+  # Optional metadata for downstream SSH CA / config models. This model does
+  # not issue certificates or configure sshd; it only publishes these facts.
+  sshCertificateAuthorities:
+    host:
+      - name: lab-host-ca
+        model: lab-host-ca
+        clientKnownHostsPatterns:
+          - "*.lab.example"
+          - "192.168.164.*"
+    user:
+      - name: lab-user-ca
+        model: lab-user-ca
+        trustedUserCAKeysPath: /etc/ssh/lab_user_ca.pub
+
   vms:
     - name: gitea
       desiredState: reachable # absent | defined | running | reachable
       hostname: gitea
+      fqdn: gitea.lab.example
+      serviceFqdn: git.lab.example
       ipAddress: 192.168.164.12
       prefixLength: 24
       gateway: 192.168.164.1
       nameserver: 192.168.102.1
-      sshUser: admin
+
+      # Preferred bootstrap user declaration. The older sshUser/sshPubKeyPath
+      # fields still work for compatibility, but new definitions should use
+      # bootstrapSSHUser.
+      bootstrapSSHUser:
+        username: admin
+        publicKeyPath: ~/.ssh/id_ed25519.pub
+
+      # Optional metadata for downstream host certificate issuance/config.
+      sshHostCertificate:
+        ca: lab-host-ca
+        principals:
+          - gitea
+          - gitea.lab.example
+          - 192.168.164.12
+        hostKeyPath: /etc/ssh/ssh_host_ed25519_key.pub
+        hostCertificatePath: /etc/ssh/ssh_host_ed25519_key-cert.pub
+
+      # Optional metadata for downstream user/account/certificate models.
+      runtimeUsers:
+        - username: git
+          groups: [docker]
+          sshCertificate:
+            ca: lab-user-ca
+            principals: [git, gitea-admin]
+
       memoryMiB: 2048
       vcpus: 2
       diskSizeGb: 20
@@ -42,6 +84,9 @@ globalArguments:
       imagesDir: /var/lib/libvirt/images
       baseImagePath: /var/lib/libvirt/images/arch-cloud-base.qcow2
       baseImageUrl: https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2
+      capabilities:
+        - git
+        - docker-host
 ```
 
 `desiredState` values:
@@ -51,6 +96,23 @@ globalArguments:
 - `running` — ensure defined and started.
 - `reachable` — same substrate actions as `running`, plus publish the intent
   that downstream SSH wait/config models should expect connectivity.
+
+## SSH identity metadata
+
+The VM pool publishes SSH-related intent, but does not implement the SSH CA
+lifecycle itself.
+
+- `bootstrapSSHUser` controls the cloud-init user and authorized key used for
+  first access. If omitted, the legacy `sshUser` and `sshPubKeyPath` fields are
+  used.
+- `sshCertificateAuthorities` declares host/user CA models and paths/patterns
+  for downstream config models.
+- `sshHostCertificate` declares which CA/principals and host-key paths should be
+  used by downstream certificate issuance/configuration.
+- `runtimeUsers` declares non-bootstrap users and optional user-certificate
+  principals for downstream account/certificate management.
+- `fqdn` and `serviceFqdn` are published as connection/service facts for later
+  DNS, SSH, reverse proxy, or application configuration steps.
 
 ## Methods
 
@@ -75,6 +137,8 @@ Example downstream CEL references:
 ```cel
 data.latest("lab-vm-pool", "gitea").attributes.ipAddress
 data.latest("lab-vm-pool", "gitea").attributes.sshUser
+data.latest("lab-vm-pool", "gitea").attributes.bootstrapSSHUser.username
+data.latest("lab-vm-pool", "gitea").attributes.fqdn
 data.latest("lab-vm-pool", "gitea").attributes.currentState
 ```
 
@@ -83,11 +147,35 @@ A per-VM resource contains fields like:
 ```json
 {
   "name": "gitea",
+  "hostname": "gitea",
+  "fqdn": "gitea.lab.example",
+  "serviceFqdn": "git.lab.example",
   "desiredState": "reachable",
   "previousState": "shut off",
   "currentState": "running",
   "ipAddress": "192.168.164.12",
   "sshUser": "admin",
+  "bootstrapSSHUser": {
+    "username": "admin",
+    "publicKeyPath": "~/.ssh/id_ed25519.pub"
+  },
+  "sshHostCertificate": {
+    "ca": "lab-host-ca",
+    "principals": ["gitea", "gitea.lab.example", "192.168.164.12"],
+    "hostKeyPath": "/etc/ssh/ssh_host_ed25519_key.pub",
+    "hostCertificatePath": "/etc/ssh/ssh_host_ed25519_key-cert.pub"
+  },
+  "runtimeUsers": [
+    {
+      "username": "git",
+      "groups": ["docker"],
+      "sshCertificate": {
+        "ca": "lab-user-ca",
+        "principals": ["git", "gitea-admin"]
+      }
+    }
+  ],
+  "capabilities": ["git", "docker-host"],
   "diskPath": "/var/lib/libvirt/images/gitea.qcow2",
   "isoPath": "/var/lib/libvirt/images/gitea-cloud-init.iso",
   "actions": ["ensureImage", "define", "start"],
@@ -102,7 +190,8 @@ workflow phase, then let config/app models consume the published Swamp data:
 
 ```text
 lab-vm-pool.sync
-  -> generic SSH/base config models
+  -> SSH wait / base config models
+  -> SSH CA issuance and sshd/client trust configuration
   -> app-specific workflows/models
   -> verification
 ```
