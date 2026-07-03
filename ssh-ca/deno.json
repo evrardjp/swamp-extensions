@@ -1,0 +1,32 @@
+{
+  "tasks": {
+    "fmt": {
+      "description": "Format the TypeScript files in this extension folder.",
+      "command": "deno fmt *.ts"
+    },
+    "doc": {
+      "description": "Generate documentation for the TypeScript sources in this extension folder.",
+      "command": "deno doc *.ts"
+    },
+    "check": {
+      "description": "Type check a folder of TypeScript sources with deno check.",
+      "command": "deno check *.ts"
+    },
+    "test": {
+      "description": "Run unit tests for a TypeScript extension with deno test --allow-read --allow-write.",
+      "command": "deno test --allow-read --allow-write"
+    },
+    "swampfmt": {
+      "description": "Format extension before pushing for swamp.",
+      "command": "swamp extension fmt manifest.yaml --check"
+    },
+    "swampquality": {
+      "description": "Quality check extension before push.",
+      "command": "swamp extension quality manifest.yaml"
+    },
+    "swamppushdryrun": {
+      "description": "Dry-run of publishing a swamp extension.",
+      "command": "swamp extension push manifest.yaml --dry-run"
+    }
+  }
+}
