@@ -1,0 +1,20 @@
+name: Extension Testing / cloud-init-nocloud
+
+on:
+  pull_request:
+    paths:
+      - "cloud-init-nocloud/**"
+      - ".github/workflows/extension-testing.yml"
+      - ".github/workflows/extension-testing-cloud-init-nocloud.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+run-name: Test cloud-init-nocloud
+
+jobs:
+  test:
+    uses: ./.github/workflows/extension-testing.yml
+    with:
+      extension: cloud-init-nocloud

@@ -1,0 +1,20 @@
+name: Extension Testing / qcow2-overlay-prep
+
+on:
+  pull_request:
+    paths:
+      - "qcow2-overlay-prep/**"
+      - ".github/workflows/extension-testing.yml"
+      - ".github/workflows/extension-testing-qcow2-overlay-prep.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+run-name: Test qcow2-overlay-prep
+
+jobs:
+  test:
+    uses: ./.github/workflows/extension-testing.yml
+    with:
+      extension: qcow2-overlay-prep

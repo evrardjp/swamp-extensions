@@ -1,0 +1,20 @@
+name: Extension Testing / ssh-ca
+
+on:
+  pull_request:
+    paths:
+      - "ssh-ca/**"
+      - ".github/workflows/extension-testing.yml"
+      - ".github/workflows/extension-testing-ssh-ca.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+run-name: Test ssh-ca
+
+jobs:
+  test:
+    uses: ./.github/workflows/extension-testing.yml
+    with:
+      extension: ssh-ca

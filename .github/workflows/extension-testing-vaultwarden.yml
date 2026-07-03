@@ -1,0 +1,20 @@
+name: Extension Testing / vaultwarden
+
+on:
+  pull_request:
+    paths:
+      - "vaultwarden/**"
+      - ".github/workflows/extension-testing.yml"
+      - ".github/workflows/extension-testing-vaultwarden.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+run-name: Test vaultwarden
+
+jobs:
+  test:
+    uses: ./.github/workflows/extension-testing.yml
+    with:
+      extension: vaultwarden

@@ -1,0 +1,20 @@
+name: Extension Testing / capability-orchestrator
+
+on:
+  pull_request:
+    paths:
+      - "capability-orchestrator/**"
+      - ".github/workflows/extension-testing.yml"
+      - ".github/workflows/extension-testing-capability-orchestrator.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+run-name: Test capability-orchestrator
+
+jobs:
+  test:
+    uses: ./.github/workflows/extension-testing.yml
+    with:
+      extension: capability-orchestrator

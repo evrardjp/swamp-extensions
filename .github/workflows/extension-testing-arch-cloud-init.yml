@@ -1,0 +1,20 @@
+name: Extension Testing / arch-cloud-init
+
+on:
+  pull_request:
+    paths:
+      - "arch-cloud-init/**"
+      - ".github/workflows/extension-testing.yml"
+      - ".github/workflows/extension-testing-arch-cloud-init.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+run-name: Test arch-cloud-init
+
+jobs:
+  test:
+    uses: ./.github/workflows/extension-testing.yml
+    with:
+      extension: arch-cloud-init

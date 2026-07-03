@@ -1,0 +1,20 @@
+name: Extension Testing / github-project-activity
+
+on:
+  pull_request:
+    paths:
+      - "github-project-activity/**"
+      - ".github/workflows/extension-testing.yml"
+      - ".github/workflows/extension-testing-github-project-activity.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+run-name: Test github-project-activity
+
+jobs:
+  test:
+    uses: ./.github/workflows/extension-testing.yml
+    with:
+      extension: github-project-activity

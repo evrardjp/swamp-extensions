@@ -1,0 +1,20 @@
+name: Extension Testing / pi-session-telemetry
+
+on:
+  pull_request:
+    paths:
+      - "pi-session-telemetry/**"
+      - ".github/workflows/extension-testing.yml"
+      - ".github/workflows/extension-testing-pi-session-telemetry.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+run-name: Test pi-session-telemetry
+
+jobs:
+  test:
+    uses: ./.github/workflows/extension-testing.yml
+    with:
+      extension: pi-session-telemetry

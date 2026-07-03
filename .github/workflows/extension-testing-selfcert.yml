@@ -1,0 +1,20 @@
+name: Extension Testing / selfcert
+
+on:
+  pull_request:
+    paths:
+      - "selfcert/**"
+      - ".github/workflows/extension-testing.yml"
+      - ".github/workflows/extension-testing-selfcert.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+run-name: Test selfcert
+
+jobs:
+  test:
+    uses: ./.github/workflows/extension-testing.yml
+    with:
+      extension: selfcert
