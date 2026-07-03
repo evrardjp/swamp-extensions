@@ -142,6 +142,17 @@ const PrFileSnapshotSchema = z.object({
   syncedAt: IsoDateTime,
 }).passthrough();
 
+const RepoFileSnapshotSchema = z.object({
+  repo: z.string(),
+  path: z.string(),
+  type: z.string(),
+  sha: z.string().optional(),
+  size: z.number().optional(),
+  defaultBranch: z.string().optional(),
+  url: z.string().optional(),
+  syncedAt: IsoDateTime,
+}).passthrough();
+
 const CiStatusSnapshotSchema = z.object({
   repo: z.string(),
   prNumber: z.number(),
@@ -531,6 +542,27 @@ async function upsertPrSnapshot(
     },
   );
 }
+async function upsertRepoFileSnapshot(
+  ctx: WriteContext,
+  file: any,
+  repo: string,
+  defaultBranch?: string,
+): Promise<DataHandle> {
+  return ctx.writeResource(
+    "repoFileSnapshot",
+    safeName("repo-file", [repo, await sha1(file.path)]),
+    {
+      repo,
+      path: file.path,
+      type: file.type,
+      sha: file.sha,
+      size: file.size,
+      defaultBranch,
+      url: file.url,
+      syncedAt: nowIso(),
+    },
+  );
+}
 async function upsertPrFileSnapshot(
   ctx: WriteContext,
   file: any,
@@ -629,6 +661,42 @@ function githubEvent(
     tags: ["github"],
     ...extra,
   });
+}
+async function syncRepoFileInventory(ctx: WriteContext): Promise<DataHandle[]> {
+  const g = ctx.globalArgs;
+  const repo = repoFullName(g);
+  const repoInfo = await gh<any>(g, `/repos/${g.owner}/${g.repo}`);
+  const branch = repoInfo.default_branch ?? "HEAD";
+  const tree = await gh<any>(
+    g,
+    `/repos/${g.owner}/${g.repo}/git/trees/${encodeURIComponent(branch)}`,
+    { recursive: 1 },
+  );
+  const handles: DataHandle[] = [];
+  handles.push(await upsertRepoSnapshot(ctx, repoInfo));
+  for (const item of tree.tree ?? []) {
+    if (item.type !== "blob") continue;
+    handles.push(await upsertRepoFileSnapshot(ctx, item, repo, branch));
+  }
+  handles.push(
+    await writeActivityEvent(
+      ctx,
+      githubEvent(
+        repo,
+        "repo",
+        undefined,
+        "repo_file_inventory_synced",
+        `repo-file-inventory-${branch}`,
+        "github",
+        `Indexed ${
+          (tree.tree ?? []).filter((item: any) => item.type === "blob").length
+        } files from ${branch}`,
+        nowIso(),
+        { tags: ["github", "inventory", "codebase"] },
+      ),
+    ),
+  );
+  return handles;
 }
 async function syncForkIndex(
   ctx: WriteContext,
@@ -1292,9 +1360,12 @@ async function clearStaleCandidates(
 /** GitHub maintainer activity database model for repository snapshots, PR dossiers, artifacts, and maintainer notes. */
 export const model = {
   type: "@evrardjp/github-project-activity",
-  version: "2026.07.03.2",
+  version: "2026.07.03.3",
   globalArguments: GlobalArgsSchema,
-  reports: ["@evrardjp/github-project-briefing"],
+  reports: [
+    "@evrardjp/github-project-briefing",
+    "@evrardjp/github-codebase-heatmap",
+  ],
   resources: {
     repoSnapshot: {
       description: "Current repository metadata",
@@ -1325,6 +1396,13 @@ export const model = {
       schema: PrFileSnapshotSchema,
       lifetime: "infinite",
       garbageCollection: 50000,
+    },
+    repoFileSnapshot: {
+      description:
+        "Current repository file inventory for codebase heatmap reports",
+      schema: RepoFileSnapshotSchema,
+      lifetime: "infinite",
+      garbageCollection: 100000,
     },
     ciStatusSnapshot: {
       description: "Current CI/check status for a PR",
@@ -1385,6 +1463,14 @@ export const model = {
         }
         return { dataHandles: handles };
       },
+    },
+    sync_github_file_inventory: {
+      description:
+        "Fetch current default-branch file inventory for codebase heatmap reports",
+      arguments: z.object({}),
+      execute: async (_args: any, ctx: any) => ({
+        dataHandles: await syncRepoFileInventory(ctx),
+      }),
     },
     sync_github_fork_index: {
       description: "Fetch known/discovered forks as metadata only",
@@ -1555,12 +1641,7 @@ export const model = {
           new Date(Date.now() - g.defaultBackfillWindowDays * 86400_000)
             .toISOString();
         const until = args.until ?? nowIso();
-        const handles: DataHandle[] = [
-          await upsertRepoSnapshot(
-            ctx,
-            await gh<any>(g, `/repos/${g.owner}/${g.repo}`),
-          ),
-        ];
+        const handles: DataHandle[] = await syncRepoFileInventory(ctx);
         handles.push(
           ...await syncForkIndex(ctx, {
             includeConfiguredKnownForks: true,

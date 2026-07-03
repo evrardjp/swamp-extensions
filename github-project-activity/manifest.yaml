@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@evrardjp/github-project-activity"
-version: "2026.07.03.2"
+version: "2026.07.03.3"
 description: >-
   Swamp-backed GitHub project activity database and maintainer briefing reports:
   repository/issue/PR/CI snapshots, chronological public/private activity events,
@@ -12,6 +12,7 @@ models:
   - github_project_activity.ts
 reports:
   - github_project_briefing.ts
+  - github_codebase_heatmap.ts
 workflows: []
 vaults: []
 drivers: []
@@ -32,4 +33,5 @@ labels:
   - reporting
   - project-activity
   - pr-dossier
+  - codebase-heatmap
 dependencies: []
