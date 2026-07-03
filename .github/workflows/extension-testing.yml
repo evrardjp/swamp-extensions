@@ -1,0 +1,108 @@
+name: Extension Testing
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  DENO_VERSION: v2.8.3
+  SWAMP_VERSION: 20260702.214253.0-sha.8411d6d9
+
+jobs:
+  detect-changed-extensions:
+    name: Detect changed extensions
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.changed.outputs.matrix }}
+      has_changes: ${{ steps.changed.outputs.has_changes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Build extension/task matrix
+        id: changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+
+          base_ref="${PR_BASE_REF}"
+          if [[ -z "${base_ref}" ]]; then
+            base_ref="$(gh pr view "${GITHUB_REF_NAME}" --json baseRefName --jq .baseRefName)"
+          fi
+          if [[ -z "${base_ref}" ]]; then
+            echo "Could not find a pull request for branch ${GITHUB_REF_NAME}. Run this workflow from a PR branch." >&2
+            exit 1
+          fi
+
+          git fetch --no-tags --prune --depth=1 origin "${base_ref}"
+
+          mapfile -t changed_files < <(git diff --name-only "origin/${base_ref}...HEAD")
+
+          declare -A extensions=()
+          for file in "${changed_files[@]}"; do
+            [[ "${file}" == */* ]] || continue
+            extension="${file%%/*}"
+            [[ -f "${extension}/manifest.yaml" ]] || continue
+            extensions["${extension}"]=1
+          done
+
+          if (( ${#extensions[@]} == 0 )); then
+            matrix="[]"
+          else
+            extensions_json="$({ printf '%s\n' "${!extensions[@]}" | sort; } | jq -R . | jq -s .)"
+            matrix="$(jq -cn \
+              --argjson extensions "${extensions_json}" \
+              --argjson tasks '["check", "lint", "fmt", "test"]' \
+              '[ $extensions[] as $extension | $tasks[] as $task | {extension: $extension, task: $task} ]')"
+          fi
+
+          echo "Changed extension task matrix: ${matrix}"
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+          if [[ "${matrix}" == "[]" ]]; then
+            echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+  run-extension-task:
+    name: ${{ matrix.extension }} / deno task ${{ matrix.task }}
+    needs: detect-changed-extensions
+    if: needs.detect-changed-extensions.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    environment: extension-testing
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.detect-changed-extensions.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+
+      - name: Install swamp
+        run: |
+          set -euo pipefail
+          curl -fsSL https://swamp.club/install.sh | sh -s -- -V "${SWAMP_VERSION}"
+          echo "${HOME}/bin" >> "${GITHUB_PATH}"
+          export PATH="${HOME}/bin:${PATH}"
+          swamp --version
+
+      - name: Run deno task ${{ matrix.task }}
+        working-directory: ${{ matrix.extension }}
+        run: deno task ${{ matrix.task }}
