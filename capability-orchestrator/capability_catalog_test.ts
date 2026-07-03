@@ -11,7 +11,7 @@ function recordingContext(capabilities: Record<string, unknown>) {
     writes,
     context: {
       globalArgs: { capabilities },
-      writeResource: async (
+      writeResource: (
         specName: string,
         name: string,
         data: Record<string, unknown>,

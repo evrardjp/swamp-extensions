@@ -1,8 +1,8 @@
 {
   "tasks": {
     "fmt": {
-      "description": "Format the TypeScript files in this extension folder.",
-      "command": "deno fmt *.ts"
+      "description": "Check TypeScript formatting in this extension folder.",
+      "command": "deno fmt --check *.ts"
     },
     "doc": {
       "description": "Generate documentation for the TypeScript sources in this extension folder.",
@@ -12,8 +12,12 @@
       "description": "Type check a folder of TypeScript sources with deno check.",
       "command": "deno check *.ts"
     },
+    "lint": {
+      "description": "Lint the TypeScript files in this extension folder.",
+      "command": "deno lint *.ts"
+    },
     "test": {
-      "description": "Run unit tests for a TypeScript extension with deno test --allow-read --allow-write.",
+      "description": "Run unit tests for a TypeScript extension with required scoped permissions.",
       "command": "deno test --allow-read --allow-write --allow-run=ssh-keygen"
     },
     "swampfmt": {
@@ -26,13 +30,14 @@
     },
     "swamppushdryrun": {
       "description": "Dry-run of publishing a swamp extension.",
-      "command": "swamp extension push manifest.yaml --dry-run"
+      "command": "swamp extension push manifest.yaml --dry-run --yes"
     }
   },
   "lint": {
     "rules": {
       "exclude": [
-        "no-import-prefix"
+        "no-import-prefix",
+        "require-await"
       ]
     }
   }

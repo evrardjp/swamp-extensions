@@ -10,7 +10,7 @@ function recordingContext() {
   return {
     writes,
     context: {
-      writeResource: async (
+      writeResource: (
         specName: string,
         name: string,
         data: Record<string, unknown>,
@@ -26,12 +26,20 @@ const capabilities = [
   {
     name: "base",
     requires: [],
-    implementation: { type: "workflow" as const, workflowIdOrName: "base", inputs: {} },
+    implementation: {
+      type: "workflow" as const,
+      workflowIdOrName: "base",
+      inputs: {},
+    },
   },
   {
     name: "app",
     requires: ["base"],
-    implementation: { type: "workflow" as const, workflowIdOrName: "app", inputs: {} },
+    implementation: {
+      type: "workflow" as const,
+      workflowIdOrName: "app",
+      inputs: {},
+    },
   },
 ];
 
@@ -50,7 +58,9 @@ Deno.test("plan resolves dependencies into ordered waves", async () => {
 
   assertEquals(result.dataHandles.length, 1);
   assertEquals(writes[0].specName, "plan");
-  const waves = writes[0].data.waves as Array<{ items: Array<{ capability: string }> }>;
+  const waves = writes[0].data.waves as Array<
+    { items: Array<{ capability: string }> }
+  >;
   assertEquals(waves.map((wave) => wave.items.map((item) => item.capability)), [
     ["base"],
     ["app"],
@@ -63,15 +73,16 @@ Deno.test("plan rejects unknown requested capabilities", async () => {
   const { context } = recordingContext();
 
   await assertRejects(
-    () => model.methods.plan.execute({
-      vms: [{
-        name: "gitea",
-        ipAddress: "192.0.2.12",
-        sshUser: "admin",
-        capabilities: ["missing"],
-      }],
-      capabilities,
-    }, context as never),
+    () =>
+      model.methods.plan.execute({
+        vms: [{
+          name: "gitea",
+          ipAddress: "192.0.2.12",
+          sshUser: "admin",
+          capabilities: ["missing"],
+        }],
+        capabilities,
+      }, context as never),
     Error,
     "requests unknown capability missing",
   );

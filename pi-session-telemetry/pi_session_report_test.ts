@@ -58,7 +58,10 @@ Deno.test("pi session report summarizes events, usage, tools, and errors", async
   assertEquals(json.messageCount, 1);
   assertEquals(json.usage.totalTokens, 15);
   assertEquals(json.byTool, { bash: 1 });
-  assertEquals(result.markdown.includes("# Pi Session Telemetry — telemetry"), true);
+  assertEquals(
+    result.markdown.includes("# Pi Session Telemetry — telemetry"),
+    true,
+  );
   assertEquals(result.markdown.includes("failed"), true);
 });
 
