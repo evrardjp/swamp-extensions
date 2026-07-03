@@ -435,11 +435,11 @@ async function status(
 /** Swamp model for OpenBao API lifecycle control. Deployment is handled by cfgmgmt models. */
 export const model = {
   type: "@evrardjp/openbao-configurator",
-  version: "2026.07.03.3",
+  version: "2026.07.03.4",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
-      toVersion: "2026.07.03.3",
+      toVersion: "2026.07.03.4",
       description: "Version bump with no global argument schema changes",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },

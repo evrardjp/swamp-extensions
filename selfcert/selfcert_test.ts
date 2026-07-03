@@ -1,6 +1,6 @@
 // deno-lint-ignore-file no-explicit-any
-import { assertEquals, assertMatch, assertRejects } from "jsr:@std/assert";
-import { createModelTestContext } from "jsr:@systeminit/swamp-testing";
+import { assertEquals, assertMatch, assertRejects } from "jsr:@std/assert@1";
+import { createModelTestContext } from "jsr:@systeminit/swamp-testing@0.20260518.13";
 import { model } from "./selfcert.ts";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
