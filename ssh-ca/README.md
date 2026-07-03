@@ -1,6 +1,6 @@
 # @evrardjp/ssh-ca
 
-Strict OpenSSH certificate authority lifecycle management for Swamp.
+Strict OpenSSH CA lifecycle management for Swamp, for any environment.
 
 One `@evrardjp/ssh-ca` model instance represents one actual OpenSSH CA keypair.
 There is no root CA and no intermediate CA hierarchy because OpenSSH validates a
@@ -14,7 +14,7 @@ are stored as Swamp data so other extensions can consume and deploy them.
 ## Model
 
 - Type: `@evrardjp/ssh-ca`
-- File: `models/ssh_ca.ts`
+- File: `ssh_ca.ts`
 
 ## OpenSSH concepts
 

@@ -18,7 +18,7 @@ Pi extension / integration
 
 The model is a high-volume observability sink. It should not decide which events
 matter to a maintainer. For curated maintainer state, use
-`@evrardjp/maintainer-activity` and bridge selected findings with its
+`@evrardjp/github-project-activity` and bridge selected findings with its
 `record_pi_session_finding` method.
 
 ## Swamp model
@@ -92,7 +92,7 @@ removes content and local paths. A generated `usage` resource resembles:
   "model": "gpt-5.5",
   "input": 100,
   "output": 20,
-  "totalTokens": 120,
+  "totalUsageCount": 120,
   "costTotal": 0.01
 }
 ```

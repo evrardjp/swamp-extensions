@@ -9,8 +9,8 @@ repository: "https://github.com/evrardjp/swamp-extensions"
 paths:
   base: manifest
 models:
-  - models/capability_catalog.ts
-  - models/capability_plan.ts
+  - capability_catalog.ts
+  - capability_plan.ts
 reports: []
 workflows: []
 vaults: []

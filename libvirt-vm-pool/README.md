@@ -35,7 +35,7 @@ globalArguments:
         model: lab-host-ca
         clientKnownHostsPatterns:
           - "*.lab.example"
-          - "192.168.164.*"
+          - "192.0.2.*"
     user:
       - name: lab-user-ca
         model: lab-user-ca
@@ -47,10 +47,10 @@ globalArguments:
       hostname: gitea
       fqdn: gitea.lab.example
       serviceFqdn: git.lab.example
-      ipAddress: 192.168.164.12
+      ipAddress: 192.0.2.12
       prefixLength: 24
-      gateway: 192.168.164.1
-      nameserver: 192.168.102.1
+      gateway: 192.0.2.1
+      nameserver: 198.51.100.1
 
       # Preferred bootstrap user declaration. The older sshUser/sshPubKeyPath
       # fields still work for compatibility, but new definitions should use
@@ -65,7 +65,7 @@ globalArguments:
         principals:
           - gitea
           - gitea.lab.example
-          - 192.168.164.12
+          - 192.0.2.12
         hostKeyPath: /etc/ssh/ssh_host_ed25519_key.pub
         hostCertificatePath: /etc/ssh/ssh_host_ed25519_key-cert.pub
 
@@ -153,7 +153,7 @@ A per-VM resource contains fields like:
   "desiredState": "reachable",
   "previousState": "shut off",
   "currentState": "running",
-  "ipAddress": "192.168.164.12",
+  "ipAddress": "192.0.2.12",
   "sshUser": "admin",
   "bootstrapSSHUser": {
     "username": "admin",
@@ -161,7 +161,7 @@ A per-VM resource contains fields like:
   },
   "sshHostCertificate": {
     "ca": "lab-host-ca",
-    "principals": ["gitea", "gitea.lab.example", "192.168.164.12"],
+    "principals": ["gitea", "gitea.lab.example", "192.0.2.12"],
     "hostKeyPath": "/etc/ssh/ssh_host_ed25519_key.pub",
     "hostCertificatePath": "/etc/ssh/ssh_host_ed25519_key-cert.pub"
   },

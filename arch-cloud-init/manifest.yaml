@@ -8,7 +8,7 @@ repository: "https://github.com/evrardjp/swamp-extensions"
 paths:
   base: manifest
 models:
-  - models/arch_cloud_init.ts
+  - arch_cloud_init.ts
 reports: []
 workflows: []
 vaults: []

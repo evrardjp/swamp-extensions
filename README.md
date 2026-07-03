@@ -16,7 +16,7 @@ swamp-extensions/
     LICENSE.txt
     models/
     reports/
-  maintainer-activity/
+  github-project-activity/
     manifest.yaml
     README.md
     LICENSE.txt
@@ -32,6 +32,11 @@ swamp-extensions/
     README.md
     LICENSE.txt
     models/
+  selfcert/
+    manifest.yaml
+    README.md
+    LICENSE.txt
+    selfcert.ts
 ```
 
 This is preferable to one giant manifest because each extension can be versioned,
@@ -47,7 +52,7 @@ and local paths are opt-in.
 
 Use it for observability and reporting over real Pi usage.
 
-### `@evrardjp/maintainer-activity`
+### `@evrardjp/github-project-activity`
 
 Low-volume maintainer ledger. Stores curated PR/issue lifecycle events,
 classifications, CI attention records, and distilled Pi agent-session findings.
@@ -69,6 +74,12 @@ Capability catalog and DAG planner models. The catalog publishes manually
 maintained capability definitions; the planner combines those definitions with
 VM pool data and emits ordered execution waves for Swamp workflows.
 
+### `@evrardjp/selfcert`
+
+Self-signed TLS certificate generator. Creates RSA-4096 certificates locally and
+stores certificate/private-key PEM data in a Swamp vault for downstream service
+configuration.
+
 ## Relationship between the two
 
 ```text
@@ -77,7 +88,7 @@ Pi usage
   -> raw/metadata event stream and usage report
 
 Maintainer-relevant conclusion from a Pi session
-  -> @evrardjp/maintainer-activity record_pi_session_finding
+  -> @evrardjp/github-project-activity record_pi_session_finding
   -> daily briefing / PR drill-down
 ```
 

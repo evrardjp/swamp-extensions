@@ -7,7 +7,7 @@ repository: "https://github.com/evrardjp/swamp-extensions"
 paths:
   base: manifest
 models:
-  - models/qcow2_overlay_prep.ts
+  - qcow2_overlay_prep.ts
 reports: []
 workflows: []
 vaults: []

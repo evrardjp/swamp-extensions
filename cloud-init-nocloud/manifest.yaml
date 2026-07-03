@@ -9,7 +9,7 @@ repository: "https://github.com/evrardjp/swamp-extensions"
 paths:
   base: manifest
 models:
-  - models/cloud_init_nocloud.ts
+  - cloud_init_nocloud.ts
 reports: []
 workflows: []
 vaults: []

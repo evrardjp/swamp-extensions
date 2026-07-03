@@ -1,0 +1,26 @@
+manifestVersion: 1
+name: '@evrardjp/openbao-configurator'
+version: 2026.07.03.3
+description: >-
+  OpenBao configuration rendering and API lifecycle control: render HCL, status,
+  initialize, unseal, and seal. File deployment and service management are
+  handled by cfgmgmt extensions.
+paths:
+  base: manifest
+models:
+  - openbao.ts
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+reports: []
+repository: https://github.com/evrardjp/swamp-extensions
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+labels:
+  - openbao
+  - vault
+  - secrets
+  - lifecycle
+dependencies: []

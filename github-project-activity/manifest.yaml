@@ -1,0 +1,35 @@
+manifestVersion: 1
+name: "@evrardjp/github-project-activity"
+version: "2026.07.03.2"
+description: >-
+  Swamp-backed GitHub project activity database and maintainer briefing reports:
+  repository/issue/PR/CI snapshots, chronological public/private activity events,
+  artifacts, PR dossiers, and private/manual/agent maintainer notes.
+repository: "https://github.com/evrardjp/swamp-extensions"
+paths:
+  base: manifest
+models:
+  - github_project_activity.ts
+reports:
+  - github_project_briefing.ts
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+  - maintainer-daily-briefing/SKILL.md
+  - maintainer-portfolio.design.md
+labels:
+  - maintainer
+  - briefing
+  - github
+  - pi
+  - agent
+  - lifecycle
+  - ci
+  - reporting
+  - project-activity
+  - pr-dossier
+dependencies: []

@@ -9,9 +9,9 @@ repository: "https://github.com/evrardjp/swamp-extensions"
 paths:
   base: manifest
 models:
-  - models/pi_session_telemetry.ts
+  - pi_session_telemetry.ts
 reports:
-  - reports/pi_session_report.ts
+  - pi_session_report.ts
 workflows: []
 vaults: []
 drivers: []

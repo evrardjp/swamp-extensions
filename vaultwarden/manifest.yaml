@@ -1,0 +1,26 @@
+manifestVersion: 1
+name: '@evrardjp/vaultwarden'
+version: 2026.07.03.2
+description: >-
+  Vaultwarden helper model for environment template discovery/rendering and HTTP
+  health verification. Deployment and service management are handled by cfgmgmt
+  extensions.
+repository: 'https://github.com/evrardjp/swamp-extensions'
+paths:
+  base: manifest
+models:
+  - vaultwarden.ts
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+reports: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+labels:
+  - vaultwarden
+  - secrets
+  - container
+  - configuration
+dependencies: []
