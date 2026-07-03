@@ -14,7 +14,7 @@
     },
     "test": {
       "description": "Run unit tests for a TypeScript extension with deno test --allow-read --allow-write.",
-      "command": "deno test --allow-read --allow-write"
+      "command": "deno test --allow-read --allow-write --allow-run=ssh-keygen"
     },
     "swampfmt": {
       "description": "Format extension before pushing for swamp.",
@@ -27,6 +27,13 @@
     "swamppushdryrun": {
       "description": "Dry-run of publishing a swamp extension.",
       "command": "swamp extension push manifest.yaml --dry-run"
+    }
+  },
+  "lint": {
+    "rules": {
+      "exclude": [
+        "no-import-prefix"
+      ]
     }
   }
 }

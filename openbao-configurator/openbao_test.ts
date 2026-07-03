@@ -1,8 +1,4 @@
-import {
-  assert,
-  assertEquals,
-  assertRejects,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { model } from "./openbao.ts";
 
 function json(body: unknown, status = 200): Response {
@@ -42,28 +38,34 @@ function context(routes: Record<string, (init?: RequestInit) => Response>) {
           logs.push({ level: "error", msg, props });
         },
       },
-      writeResource: async (
+      writeResource: (
         specName: string,
         instanceName: string,
         data: Record<string, unknown>,
       ) => {
         writes.push({ specName, instanceName, data });
-        return { specName, instanceName };
+        return Promise.resolve({ specName, instanceName });
       },
       createFileWriter: () => ({
-        writeLine: async () => {},
-        finalize: async () => ({ specName: "log", instanceName: "test" }),
+        writeLine: () => Promise.resolve(),
+        finalize: () =>
+          Promise.resolve({ specName: "log", instanceName: "test" }),
       }),
-      putSecret: async (vaultName: string, key: string, value: string) => {
+      putSecret: (vaultName: string, key: string, value: string) => {
         secrets.set(`${vaultName}/${key}`, value);
+        return Promise.resolve();
       },
-      fetch: async (input: string | URL | Request, init?: RequestInit) => {
+      fetch: (input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
         requests.push({ url, init });
         const path = new URL(url).pathname;
         const route = routes[path];
-        if (!route) return json({ errors: [`missing route ${path}`] }, 404);
-        return route(init);
+        if (!route) {
+          return Promise.resolve(
+            json({ errors: [`missing route ${path}`] }, 404),
+          );
+        }
+        return Promise.resolve(route(init));
       },
     },
   };
