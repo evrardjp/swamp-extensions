@@ -356,6 +356,27 @@ async function ghPages<T>(
   }
   return limit ? out.slice(0, limit) : out;
 }
+async function ghPagesUpdatedSince<T extends { updated_at?: string }>(
+  g: GlobalArgs,
+  path: string,
+  params: Record<string, string | number | boolean | undefined>,
+  since: string,
+  limit?: number,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let page = 1;; page++) {
+    const items = await gh<T[]>(g, path, { ...params, per_page: 100, page });
+    out.push(...items);
+    const oldestOnPage = items.map((item) => item.updated_at).filter(Boolean)
+      .sort().at(0);
+    if (
+      items.length < 100 ||
+      (limit && out.length >= limit) ||
+      (oldestOnPage && oldestOnPage < since)
+    ) break;
+  }
+  return limit ? out.slice(0, limit) : out;
+}
 
 type WriteContext = {
   globalArgs: GlobalArgs;
@@ -1360,7 +1381,7 @@ async function clearStaleCandidates(
 /** GitHub maintainer activity database model for repository snapshots, PR dossiers, artifacts, and maintainer notes. */
 export const model = {
   type: "@evrardjp/github-project-activity",
-  version: "2026.07.03.3",
+  version: "2026.07.03.4",
   globalArguments: GlobalArgsSchema,
   reports: [
     "@evrardjp/github-project-briefing",
@@ -1634,6 +1655,7 @@ export const model = {
         state: StateEnumSchema.default("all"),
         includeClosed: z.boolean().default(true),
         limit: z.number().int().positive().optional(),
+        includeForkIndex: z.boolean().default(false),
       }),
       execute: async (args: any, ctx: any) => {
         const g = ctx.globalArgs;
@@ -1641,19 +1663,32 @@ export const model = {
           new Date(Date.now() - g.defaultBackfillWindowDays * 86400_000)
             .toISOString();
         const until = args.until ?? nowIso();
-        const handles: DataHandle[] = await syncRepoFileInventory(ctx);
-        handles.push(
-          ...await syncForkIndex(ctx, {
-            includeConfiguredKnownForks: true,
-            limit: args.limit,
-          }),
-        );
+        const handles: DataHandle[] = [
+          await upsertRepoSnapshot(
+            ctx,
+            await gh<any>(g, `/repos/${g.owner}/${g.repo}`),
+          ),
+        ];
+        if (args.includeForkIndex) {
+          handles.push(
+            ...await syncForkIndex(ctx, {
+              includeConfiguredKnownForks: true,
+              limit: args.limit,
+            }),
+          );
+        }
         const prState = args.includeClosed ? args.state : "open";
-        let prs = await ghPages<any>(g, `/repos/${g.owner}/${g.repo}/pulls`, {
-          state: prState,
-          sort: "updated",
-          direction: "desc",
-        }, args.limit);
+        let prs = await ghPagesUpdatedSince<any>(
+          g,
+          `/repos/${g.owner}/${g.repo}/pulls`,
+          {
+            state: prState,
+            sort: "updated",
+            direction: "desc",
+          },
+          since,
+          args.limit,
+        );
         prs = prs.filter((p) => p.updated_at >= since && p.updated_at <= until);
         for (const pr of prs) {
           handles.push(
