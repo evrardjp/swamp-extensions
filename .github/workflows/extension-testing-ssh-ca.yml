@@ -18,3 +18,5 @@ jobs:
     uses: ./.github/workflows/extension-testing.yml
     with:
       extension: ssh-ca
+    secrets:
+      SWAMP_API_KEY: ${{ secrets.SWAMP_API_KEY }}

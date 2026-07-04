@@ -18,3 +18,5 @@ jobs:
     uses: ./.github/workflows/extension-testing.yml
     with:
       extension: selfcert
+    secrets:
+      SWAMP_API_KEY: ${{ secrets.SWAMP_API_KEY }}

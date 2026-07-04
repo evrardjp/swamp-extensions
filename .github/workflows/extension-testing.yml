@@ -6,6 +6,9 @@ on:
       extension:
         required: true
         type: string
+    secrets:
+      SWAMP_API_KEY:
+        required: true
   workflow_dispatch:
     inputs:
       extension:
@@ -61,6 +64,9 @@ jobs:
       - uses: systeminit/setup-swamp@v0.1.0
         with:
           api-key: ${{ secrets.SWAMP_API_KEY }}
+
+      - name: Verify swamp authentication
+        run: swamp auth whoami >/dev/null 2>&1
 
       - name: Run deno task ${{ matrix.task }}
         working-directory: ${{ inputs.extension }}
