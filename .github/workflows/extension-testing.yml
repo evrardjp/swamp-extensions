@@ -32,7 +32,6 @@ run-name: Test ${{ inputs.extension }}
 
 env:
   DENO_VERSION: v2.8.3
-  SWAMP_VERSION: 20260702.214253.0-sha.8411d6d9
 
 jobs:
   run-extension-task:
@@ -59,13 +58,9 @@ jobs:
         with:
           deno-version: ${{ env.DENO_VERSION }}
 
-      - name: Install swamp
-        run: |
-          set -euo pipefail
-          curl -fsSL https://swamp.club/install.sh | sh -s -- -V "${SWAMP_VERSION}"
-          echo "${HOME}/bin" >> "${GITHUB_PATH}"
-          export PATH="${HOME}/bin:${PATH}"
-          swamp --version
+      - uses: systeminit/setup-swamp@v0.1.0
+        with:
+          api-key: ${{ secrets.SWAMP_API_KEY }}
 
       - name: Run deno task ${{ matrix.task }}
         working-directory: ${{ inputs.extension }}
