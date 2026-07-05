@@ -1,10 +1,24 @@
 import { z } from "npm:zod@4";
 
-const ImplementationSchema = z.object({
+const WorkflowImplementationSchema = z.object({
   type: z.literal("workflow"),
   workflowIdOrName: z.string(),
   inputs: z.record(z.string(), z.unknown()).default({}),
 });
+
+const ModelMethodImplementationSchema = z.object({
+  type: z.literal("model_method"),
+  modelType: z.string(),
+  modelName: z.string(),
+  methodName: z.string(),
+  globalArgs: z.record(z.string(), z.unknown()).default({}),
+  inputs: z.record(z.string(), z.unknown()).default({}),
+});
+
+const ImplementationSchema = z.discriminatedUnion("type", [
+  WorkflowImplementationSchema,
+  ModelMethodImplementationSchema,
+]);
 
 const CapabilitySpecSchema = z.object({
   description: z.string().optional(),
@@ -45,10 +59,10 @@ function validateCatalog(catalog: Record<string, CapabilitySpec>) {
   }
 }
 
-/** Capability catalog model that validates and publishes workflow-backed capability definitions. */
+/** Capability catalog model that validates and publishes capability definitions. */
 export const model = {
   type: "@evrardjp/capability-catalog",
-  version: "2026.06.29.1",
+  version: "2026.07.05.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     capability: {

@@ -1,10 +1,24 @@
 import { z } from "npm:zod@4";
 
-const ImplementationSchema = z.object({
+const WorkflowImplementationSchema = z.object({
   type: z.literal("workflow"),
   workflowIdOrName: z.string(),
   inputs: z.record(z.string(), z.unknown()).default({}),
 });
+
+const ModelMethodImplementationSchema = z.object({
+  type: z.literal("model_method"),
+  modelType: z.string(),
+  modelName: z.string(),
+  methodName: z.string(),
+  globalArgs: z.record(z.string(), z.unknown()).default({}),
+  inputs: z.record(z.string(), z.unknown()).default({}),
+});
+
+const ImplementationSchema = z.discriminatedUnion("type", [
+  WorkflowImplementationSchema,
+  ModelMethodImplementationSchema,
+]);
 
 const CapabilitySchema = z.object({
   name: z.string(),
@@ -49,6 +63,95 @@ const PlanSchema = z.object({
 type Capability = z.infer<typeof CapabilitySchema>;
 type Vm = z.infer<typeof VmSchema>;
 type PlanItem = z.infer<typeof PlanItemSchema>;
+type Implementation = z.infer<typeof ImplementationSchema>;
+
+type TemplateContext = {
+  host: string;
+  capability: string;
+  vm: Vm;
+};
+
+const EXACT_TEMPLATE = /^@\{\s*([A-Za-z0-9_.-]+)\s*\}$/;
+const TEMPLATE = /@\{\s*([A-Za-z0-9_.-]+)\s*\}/g;
+
+function lookupTemplateValue(path: string, context: TemplateContext): unknown {
+  const parts = path.split(".");
+  let current: unknown = context;
+  for (const part of parts) {
+    if (current && typeof current === "object" && part in current) {
+      current = (current as Record<string, unknown>)[part];
+    } else {
+      throw new Error(`Unknown capability template path ${path}`);
+    }
+  }
+  return current;
+}
+
+function renderTemplateValue(
+  value: unknown,
+  context: TemplateContext,
+): unknown {
+  if (typeof value === "string") {
+    const exact = value.match(EXACT_TEMPLATE);
+    if (exact) return lookupTemplateValue(exact[1], context);
+    return value.replace(TEMPLATE, (_match, path: string) => {
+      const rendered = lookupTemplateValue(path, context);
+      if (rendered === undefined || rendered === null) return "";
+      return String(rendered);
+    });
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => renderTemplateValue(item, context));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, inner]) => [
+        key,
+        renderTemplateValue(inner, context),
+      ]),
+    );
+  }
+  return value;
+}
+
+function materializeImplementation(
+  implementation: Implementation,
+  context: TemplateContext,
+): Implementation {
+  if (implementation.type === "workflow") {
+    return {
+      ...implementation,
+      workflowIdOrName: renderTemplateValue(
+        implementation.workflowIdOrName,
+        context,
+      ) as string,
+      inputs: renderTemplateValue(implementation.inputs, context) as Record<
+        string,
+        unknown
+      >,
+    };
+  }
+  return {
+    ...implementation,
+    modelType: renderTemplateValue(implementation.modelType, context) as string,
+    modelName: renderTemplateValue(implementation.modelName, context) as string,
+    methodName: renderTemplateValue(
+      implementation.methodName,
+      context,
+    ) as string,
+    globalArgs: renderTemplateValue(
+      implementation.globalArgs,
+      context,
+    ) as Record<
+      string,
+      unknown
+    >,
+    inputs: renderTemplateValue(implementation.inputs, context) as Record<
+      string,
+      unknown
+    >,
+  };
+}
 
 function resolveForVm(vm: Vm, catalog: Map<string, Capability>): string[] {
   const resolved = new Set<string>();
@@ -86,7 +189,11 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
         host: vm.name,
         vm,
         capability: cap,
-        implementation: spec.implementation,
+        implementation: materializeImplementation(spec.implementation, {
+          host: vm.name,
+          vm,
+          capability: cap,
+        }),
       });
     }
   }
@@ -120,10 +227,10 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
   return { waves, requested, resolved };
 }
 
-/** Capability planner model that resolves requested VM capabilities into dependency-ordered workflow waves. */
+/** Capability planner model that resolves requested VM capabilities into dependency-ordered waves. */
 export const model = {
   type: "@evrardjp/capability-plan",
-  version: "2026.06.29.1",
+  version: "2026.07.05.1",
   globalArguments: z.object({}),
   resources: {
     plan: {

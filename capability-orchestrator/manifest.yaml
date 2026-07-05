@@ -1,10 +1,10 @@
 manifestVersion: 1
 name: "@evrardjp/capability-orchestrator"
-version: "2026.06.29.1"
+version: "2026.07.05.1"
 description: >-
-  Capability catalog and DAG planner models for Swamp workflows. Publishes
-  capability definitions and resolves per-host requested capabilities into
-  dependency waves for workflow execution.
+  Capability catalog and DAG planner models for Swamp workflows and direct
+  model method calls. Publishes capability definitions and resolves per-host
+  requested capabilities into dependency waves for execution.
 repository: "https://github.com/evrardjp/swamp-extensions"
 paths:
   base: manifest

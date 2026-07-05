@@ -48,6 +48,33 @@ Deno.test("publish writes capability resources and a sorted summary", async () =
   assertEquals(writes.at(-1)?.data.capabilityCount, 2);
 });
 
+Deno.test("publish accepts model method implementations", async () => {
+  const { writes, context } = recordingContext({
+    base: {
+      requires: [],
+      implementation: {
+        type: "model_method",
+        modelType: "@example/package",
+        modelName: "lab-@{host}-base",
+        methodName: "apply",
+        globalArgs: { nodeHost: "@{vm.ipAddress}" },
+        inputs: {},
+      },
+    },
+  });
+
+  await model.methods.publish.execute({}, context as never);
+
+  assertEquals(writes[0].data.implementation, {
+    type: "model_method",
+    modelType: "@example/package",
+    modelName: "lab-@{host}-base",
+    methodName: "apply",
+    globalArgs: { nodeHost: "@{vm.ipAddress}" },
+    inputs: {},
+  });
+});
+
 Deno.test("publish rejects unknown dependencies", async () => {
   const { context } = recordingContext({
     app: {
