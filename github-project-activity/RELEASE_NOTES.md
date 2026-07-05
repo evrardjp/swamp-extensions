@@ -8,4 +8,4 @@
 
 **Fixed:** Codebase heatmap JSON keeps the existing `counts.currentFilesWithTouches` key as an alias of the new landed-touch count for dashboard compatibility.
 
-**Changed:** PR-file snapshots now record `landedAt` when syncing merged PRs so future reports can classify retained file history without needing the PR snapshot. Merged PR syncs also mark previously retained files that are no longer in the final PR file list as not landed.
+**Changed:** PR-file snapshots now record `landedAt` when syncing merged PRs so future reports can classify retained file history without needing the PR snapshot. Open PR file snapshots leave `landedAt` unset, closed-unmerged snapshots use `null`, and merged PR syncs mark previously retained files that are no longer in the final PR file list as not landed.
