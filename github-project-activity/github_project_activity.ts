@@ -649,10 +649,13 @@ async function markMissingLandedPrFilesNotLanded(
     ctx.modelType,
     ctx.modelId,
   );
+  const namePrefix = `${safeName("pr-file", [repo, prNumber])}-`;
   const latest = new Map<string, any>();
   for (
     const entry of entries.filter((e: any) =>
-      tagsOf(e).specName === "prFileSnapshot"
+      tagsOf(e).specName === "prFileSnapshot" &&
+      typeof e.name === "string" &&
+      e.name.startsWith(namePrefix)
     )
   ) {
     const current = latest.get(entry.name);
@@ -1033,7 +1036,7 @@ async function syncPrDetails(
           f,
           repo,
           n,
-          pr.merged_at,
+          pr.merged_at ?? (pr.closed_at ? null : undefined),
           Boolean(opts.includePatchArtifacts),
         ),
       );
