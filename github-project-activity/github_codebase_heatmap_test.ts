@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert@1";
+import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 import { report } from "./github_codebase_heatmap.ts";
 
 type Entry = {
@@ -97,7 +97,9 @@ Deno.test("codebase heatmap matches PR-file touches by repo and PR number", asyn
 
   const counts = result.json.counts as Record<string, number>;
   assertEquals(counts.currentFilesWithLandedTouches, 0);
+  assertEquals(counts.prFileSnapshots, 1);
   assertEquals(counts.landedPrFileSnapshots, 0);
+  assertStringIncludes(result.markdown, "Landed PR-file snapshots: **0** / 1");
 });
 
 Deno.test("codebase heatmap keeps legacy PR-file touches without retained PR snapshots", async () => {
