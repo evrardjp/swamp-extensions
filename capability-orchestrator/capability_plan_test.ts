@@ -69,6 +69,52 @@ Deno.test("plan resolves dependencies into ordered waves", async () => {
   assertEquals(writes[0].data.resolved, { gitea: ["base", "app"] });
 });
 
+Deno.test("plan materializes model method implementation templates", async () => {
+  const { writes, context } = recordingContext();
+
+  await model.methods.plan.execute({
+    vms: [{
+      name: "gitea",
+      hostname: "gitea.example.com",
+      ipAddress: "192.0.2.12",
+      sshUser: "admin",
+      capabilities: ["base"],
+    }],
+    capabilities: [{
+      name: "base",
+      requires: [],
+      implementation: {
+        type: "model_method" as const,
+        modelType: "@example/package",
+        modelName: "lab-@{host}-base",
+        methodName: "apply",
+        globalArgs: {
+          nodeHost: "@{vm.ipAddress}",
+          nodeUser: "@{vm.sshUser}",
+          url: "https://@{vm.hostname}",
+        },
+        inputs: { timeout: 30 },
+      },
+    }],
+  }, context as never);
+
+  const waves = writes[0].data.waves as Array<{
+    items: Array<{ implementation: Record<string, unknown> }>;
+  }>;
+  assertEquals(waves[0].items[0].implementation, {
+    type: "model_method",
+    modelType: "@example/package",
+    modelName: "lab-gitea-base",
+    methodName: "apply",
+    globalArgs: {
+      nodeHost: "192.0.2.12",
+      nodeUser: "admin",
+      url: "https://gitea.example.com",
+    },
+    inputs: { timeout: 30 },
+  });
+});
+
 Deno.test("plan rejects unknown requested capabilities", async () => {
   const { context } = recordingContext();
 

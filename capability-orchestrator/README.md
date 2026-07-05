@@ -4,7 +4,10 @@ Capability catalog and planner models for Swamp.
 
 The catalog is manually maintained as a Swamp model definition. The planner
 combines the catalog with VM facts from a fleet/pool model and emits dependency
-waves that workflows can execute.
+waves that workflows can execute. Capability implementations may be either
+workflow calls or direct `model_method` calls. Direct model methods can use
+`@{host}`, `@{capability}`, and `@{vm.<field>}` placeholders that the planner
+materializes per target VM.
 
 ## Models
 
@@ -30,11 +33,19 @@ globalArguments:
         workflowIdOrName: docker-capability
         inputs: {}
 
-    gitea:
-      requires: [base-arch, nginx-stream]
+    gitea-package:
+      requires: [base-arch]
       implementation:
-        type: workflow
-        workflowIdOrName: gitea-guarantee
+        type: model_method
+        modelType: '@adam/cfgmgmt/pacman'
+        modelName: lab-@{host}-gitea-package
+        methodName: apply
+        globalArgs:
+          packages: [gitea]
+          ensure: present
+          nodeHost: '@{vm.ipAddress}'
+          nodeUser: '@{vm.sshUser}'
+          nodePort: 22
         inputs: {}
 ```
 
@@ -61,8 +72,12 @@ globalArguments:
           "host": "gitea",
           "capability": "ssh",
           "implementation": {
-            "type": "workflow",
-            "workflowIdOrName": "ssh-capability"
+            "type": "model_method",
+            "modelType": "@keeb/ssh/host",
+            "modelName": "lab-gitea-ssh-capability",
+            "methodName": "waitForConnection",
+            "globalArgs": { "host": "192.0.2.12", "user": "admin" },
+            "inputs": { "timeout": 360 }
           }
         }
       ]
