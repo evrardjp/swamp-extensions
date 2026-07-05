@@ -137,6 +137,7 @@ Deno.test("codebase heatmap keeps legacy PR-file touches without retained PR sna
   });
 
   const counts = result.json.counts as Record<string, number>;
+  assertEquals(counts.currentFilesWithTouches, 1);
   assertEquals(counts.currentFilesWithLandedTouches, 1);
   assertEquals(counts.landedPrFileSnapshots, 1);
   const hottest = result.json.hottestFiles as Array<{
@@ -149,6 +150,66 @@ Deno.test("codebase heatmap keeps legacy PR-file touches without retained PR sna
   assertEquals(hottest[0].lastTouchedAt, undefined);
   assertEquals(hottest[0].daysSinceTouch, null);
   assertEquals(hottest[0].bucket, "never-recorded");
+});
+
+Deno.test("codebase heatmap keeps legacy PR-file touches with retained merged PR snapshots", async () => {
+  const result = await report.execute({
+    modelType: "@evrardjp/github-project-activity",
+    modelId: "model-id",
+    globalArgs: { owner: "owner", repo: "repo" },
+    dataRepository: repository([
+      {
+        name: "file-c",
+        version: 1,
+        tags: { specName: "repoFileSnapshot" },
+        value: {
+          repo: "owner/repo",
+          path: "src/c.ts",
+          type: "file",
+          syncedAt: "2026-07-01T00:00:00.000Z",
+        },
+      },
+      {
+        name: "legacy-pr-file-c",
+        version: 1,
+        tags: { specName: "prFileSnapshot" },
+        value: {
+          repo: "owner/repo",
+          prNumber: 9,
+          path: "src/c.ts",
+          status: "modified",
+          statusShort: "M",
+          changes: 2,
+          syncedAt: "2026-07-01T00:00:00.000Z",
+        },
+      },
+      {
+        name: "merged-pr-9",
+        version: 1,
+        tags: { specName: "prSnapshot" },
+        value: {
+          repo: "owner/repo",
+          number: 9,
+          title: "Merged before landedAt existed",
+          state: "closed",
+          merged: true,
+          mergedAt: "2026-07-02T00:00:00.000Z",
+          syncedAt: "2026-07-02T00:00:00.000Z",
+        },
+      },
+    ]),
+  });
+
+  const counts = result.json.counts as Record<string, number>;
+  assertEquals(counts.currentFilesWithTouches, 1);
+  assertEquals(counts.currentFilesWithLandedTouches, 1);
+  assertEquals(counts.landedPrFileSnapshots, 1);
+  const hottest = result.json.hottestFiles as Array<{
+    path: string;
+    lastTouchedAt?: string;
+  }>;
+  assertEquals(hottest[0].path, "src/c.ts");
+  assertEquals(hottest[0].lastTouchedAt, "2026-07-02T00:00:00.000Z");
 });
 
 Deno.test("codebase heatmap ignores stale PR-file rows missing a merged-file landing", async () => {
@@ -179,6 +240,7 @@ Deno.test("codebase heatmap ignores stale PR-file rows missing a merged-file lan
           status: "modified",
           statusShort: "M",
           changes: 5,
+          landedAt: null,
           syncedAt: "2026-07-01T00:00:00.000Z",
         },
       },
