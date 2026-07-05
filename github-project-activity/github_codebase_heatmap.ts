@@ -186,25 +186,24 @@ function prKey(repo: string, number: number): string {
   return `${repo}:${number}`;
 }
 
-function isLandedPr(pr: PrSnapshot | undefined): boolean {
-  return Boolean(pr?.merged || pr?.mergedAt);
+function hasRecordedLanding(
+  touch: PrFileSnapshot,
+): touch is PrFileSnapshot & { landedAt: string } {
+  return typeof touch.landedAt === "string" && touch.landedAt.length > 0;
 }
 
 function hasLandedTouch(
   touch: PrFileSnapshot,
   pr: PrSnapshot | undefined,
 ): boolean {
-  if (pr) return isLandedPr(pr);
-  return touch.landedAt !== null;
+  if (hasRecordedLanding(touch)) return true;
+  if (touch.landedAt === null) return false;
+  return !pr;
 }
 
-function touchTimestamp(
-  touch: PrFileSnapshot,
-  pr: PrSnapshot | undefined,
-): string | undefined {
-  return pr?.mergedAt ?? (pr?.merged ? pr.closedAt : undefined) ??
-    touch.landedAt ??
-    (touch.landedAt === undefined ? touch.syncedAt : undefined);
+function touchTimestamp(touch: PrFileSnapshot): string | undefined {
+  if (hasRecordedLanding(touch)) return touch.landedAt;
+  return undefined;
 }
 
 function buildRows(
@@ -240,8 +239,7 @@ function buildRows(
     let lastTouchedAt: string | undefined;
     let lastTouch: PrFileSnapshot | undefined;
     for (const touch of touches) {
-      const pr = prByRepoAndNumber.get(prKey(touch.repo, touch.prNumber));
-      const touchAt = touchTimestamp(touch, pr);
+      const touchAt = touchTimestamp(touch);
       if (!lastTouchedAt || (touchAt && touchAt > lastTouchedAt)) {
         lastTouchedAt = touchAt;
         lastTouch = touch;
