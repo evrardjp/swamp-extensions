@@ -1,0 +1,156 @@
+name: Extension Publish
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "*/manifest.yaml"
+  workflow_dispatch:
+    inputs:
+      extension:
+        description: Extension directory to publish
+        required: true
+        type: choice
+        options:
+          - arch-cloud-init
+          - capability-orchestrator
+          - cloud-init-nocloud
+          - github-project-activity
+          - libvirt-vm-pool
+          - openbao-configurator
+          - pi-session-telemetry
+          - qcow2-overlay-prep
+          - selfcert
+          - ssh-ca
+          - vaultwarden
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extension-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+run-name: Publish changed extensions
+
+env:
+  DENO_VERSION: v2.8.3
+
+jobs:
+  changed-extensions:
+    name: Detect changed extension manifests
+    runs-on: ubuntu-latest
+    outputs:
+      extensions: ${{ steps.detect.outputs.extensions }}
+      has-extensions: ${{ steps.detect.outputs.has-extensions }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed manifests
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            extensions_json=$(jq -cn --arg extension "${{ inputs.extension }}" '[$extension]')
+          else
+            before="${{ github.event.before }}"
+            after="${{ github.sha }}"
+
+            if [[ -z "$before" || "$before" =~ ^0+$ ]]; then
+              mapfile -t manifests < <(git ls-tree -r --name-only "$after" -- '*/manifest.yaml')
+            else
+              git fetch --no-tags --prune --depth=2 origin "$before" "$after" || true
+              mapfile -t manifests < <(git diff --name-only "$before" "$after" -- '*/manifest.yaml')
+            fi
+
+            extensions_json=$(printf '%s\n' "${manifests[@]:-}" \
+              | awk -F/ 'NF == 2 && $2 == "manifest.yaml" { print $1 }' \
+              | sort -u \
+              | jq -R . \
+              | jq -cs .)
+          fi
+
+          if [[ "$extensions_json" == "[]" ]]; then
+            echo "has-extensions=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-extensions=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "extensions=$extensions_json" >> "$GITHUB_OUTPUT"
+          echo "Extensions to publish: $extensions_json"
+
+  publish:
+    name: Publish ${{ matrix.extension }}
+    needs: changed-extensions
+    if: needs.changed-extensions.outputs.has-extensions == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        extension: ${{ fromJSON(needs.changed-extensions.outputs.extensions) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+
+      - name: Setup swamp
+        uses: systeminit/setup-swamp@v0.1.0
+        with:
+          api-key: ${{ secrets.SWAMP_API_KEY }}
+
+      - name: Verify swamp authentication
+        run: swamp auth whoami >/dev/null 2>&1
+
+      - name: Verify release notes
+        working-directory: ${{ matrix.extension }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f RELEASE_NOTES.md ]]; then
+            echo "RELEASE_NOTES.md is required for every published version." >&2
+            exit 1
+          fi
+
+          bytes=$(wc -c < RELEASE_NOTES.md)
+          if (( bytes > 5000 )); then
+            echo "RELEASE_NOTES.md is $bytes bytes; swamp --release-notes is limited to 5000 characters." >&2
+            exit 1
+          fi
+
+      - name: Validate extension before publishing
+        working-directory: ${{ matrix.extension }}
+        run: |
+          deno task check
+          deno task lint
+          deno task fmt
+          deno task doc
+          deno task test
+          deno task swampfmt
+          deno task swampquality
+
+      - name: Dry-run publish
+        working-directory: ${{ matrix.extension }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_notes=$(cat RELEASE_NOTES.md)
+          swamp extension push manifest.yaml --dry-run --yes --release-notes "$release_notes"
+
+      - name: Publish extension
+        working-directory: ${{ matrix.extension }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_notes=$(cat RELEASE_NOTES.md)
+          swamp extension push manifest.yaml --yes --release-notes "$release_notes"
