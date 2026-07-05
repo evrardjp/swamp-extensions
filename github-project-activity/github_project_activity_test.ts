@@ -106,6 +106,20 @@ Deno.test("sync_github_pr_by_number fetches exactly one PR directly", async () =
   globalThis.fetch = async (input: string | URL | Request) => {
     const url = String(input);
     requestedUrls.push(url);
+    if (url.includes("/repos/owner/repo/pulls/42/files")) {
+      return new Response(
+        JSON.stringify([{
+          filename: "src/a.ts",
+          status: "modified",
+          additions: 10,
+          deletions: 2,
+          changes: 12,
+          blob_url: "https://github.com/owner/repo/blob/src/a.ts",
+          raw_url: "https://raw.githubusercontent.com/owner/repo/src/a.ts",
+        }]),
+        { status: 200 },
+      );
+    }
     if (url.includes("/repos/owner/repo/pulls/42")) {
       return new Response(
         JSON.stringify({
@@ -146,7 +160,6 @@ Deno.test("sync_github_pr_by_number fetches exactly one PR directly", async () =
   try {
     const result = await model.methods.sync_github_pr_by_number.execute({
       prNumber: 42,
-      includeFiles: false,
       includePatchArtifacts: false,
       includeReviews: false,
       includeReviewComments: false,
@@ -155,10 +168,14 @@ Deno.test("sync_github_pr_by_number fetches exactly one PR directly", async () =
       includeTimeline: false,
     }, context);
 
-    assertEquals(requestedUrls.length, 1);
+    assertEquals(requestedUrls.length, 2);
     assertEquals(requestedUrls[0].includes("/repos/owner/repo/pulls/42"), true);
     assertEquals(requestedUrls[0].includes("state="), false);
-    assertEquals(result.dataHandles.length, 2);
+    assertEquals(
+      requestedUrls[1].includes("/repos/owner/repo/pulls/42/files"),
+      true,
+    );
+    assertEquals(result.dataHandles.length, 3);
     assertEquals(writes.some((w) => w.specName === "prSnapshot"), true);
     assertEquals(
       writes.find((w) => w.specName === "prSnapshot")?.data.state,

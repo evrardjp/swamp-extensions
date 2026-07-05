@@ -369,7 +369,6 @@ swamp model method run eso-external-secrets-activity sync_github_repo \
 swamp model method run eso-external-secrets-activity sync_github_prs \
     --input state=open \
     --input limit=3 \
-    --input includeFiles=true \
     --input includeReviews=true \
     --input includeReviewComments=true \
     --input includeIssueComments=true \
@@ -382,7 +381,6 @@ swamp model method run eso-external-secrets-activity sync_github_prs \
    swamp model method run eso-external-secrets-activity sync_github_prs \
      --input state=open \
      --input limit=20 \
-     --input includeFiles=true \
      --input includeReviews=true \
      --input includeReviewComments=true \
      --input includeIssueComments=true \
