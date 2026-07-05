@@ -307,14 +307,14 @@ export const report = {
       entries,
       "prSnapshot",
     );
+    const prFilesForRepo = prFiles.filter((f) => !repo || f.repo === repo);
     const prByRepoAndNumber = new Map(
       prs.map((pr) => [prKey(pr.repo, pr.number), pr]),
     );
-    const landedPrFiles = prFiles.filter((f) =>
-      (!repo || f.repo === repo) &&
+    const landedPrFiles = prFilesForRepo.filter((f) =>
       hasLandedTouch(f, prByRepoAndNumber.get(prKey(f.repo, f.prNumber)))
     );
-    const rows = buildRows(repo, files, prFiles, prs);
+    const rows = buildRows(repo, files, prFilesForRepo, prs);
 
     const currentRows = rows.filter((r) => r.current);
     const byBucket = new Map<string, number>();
@@ -384,7 +384,7 @@ export const report = {
       "",
       `Current files: **${currentRows.length}** · Files with recorded landed PR touches: **${
         currentRows.filter((r) => r.touches > 0).length
-      }** · Landed PR-file snapshots: **${landedPrFiles.length}** / ${prFiles.length} · PR snapshots: **${prs.length}**`,
+      }** · Landed PR-file snapshots: **${landedPrFiles.length}** / ${prFilesForRepo.length} · PR snapshots: **${prs.length}**`,
       "",
       files.length === 0
         ? "> No repoFileSnapshot data found, so untouched current files cannot be computed yet. Run `sync_github_file_inventory` first."
@@ -473,7 +473,7 @@ export const report = {
           currentFilesWithLandedTouches:
             currentRows.filter((r) => r.touches > 0).length,
           repoFileSnapshots: files.length,
-          prFileSnapshots: prFiles.length,
+          prFileSnapshots: prFilesForRepo.length,
           landedPrFileSnapshots: landedPrFiles.length,
           prSnapshots: prs.length,
           changedNotCurrent: rows.filter((r) => !r.current).length,
