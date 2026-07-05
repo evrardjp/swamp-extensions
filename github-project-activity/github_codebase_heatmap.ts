@@ -54,6 +54,7 @@ type PrFileSnapshot = {
   changes?: number;
   blobUrl?: string;
   rawUrl?: string;
+  landedAt?: string | null;
   syncedAt: string;
 };
 
@@ -141,10 +142,6 @@ function bucketFor(days: number | null): string {
   return ">365d";
 }
 
-function maxIso(values: Array<string | undefined | null>): string | undefined {
-  return values.filter(Boolean).sort().at(-1) as string | undefined;
-}
-
 async function readJson<T>(
   context: ReportCtx,
   entry: DataEntry,
@@ -185,18 +182,47 @@ function repoFullName(args?: Record<string, unknown>): string | undefined {
   return owner && repo ? `${owner}/${repo}` : undefined;
 }
 
+function prKey(repo: string, number: number): string {
+  return `${repo}:${number}`;
+}
+
+function isLandedPr(pr: PrSnapshot | undefined): boolean {
+  return Boolean(pr?.merged || pr?.mergedAt);
+}
+
+function hasLandedTouch(
+  touch: PrFileSnapshot,
+  pr: PrSnapshot | undefined,
+): boolean {
+  if (pr) return isLandedPr(pr);
+  return touch.landedAt !== null;
+}
+
+function touchTimestamp(
+  touch: PrFileSnapshot,
+  pr: PrSnapshot | undefined,
+): string | undefined {
+  return pr?.mergedAt ?? (pr?.merged ? pr.closedAt : undefined) ??
+    touch.landedAt ??
+    (touch.landedAt === undefined ? touch.syncedAt : undefined);
+}
+
 function buildRows(
   repo: string | undefined,
   files: RepoFileSnapshot[],
   prFiles: PrFileSnapshot[],
   prs: PrSnapshot[],
 ): HeatmapRow[] {
-  const prByNumber = new Map(prs.map((pr) => [pr.number, pr]));
+  const prByRepoAndNumber = new Map(
+    prs.map((pr) => [prKey(pr.repo, pr.number), pr]),
+  );
   const currentByPath = new Map(
     files.filter((f) => !repo || f.repo === repo).map((f) => [f.path, f]),
   );
   const touchesByPath = new Map<string, PrFileSnapshot[]>();
   for (const f of prFiles.filter((f) => !repo || f.repo === repo)) {
+    const pr = prByRepoAndNumber.get(prKey(f.repo, f.prNumber));
+    if (!hasLandedTouch(f, pr)) continue;
     const list = touchesByPath.get(f.path) ?? [];
     list.push(f);
     touchesByPath.set(f.path, list);
@@ -214,19 +240,17 @@ function buildRows(
     let lastTouchedAt: string | undefined;
     let lastTouch: PrFileSnapshot | undefined;
     for (const touch of touches) {
-      const pr = prByNumber.get(touch.prNumber);
-      const touchAt = maxIso([
-        pr?.mergedAt,
-        pr?.closedAt,
-        pr?.updatedAt,
-      ]);
+      const pr = prByRepoAndNumber.get(prKey(touch.repo, touch.prNumber));
+      const touchAt = touchTimestamp(touch, pr);
       if (!lastTouchedAt || (touchAt && touchAt > lastTouchedAt)) {
         lastTouchedAt = touchAt;
         lastTouch = touch;
       }
     }
     const age = daysSince(lastTouchedAt);
-    const lastPr = lastTouch ? prByNumber.get(lastTouch.prNumber) : undefined;
+    const lastPr = lastTouch
+      ? prByRepoAndNumber.get(prKey(lastTouch.repo, lastTouch.prNumber))
+      : undefined;
     rows.push({
       path,
       directory: directoryOf(path),
@@ -282,6 +306,13 @@ export const report = {
       context,
       entries,
       "prSnapshot",
+    );
+    const prByRepoAndNumber = new Map(
+      prs.map((pr) => [prKey(pr.repo, pr.number), pr]),
+    );
+    const landedPrFiles = prFiles.filter((f) =>
+      (!repo || f.repo === repo) &&
+      hasLandedTouch(f, prByRepoAndNumber.get(prKey(f.repo, f.prNumber)))
     );
     const rows = buildRows(repo, files, prFiles, prs);
 
@@ -351,9 +382,9 @@ export const report = {
     const lines = [
       `# Codebase Heatmap — ${modelName}`,
       "",
-      `Current files: **${currentRows.length}** · Files with recorded PR touches: **${
+      `Current files: **${currentRows.length}** · Files with recorded landed PR touches: **${
         currentRows.filter((r) => r.touches > 0).length
-      }** · PR-file snapshots: **${prFiles.length}** · PR snapshots: **${prs.length}**`,
+      }** · Landed PR-file snapshots: **${landedPrFiles.length}** / ${prFiles.length} · PR snapshots: **${prs.length}**`,
       "",
       files.length === 0
         ? "> No repoFileSnapshot data found, so untouched current files cannot be computed yet. Run `sync_github_file_inventory` first."
@@ -439,10 +470,11 @@ export const report = {
         repo,
         counts: {
           currentFiles: currentRows.length,
-          currentFilesWithTouches:
+          currentFilesWithLandedTouches:
             currentRows.filter((r) => r.touches > 0).length,
           repoFileSnapshots: files.length,
           prFileSnapshots: prFiles.length,
+          landedPrFileSnapshots: landedPrFiles.length,
           prSnapshots: prs.length,
           changedNotCurrent: rows.filter((r) => !r.current).length,
         },
