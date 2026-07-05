@@ -186,6 +186,10 @@ function prKey(repo: string, number: number): string {
   return `${repo}:${number}`;
 }
 
+function isLandedPr(pr: PrSnapshot | undefined): boolean {
+  return Boolean(pr?.merged || pr?.mergedAt);
+}
+
 function hasRecordedLanding(
   touch: PrFileSnapshot,
 ): touch is PrFileSnapshot & { landedAt: string } {
@@ -198,11 +202,17 @@ function hasLandedTouch(
 ): boolean {
   if (hasRecordedLanding(touch)) return true;
   if (touch.landedAt === null) return false;
-  return !pr;
+  return pr ? isLandedPr(pr) : true;
 }
 
-function touchTimestamp(touch: PrFileSnapshot): string | undefined {
+function touchTimestamp(
+  touch: PrFileSnapshot,
+  pr: PrSnapshot | undefined,
+): string | undefined {
   if (hasRecordedLanding(touch)) return touch.landedAt;
+  if (touch.landedAt === undefined && isLandedPr(pr)) {
+    return pr?.mergedAt ?? (pr?.merged ? pr.closedAt ?? undefined : undefined);
+  }
   return undefined;
 }
 
@@ -239,7 +249,8 @@ function buildRows(
     let lastTouchedAt: string | undefined;
     let lastTouch: PrFileSnapshot | undefined;
     for (const touch of touches) {
-      const touchAt = touchTimestamp(touch);
+      const pr = prByRepoAndNumber.get(prKey(touch.repo, touch.prNumber));
+      const touchAt = touchTimestamp(touch, pr);
       if (!lastTouchedAt || (touchAt && touchAt > lastTouchedAt)) {
         lastTouchedAt = touchAt;
         lastTouch = touch;
@@ -468,6 +479,8 @@ export const report = {
         repo,
         counts: {
           currentFiles: currentRows.length,
+          currentFilesWithTouches:
+            currentRows.filter((r) => r.touches > 0).length,
           currentFilesWithLandedTouches:
             currentRows.filter((r) => r.touches > 0).length,
           repoFileSnapshots: files.length,

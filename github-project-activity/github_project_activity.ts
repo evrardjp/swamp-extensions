@@ -636,6 +636,59 @@ async function upsertPrFileSnapshot(
   );
   return handles;
 }
+
+async function markMissingLandedPrFilesNotLanded(
+  ctx: WriteContext,
+  repo: string,
+  prNumber: number,
+  currentPaths: Set<string>,
+): Promise<DataHandle[]> {
+  if (!ctx.dataRepository || !ctx.modelType || !ctx.modelId) return [];
+
+  const entries = await ctx.dataRepository.findAllForModel(
+    ctx.modelType,
+    ctx.modelId,
+  );
+  const latest = new Map<string, any>();
+  for (
+    const entry of entries.filter((e: any) =>
+      tagsOf(e).specName === "prFileSnapshot"
+    )
+  ) {
+    const current = latest.get(entry.name);
+    if (!current || entry.version > current.version) {
+      latest.set(entry.name, entry);
+    }
+  }
+
+  const handles: DataHandle[] = [];
+  for (const entry of latest.values()) {
+    const value = await readJson(
+      ctx.dataRepository,
+      ctx.modelType,
+      ctx.modelId,
+      entry,
+    );
+    if (value?.repo !== repo || value?.prNumber !== prNumber) continue;
+    if (typeof value.path !== "string" || currentPaths.has(value.path)) {
+      continue;
+    }
+    if (value.landedAt !== undefined) continue;
+
+    handles.push(
+      await ctx.writeResource(
+        "prFileSnapshot",
+        safeName("pr-file", [repo, prNumber, await sha1(value.path)]),
+        {
+          ...value,
+          landedAt: null,
+          syncedAt: nowIso(),
+        },
+      ),
+    );
+  }
+  return handles;
+}
 async function upsertCiStatusSnapshot(
   ctx: WriteContext,
   check: any,
@@ -965,14 +1018,15 @@ async function syncPrDetails(
     ),
   );
   if (opts.includeFiles) {
-    for (
-      const f of await ghPages<any>(
-        g,
-        `/repos/${g.owner}/${g.repo}/pulls/${n}/files`,
-        {},
-        undefined,
-      )
-    ) {
+    const files = await ghPages<any>(
+      g,
+      `/repos/${g.owner}/${g.repo}/pulls/${n}/files`,
+      {},
+      undefined,
+    );
+    const currentPaths = new Set<string>();
+    for (const f of files) {
+      if (typeof f.filename === "string") currentPaths.add(f.filename);
       handles.push(
         ...await upsertPrFileSnapshot(
           ctx,
@@ -982,6 +1036,11 @@ async function syncPrDetails(
           pr.merged_at,
           Boolean(opts.includePatchArtifacts),
         ),
+      );
+    }
+    if (pr.merged_at) {
+      handles.push(
+        ...await markMissingLandedPrFilesNotLanded(ctx, repo, n, currentPaths),
       );
     }
   }
