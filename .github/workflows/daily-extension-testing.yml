@@ -1,0 +1,37 @@
+name: Daily Extension Testing
+
+on:
+  schedule:
+    - cron: "13 13 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-extension-testing-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: ${{ matrix.extension }}
+    strategy:
+      fail-fast: false
+      matrix:
+        extension:
+          - arch-cloud-init
+          - capability-orchestrator
+          - cloud-init-nocloud
+          - github-project-activity
+          - libvirt-vm-pool
+          - openbao-configurator
+          - pi-session-telemetry
+          - qcow2-overlay-prep
+          - selfcert
+          - ssh-ca
+          - vaultwarden
+    uses: ./.github/workflows/extension-testing.yml
+    with:
+      extension: ${{ matrix.extension }}
+    secrets:
+      SWAMP_API_KEY: ${{ secrets.SWAMP_API_KEY }}
