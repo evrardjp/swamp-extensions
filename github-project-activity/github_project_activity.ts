@@ -139,6 +139,8 @@ const PrFileSnapshotSchema = z.object({
   blobUrl: z.string().optional(),
   rawUrl: z.string().optional(),
   patchArtifact: z.string().optional(),
+  merged: z.boolean().optional(),
+  prState: z.enum(["open", "closed"]).optional(),
   landedAt: NullableIsoDateTime,
   syncedAt: IsoDateTime,
 }).passthrough();
@@ -221,7 +223,6 @@ const RecordArtifactArgsSchema = z.object({
 const StateEnumSchema = z.enum(["open", "closed", "all"]);
 const StateArgSchema = StateEnumSchema.default("open");
 const PrDetailOptionsSchema = z.object({
-  includeFiles: z.boolean().default(true),
   includePatchArtifacts: z.boolean().default(false),
   includeReviews: z.boolean().default(true),
   includeReviewComments: z.boolean().default(true),
@@ -591,6 +592,8 @@ async function upsertPrFileSnapshot(
   repo: string,
   prNumber: number,
   landedAt: string | null | undefined,
+  merged: boolean,
+  prState: "open" | "closed",
   includePatch: boolean,
 ): Promise<DataHandle[]> {
   const handles: DataHandle[] = [];
@@ -629,6 +632,8 @@ async function upsertPrFileSnapshot(
         blobUrl: file.blob_url,
         rawUrl: file.raw_url,
         patchArtifact,
+        merged,
+        prState,
         landedAt,
         syncedAt: nowIso(),
       },
@@ -684,6 +689,8 @@ async function markMissingLandedPrFilesNotLanded(
         safeName("pr-file", [repo, prNumber, await sha1(value.path)]),
         {
           ...value,
+          merged: false,
+          prState: "closed",
           landedAt: null,
           syncedAt: nowIso(),
         },
@@ -891,7 +898,6 @@ async function syncPrDetails(
   ctx: WriteContext,
   prListItem: any,
   opts: {
-    includeFiles?: boolean;
     includePatchArtifacts?: boolean;
     includeReviews?: boolean;
     includeReviewComments?: boolean;
@@ -1020,32 +1026,34 @@ async function syncPrDetails(
       ),
     ),
   );
-  if (opts.includeFiles) {
-    const files = await ghPages<any>(
-      g,
-      `/repos/${g.owner}/${g.repo}/pulls/${n}/files`,
-      {},
-      undefined,
+  const files = await ghPages<any>(
+    g,
+    `/repos/${g.owner}/${g.repo}/pulls/${n}/files`,
+    {},
+    undefined,
+  );
+  const currentPaths = new Set<string>();
+  const prMerged = Boolean(pr.merged_at);
+  const prState = pr.state === "closed" ? "closed" : "open";
+  for (const f of files) {
+    if (typeof f.filename === "string") currentPaths.add(f.filename);
+    handles.push(
+      ...await upsertPrFileSnapshot(
+        ctx,
+        f,
+        repo,
+        n,
+        pr.merged_at ?? undefined,
+        prMerged,
+        prState,
+        Boolean(opts.includePatchArtifacts),
+      ),
     );
-    const currentPaths = new Set<string>();
-    for (const f of files) {
-      if (typeof f.filename === "string") currentPaths.add(f.filename);
-      handles.push(
-        ...await upsertPrFileSnapshot(
-          ctx,
-          f,
-          repo,
-          n,
-          pr.merged_at ?? (pr.closed_at ? null : undefined),
-          Boolean(opts.includePatchArtifacts),
-        ),
-      );
-    }
-    if (pr.merged_at) {
-      handles.push(
-        ...await markMissingLandedPrFilesNotLanded(ctx, repo, n, currentPaths),
-      );
-    }
+  }
+  if (pr.merged_at) {
+    handles.push(
+      ...await markMissingLandedPrFilesNotLanded(ctx, repo, n, currentPaths),
+    );
   }
   if (opts.includeReviewComments) {
     for (
@@ -1676,7 +1684,6 @@ export const model = {
           for (const pr of prs) {
             handles.push(
               ...await syncPrDetails(ctx, pr, {
-                includeFiles: true,
                 includeReviews: true,
                 includeReviewComments: true,
                 includeIssueComments: true,
@@ -1759,7 +1766,6 @@ export const model = {
         for (const pr of prs) {
           handles.push(
             ...await syncPrDetails(ctx, pr, {
-              includeFiles: true,
               includePatchArtifacts: false,
               includeReviews: true,
               includeReviewComments: true,

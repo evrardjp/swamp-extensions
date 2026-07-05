@@ -54,6 +54,8 @@ type PrFileSnapshot = {
   changes?: number;
   blobUrl?: string;
   rawUrl?: string;
+  merged?: boolean;
+  prState?: "open" | "closed";
   landedAt?: string | null;
   syncedAt: string;
 };
@@ -201,18 +203,13 @@ function hasLandedTouch(
   pr: PrSnapshot | undefined,
 ): boolean {
   if (hasRecordedLanding(touch)) return true;
-  if (touch.landedAt === null) return false;
-  return pr ? isLandedPr(pr) : true;
+  if (touch.merged === false || touch.landedAt === null) return false;
+  if (touch.merged === true) return isLandedPr(pr);
+  return false;
 }
 
-function touchTimestamp(
-  touch: PrFileSnapshot,
-  pr: PrSnapshot | undefined,
-): string | undefined {
+function touchTimestamp(touch: PrFileSnapshot): string | undefined {
   if (hasRecordedLanding(touch)) return touch.landedAt;
-  if (touch.landedAt === undefined && isLandedPr(pr)) {
-    return pr?.mergedAt ?? (pr?.merged ? pr.closedAt ?? undefined : undefined);
-  }
   return undefined;
 }
 
@@ -249,8 +246,7 @@ function buildRows(
     let lastTouchedAt: string | undefined;
     let lastTouch: PrFileSnapshot | undefined;
     for (const touch of touches) {
-      const pr = prByRepoAndNumber.get(prKey(touch.repo, touch.prNumber));
-      const touchAt = touchTimestamp(touch, pr);
+      const touchAt = touchTimestamp(touch);
       if (!lastTouchedAt || (touchAt && touchAt > lastTouchedAt)) {
         lastTouchedAt = touchAt;
         lastTouch = touch;
