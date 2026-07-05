@@ -139,6 +139,7 @@ const PrFileSnapshotSchema = z.object({
   blobUrl: z.string().optional(),
   rawUrl: z.string().optional(),
   patchArtifact: z.string().optional(),
+  landedAt: NullableIsoDateTime,
   syncedAt: IsoDateTime,
 }).passthrough();
 
@@ -589,6 +590,7 @@ async function upsertPrFileSnapshot(
   file: any,
   repo: string,
   prNumber: number,
+  landedAt: string | null | undefined,
   includePatch: boolean,
 ): Promise<DataHandle[]> {
   const handles: DataHandle[] = [];
@@ -627,6 +629,7 @@ async function upsertPrFileSnapshot(
         blobUrl: file.blob_url,
         rawUrl: file.raw_url,
         patchArtifact,
+        landedAt,
         syncedAt: nowIso(),
       },
     ),
@@ -976,6 +979,7 @@ async function syncPrDetails(
           f,
           repo,
           n,
+          pr.merged_at,
           Boolean(opts.includePatchArtifacts),
         ),
       );
@@ -1381,7 +1385,7 @@ async function clearStaleCandidates(
 /** GitHub maintainer activity database model for repository snapshots, PR dossiers, artifacts, and maintainer notes. */
 export const model = {
   type: "@evrardjp/github-project-activity",
-  version: "2026.07.03.4",
+  version: "2026.07.03.5",
   globalArguments: GlobalArgsSchema,
   reports: [
     "@evrardjp/github-project-briefing",
