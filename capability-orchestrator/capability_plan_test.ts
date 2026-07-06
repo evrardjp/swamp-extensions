@@ -75,6 +75,7 @@ Deno.test("plan materializes model method implementation templates", async () =>
   await model.methods.plan.execute({
     vms: [{
       name: "gitea",
+<<<<<<< Updated upstream
       hostname: "gitea.example.com",
       ipAddress: "192.0.2.12",
       sshUser: "admin",
@@ -94,6 +95,25 @@ Deno.test("plan materializes model method implementation templates", async () =>
           url: "https://@{vm.hostname}",
         },
         inputs: { timeout: 30 },
+=======
+      ipAddress: "192.0.2.12",
+      sshUser: "admin",
+      capabilities: ["ssh"],
+    }],
+    capabilities: [{
+      name: "ssh",
+      requires: [],
+      implementation: {
+        type: "model_method" as const,
+        modelType: "@keeb/ssh/host",
+        modelName: "lab-@{host}-ssh-capability",
+        methodName: "waitForConnection",
+        globalArgs: {
+          host: "@{vm.ipAddress}",
+          user: "@{vm.sshUser}",
+        },
+        inputs: { timeout: 360 },
+>>>>>>> Stashed changes
       },
     }],
   }, context as never);
@@ -103,6 +123,7 @@ Deno.test("plan materializes model method implementation templates", async () =>
   }>;
   assertEquals(waves[0].items[0].implementation, {
     type: "model_method",
+<<<<<<< Updated upstream
     modelType: "@example/package",
     modelName: "lab-gitea-base",
     methodName: "apply",
@@ -112,6 +133,13 @@ Deno.test("plan materializes model method implementation templates", async () =>
       url: "https://gitea.example.com",
     },
     inputs: { timeout: 30 },
+=======
+    modelType: "@keeb/ssh/host",
+    modelName: "lab-gitea-ssh-capability",
+    methodName: "waitForConnection",
+    globalArgs: { host: "192.0.2.12", user: "admin" },
+    inputs: { timeout: 360 },
+>>>>>>> Stashed changes
   });
 });
 
