@@ -156,7 +156,14 @@ Deno.test("generate — uses runtime vaultService.put when no test hook is provi
   const { context, getWrittenResources } = createModelTestContext({
     globalArgs: defaultGlobalArgs(),
   });
-  (context as any).vaultService = { put: makeVaultPut(vaultCalls) };
+  const vaultService = {
+    put(vault: string, key: string, value: string): Promise<void> {
+      assertEquals(this, vaultService);
+      vaultCalls.push({ vault, key, value });
+      return Promise.resolve();
+    },
+  };
+  (context as any).vaultService = vaultService;
 
   await model.methods.generate.execute({}, context as any);
 

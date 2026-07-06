@@ -16,13 +16,16 @@ async function putSecret(
   runtimePut?: VaultPut,
   vaultService?: RuntimeVaultService,
 ): Promise<void> {
-  const put = runtimePut ?? vaultService?.put;
-  if (!put) {
+  if (runtimePut) {
+    await runtimePut(vaultName, key, value);
+    return;
+  }
+  if (!vaultService?.put) {
     throw new Error(
       "This Swamp runtime does not expose context.vaultService.put; cannot store certificate material safely",
     );
   }
-  await put(vaultName, key, value);
+  await vaultService.put(vaultName, key, value);
 }
 
 async function deleteSecret(
@@ -31,13 +34,16 @@ async function deleteSecret(
   runtimeDelete?: VaultDelete,
   vaultService?: RuntimeVaultService,
 ): Promise<void> {
-  const deleteFn = runtimeDelete ?? vaultService?.delete;
-  if (!deleteFn) {
+  if (runtimeDelete) {
+    await runtimeDelete(vaultName, key);
+    return;
+  }
+  if (!vaultService?.delete) {
     throw new Error(
       "This Swamp runtime does not expose context.vaultService.delete; cannot clean up certificate material safely",
     );
   }
-  await deleteFn(vaultName, key);
+  await vaultService.delete(vaultName, key);
 }
 
 // ─── ASN.1 / DER helpers ──────────────────────────────────────────────────────
