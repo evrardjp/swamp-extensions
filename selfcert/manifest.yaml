@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@evrardjp/selfcert"
-version: "2026.07.03.1"
+version: "2026.07.06.1"
 description: >-
   Self-signed TLS certificate generator for Swamp: creates RSA-4096 certs
   locally using node:crypto and stores cert + key in a swamp vault.

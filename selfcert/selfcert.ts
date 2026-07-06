@@ -2,6 +2,44 @@ import { createSign, generateKeyPairSync, randomBytes } from "node:crypto";
 import { z } from "npm:zod@4";
 import type { ModelDefinition } from "jsr:@systeminit/swamp-testing@0.20260518.13";
 
+type VaultPut = (v: string, k: string, val: string) => Promise<void>;
+type VaultDelete = (v: string, k: string) => Promise<void>;
+type RuntimeVaultService = {
+  put?: VaultPut;
+  delete?: VaultDelete;
+};
+
+async function putSecret(
+  vaultName: string,
+  key: string,
+  value: string,
+  runtimePut?: VaultPut,
+  vaultService?: RuntimeVaultService,
+): Promise<void> {
+  const put = runtimePut ?? vaultService?.put;
+  if (!put) {
+    throw new Error(
+      "This Swamp runtime does not expose context.vaultService.put; cannot store certificate material safely",
+    );
+  }
+  await put(vaultName, key, value);
+}
+
+async function deleteSecret(
+  vaultName: string,
+  key: string,
+  runtimeDelete?: VaultDelete,
+  vaultService?: RuntimeVaultService,
+): Promise<void> {
+  const deleteFn = runtimeDelete ?? vaultService?.delete;
+  if (!deleteFn) {
+    throw new Error(
+      "This Swamp runtime does not expose context.vaultService.delete; cannot clean up certificate material safely",
+    );
+  }
+  await deleteFn(vaultName, key);
+}
+
 // ─── ASN.1 / DER helpers ──────────────────────────────────────────────────────
 
 function derLen(len: number): Uint8Array {
@@ -204,13 +242,19 @@ const CertResourceSchema = z.object({
 /** Self-signed TLS certificate generator: creates an RSA-4096 cert + key locally using node:crypto and stores both in a swamp vault. */
 export const model = {
   type: "@evrardjp/selfcert",
-  version: "2026.07.03.1",
+  version: "2026.07.06.1",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
       toVersion: "2026.07.03.1",
       description:
         "Move extension source to swamp-extensions with no argument or resource schema changes",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.07.06.1",
+      description:
+        "Use the runtime vaultService API for storing generated certificate material with no argument or resource schema changes",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -270,20 +314,15 @@ export const model = {
         };
 
         const typedArgs = args as {
-          _vaultPut?: (v: string, k: string, val: string) => Promise<void>;
-          _vaultDelete?: (v: string, k: string) => Promise<void>;
+          _vaultPut?: VaultPut;
+          _vaultDelete?: VaultDelete;
         };
         const runtime = context as typeof context & {
-          putSecret?: (v: string, k: string, val: string) => Promise<void>;
-          deleteSecret?: (v: string, k: string) => Promise<void>;
+          vaultService?: RuntimeVaultService;
         };
-        const putSecret = typedArgs._vaultPut ?? runtime.putSecret;
-        if (!putSecret) {
-          throw new Error(
-            "This Swamp runtime does not expose context.putSecret; cannot store certificate material safely",
-          );
-        }
-        const deleteSecret = typedArgs._vaultDelete ?? runtime.deleteSecret;
+        const runtimePutSecret = typedArgs._vaultPut;
+        const runtimeDeleteSecret = typedArgs._vaultDelete;
+        const vaultService = runtime.vaultService;
         const storedKeys: string[] = [];
 
         try {
@@ -337,14 +376,26 @@ export const model = {
             vaultName,
             key: certVaultKey,
           });
-          await putSecret(vaultName, certVaultKey, certPem);
+          await putSecret(
+            vaultName,
+            certVaultKey,
+            certPem,
+            runtimePutSecret,
+            vaultService,
+          );
           storedKeys.push(certVaultKey);
 
           await log("Storing private key in vault", {
             vaultName,
             key: keyVaultKey,
           });
-          await putSecret(vaultName, keyVaultKey, pkeyPem);
+          await putSecret(
+            vaultName,
+            keyVaultKey,
+            pkeyPem,
+            runtimePutSecret,
+            vaultService,
+          );
           storedKeys.push(keyVaultKey);
 
           const certHandle = await context.writeResource("cert", "current", {
@@ -368,14 +419,12 @@ export const model = {
           });
           for (const key of storedKeys.reverse()) {
             try {
-              if (!deleteSecret) {
-                await log("No vault delete hook available for cleanup", {
-                  vaultName,
-                  key,
-                });
-                continue;
-              }
-              await deleteSecret(vaultName, key);
+              await deleteSecret(
+                vaultName,
+                key,
+                runtimeDeleteSecret,
+                vaultService,
+              );
               await log("Cleaned up vault key after failure", {
                 vaultName,
                 key,
