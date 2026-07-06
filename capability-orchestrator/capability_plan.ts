@@ -6,7 +6,7 @@ const WorkflowImplementationSchema = z.object({
   inputs: z.record(z.string(), z.unknown()).default({}),
 });
 
-const ModelMethodImplementationSchema = z.object({
+const ModelMethodCapabilityImplementationSchema = z.object({
   type: z.literal("model_method"),
   modelType: z.string(),
   modelName: z.string(),
@@ -15,15 +15,28 @@ const ModelMethodImplementationSchema = z.object({
   inputs: z.record(z.string(), z.unknown()).default({}),
 });
 
-const ImplementationSchema = z.discriminatedUnion("type", [
+const CapabilityImplementationSchema = z.discriminatedUnion("type", [
   WorkflowImplementationSchema,
-  ModelMethodImplementationSchema,
+  ModelMethodCapabilityImplementationSchema,
+]);
+
+const ModelMethodTaskImplementationSchema = z.object({
+  type: z.literal("model_method"),
+  modelType: z.string(),
+  modelName: z.string(),
+  methodName: z.string(),
+  inputs: z.record(z.string(), z.unknown()).default({}),
+});
+
+const TaskImplementationSchema = z.discriminatedUnion("type", [
+  WorkflowImplementationSchema,
+  ModelMethodTaskImplementationSchema,
 ]);
 
 const CapabilitySchema = z.object({
   name: z.string(),
   requires: z.array(z.string()).default([]),
-  implementation: ImplementationSchema,
+  implementation: CapabilityImplementationSchema,
 }).passthrough();
 
 const VmSchema = z.object({
@@ -44,7 +57,7 @@ const PlanItemSchema = z.object({
   host: z.string(),
   vm: VmSchema,
   capability: z.string(),
-  implementation: ImplementationSchema,
+  implementation: TaskImplementationSchema,
 });
 
 const WaveSchema = z.object({
@@ -63,9 +76,9 @@ const PlanSchema = z.object({
 type Capability = z.infer<typeof CapabilitySchema>;
 type Vm = z.infer<typeof VmSchema>;
 type PlanItem = z.infer<typeof PlanItemSchema>;
-type Implementation = z.infer<typeof ImplementationSchema>;
+type CapabilityImplementation = z.infer<typeof CapabilityImplementationSchema>;
+type TaskImplementation = z.infer<typeof TaskImplementationSchema>;
 
-<<<<<<< Updated upstream
 type TemplateContext = {
   host: string;
   capability: string;
@@ -84,20 +97,10 @@ function lookupTemplateValue(path: string, context: TemplateContext): unknown {
     } else {
       throw new Error(`Unknown capability template path ${path}`);
     }
-=======
-function lookupPath(value: unknown, path: string[]): unknown {
-  let current = value;
-  for (const part of path) {
-    if (current === null || typeof current !== "object" || !(part in current)) {
-      return undefined;
-    }
-    current = (current as Record<string, unknown>)[part];
->>>>>>> Stashed changes
   }
   return current;
 }
 
-<<<<<<< Updated upstream
 function renderTemplateValue(
   value: unknown,
   context: TemplateContext,
@@ -119,56 +122,23 @@ function renderTemplateValue(
       Object.entries(value).map(([key, inner]) => [
         key,
         renderTemplateValue(inner, context),
-=======
-function stringifyTemplateValue(value: unknown): string {
-  if (value === undefined || value === null) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  return JSON.stringify(value);
-}
-
-function renderTemplate(input: string, vm: Vm, capability: string): string {
-  return input.replaceAll(/@\{([^}]+)\}/g, (_match, expression: string) => {
-    const trimmed = expression.trim();
-    if (trimmed === "host") return vm.name;
-    if (trimmed === "capability") return capability;
-    if (trimmed.startsWith("vm.")) {
-      return stringifyTemplateValue(
-        lookupPath(vm, trimmed.slice(3).split(".")),
-      );
-    }
-    throw new Error(`Unknown capability template placeholder @{${trimmed}}`);
-  });
-}
-
-function materializeTemplates(
-  value: unknown,
-  vm: Vm,
-  capability: string,
-): unknown {
-  if (typeof value === "string") return renderTemplate(value, vm, capability);
-  if (Array.isArray(value)) {
-    return value.map((item) => materializeTemplates(item, vm, capability));
-  }
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [
-        key,
-        materializeTemplates(entry, vm, capability),
->>>>>>> Stashed changes
       ]),
     );
   }
   return value;
 }
 
-function materializeImplementation(
-  implementation: Implementation,
-<<<<<<< Updated upstream
+function renderTemplateRecord(
+  value: Record<string, unknown>,
   context: TemplateContext,
-): Implementation {
+): Record<string, unknown> {
+  return renderTemplateValue(value, context) as Record<string, unknown>;
+}
+
+function materializeImplementation(
+  implementation: CapabilityImplementation,
+  context: TemplateContext,
+): TaskImplementation {
   if (implementation.type === "workflow") {
     return {
       ...implementation,
@@ -176,38 +146,23 @@ function materializeImplementation(
         implementation.workflowIdOrName,
         context,
       ) as string,
-      inputs: renderTemplateValue(implementation.inputs, context) as Record<
-        string,
-        unknown
-      >,
+      inputs: renderTemplateRecord(implementation.inputs, context),
     };
   }
+
   return {
-    ...implementation,
+    type: "model_method",
     modelType: renderTemplateValue(implementation.modelType, context) as string,
     modelName: renderTemplateValue(implementation.modelName, context) as string,
     methodName: renderTemplateValue(
       implementation.methodName,
       context,
     ) as string,
-    globalArgs: renderTemplateValue(
-      implementation.globalArgs,
-      context,
-    ) as Record<
-      string,
-      unknown
-    >,
-    inputs: renderTemplateValue(implementation.inputs, context) as Record<
-      string,
-      unknown
-    >,
+    inputs: {
+      ...renderTemplateRecord(implementation.globalArgs, context),
+      ...renderTemplateRecord(implementation.inputs, context),
+    },
   };
-=======
-  vm: Vm,
-  capability: string,
-): Implementation {
-  return materializeTemplates(implementation, vm, capability) as Implementation;
->>>>>>> Stashed changes
 }
 
 function resolveForVm(vm: Vm, catalog: Map<string, Capability>): string[] {
@@ -246,15 +201,11 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
         host: vm.name,
         vm,
         capability: cap,
-<<<<<<< Updated upstream
         implementation: materializeImplementation(spec.implementation, {
           host: vm.name,
           vm,
           capability: cap,
         }),
-=======
-        implementation: materializeImplementation(spec.implementation, vm, cap),
->>>>>>> Stashed changes
       });
     }
   }

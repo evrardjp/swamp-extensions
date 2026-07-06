@@ -69,13 +69,12 @@ Deno.test("plan resolves dependencies into ordered waves", async () => {
   assertEquals(writes[0].data.resolved, { gitea: ["base", "app"] });
 });
 
-Deno.test("plan materializes model method implementation templates", async () => {
+Deno.test("plan renders model method global arguments into task inputs", async () => {
   const { writes, context } = recordingContext();
 
   await model.methods.plan.execute({
     vms: [{
       name: "gitea",
-<<<<<<< Updated upstream
       hostname: "gitea.example.com",
       ipAddress: "192.0.2.12",
       sshUser: "admin",
@@ -90,30 +89,13 @@ Deno.test("plan materializes model method implementation templates", async () =>
         modelName: "lab-@{host}-base",
         methodName: "apply",
         globalArgs: {
+          packages: ["gitea"],
+          ensure: "present",
           nodeHost: "@{vm.ipAddress}",
           nodeUser: "@{vm.sshUser}",
           url: "https://@{vm.hostname}",
         },
         inputs: { timeout: 30 },
-=======
-      ipAddress: "192.0.2.12",
-      sshUser: "admin",
-      capabilities: ["ssh"],
-    }],
-    capabilities: [{
-      name: "ssh",
-      requires: [],
-      implementation: {
-        type: "model_method" as const,
-        modelType: "@keeb/ssh/host",
-        modelName: "lab-@{host}-ssh-capability",
-        methodName: "waitForConnection",
-        globalArgs: {
-          host: "@{vm.ipAddress}",
-          user: "@{vm.sshUser}",
-        },
-        inputs: { timeout: 360 },
->>>>>>> Stashed changes
       },
     }],
   }, context as never);
@@ -123,23 +105,17 @@ Deno.test("plan materializes model method implementation templates", async () =>
   }>;
   assertEquals(waves[0].items[0].implementation, {
     type: "model_method",
-<<<<<<< Updated upstream
     modelType: "@example/package",
     modelName: "lab-gitea-base",
     methodName: "apply",
-    globalArgs: {
+    inputs: {
+      packages: ["gitea"],
+      ensure: "present",
       nodeHost: "192.0.2.12",
       nodeUser: "admin",
       url: "https://gitea.example.com",
+      timeout: 30,
     },
-    inputs: { timeout: 30 },
-=======
-    modelType: "@keeb/ssh/host",
-    modelName: "lab-gitea-ssh-capability",
-    methodName: "waitForConnection",
-    globalArgs: { host: "192.0.2.12", user: "admin" },
-    inputs: { timeout: 360 },
->>>>>>> Stashed changes
   });
 });
 
