@@ -1,0 +1,60 @@
+name: Release Notes Required
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+    paths:
+      - "*/manifest.yaml"
+      - "*/RELEASE_NOTES.md"
+
+permissions:
+  contents: read
+
+jobs:
+  release-notes-required:
+    name: Require release notes for manifest changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check release notes changed with manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          base_sha="${{ github.event.pull_request.base.sha }}"
+          head_sha="${{ github.event.pull_request.head.sha }}"
+
+          mapfile -t changed_files < <(git diff --name-only --diff-filter=ACMR "$base_sha" "$head_sha")
+
+          declare -A changed=()
+          for file in "${changed_files[@]}"; do
+            changed["$file"]=1
+          done
+
+          missing=()
+          for file in "${changed_files[@]}"; do
+            if [[ "$file" =~ ^([^/]+)/manifest\.yaml$ ]]; then
+              extension="${BASH_REMATCH[1]}"
+              release_notes="$extension/RELEASE_NOTES.md"
+              if [[ -z "${changed[$release_notes]+x}" ]]; then
+                missing+=("$release_notes")
+              fi
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            echo "Every extension manifest change must include an update to the matching RELEASE_NOTES.md." >&2
+            echo "Missing release notes changes:" >&2
+            printf '  - %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+
+          echo "Release notes were updated for all changed manifests."
