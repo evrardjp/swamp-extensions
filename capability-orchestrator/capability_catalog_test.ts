@@ -48,7 +48,6 @@ Deno.test("publish writes capability resources and a sorted summary", async () =
   assertEquals(writes.at(-1)?.data.capabilityCount, 2);
 });
 
-<<<<<<< Updated upstream
 Deno.test("publish accepts model method implementations", async () => {
   const { writes, context } = recordingContext({
     base: {
@@ -59,20 +58,7 @@ Deno.test("publish accepts model method implementations", async () => {
         modelName: "lab-@{host}-base",
         methodName: "apply",
         globalArgs: { nodeHost: "@{vm.ipAddress}" },
-        inputs: {},
-=======
-Deno.test("publish accepts direct model method implementations", async () => {
-  const { writes, context } = recordingContext({
-    ssh: {
-      requires: [],
-      implementation: {
-        type: "model_method",
-        modelType: "@keeb/ssh/host",
-        modelName: "lab-@{host}-ssh-capability",
-        methodName: "waitForConnection",
-        globalArgs: { host: "@{vm.ipAddress}" },
-        inputs: { timeout: 360 },
->>>>>>> Stashed changes
+        inputs: { timeout: 30 },
       },
     },
   });
@@ -81,19 +67,11 @@ Deno.test("publish accepts direct model method implementations", async () => {
 
   assertEquals(writes[0].data.implementation, {
     type: "model_method",
-<<<<<<< Updated upstream
     modelType: "@example/package",
     modelName: "lab-@{host}-base",
     methodName: "apply",
     globalArgs: { nodeHost: "@{vm.ipAddress}" },
-    inputs: {},
-=======
-    modelType: "@keeb/ssh/host",
-    modelName: "lab-@{host}-ssh-capability",
-    methodName: "waitForConnection",
-    globalArgs: { host: "@{vm.ipAddress}" },
-    inputs: { timeout: 360 },
->>>>>>> Stashed changes
+    inputs: { timeout: 30 },
   });
 });
 

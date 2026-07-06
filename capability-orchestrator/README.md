@@ -37,14 +37,14 @@ globalArguments:
       requires: [base-arch]
       implementation:
         type: model_method
-        modelType: '@adam/cfgmgmt/pacman'
+        modelType: "@adam/cfgmgmt/pacman"
         modelName: lab-@{host}-gitea-package
         methodName: apply
         globalArgs:
           packages: [gitea]
           ensure: present
-          nodeHost: '@{vm.ipAddress}'
-          nodeUser: '@{vm.sshUser}'
+          nodeHost: "@{vm.ipAddress}"
+          nodeUser: "@{vm.sshUser}"
           nodePort: 22
         inputs: {}
 ```
@@ -76,8 +76,7 @@ globalArguments:
             "modelType": "@keeb/ssh/host",
             "modelName": "lab-gitea-ssh-capability",
             "methodName": "waitForConnection",
-            "globalArgs": { "host": "192.0.2.12", "user": "admin" },
-            "inputs": { "timeout": 360 }
+            "inputs": { "host": "192.0.2.12", "user": "admin", "timeout": 360 }
           }
         }
       ]
