@@ -151,12 +151,12 @@ Deno.test("generate — throws when vault put for key fails, no resource written
   );
 });
 
-Deno.test("generate — uses runtime putSecret when no test hook is provided", async () => {
+Deno.test("generate — uses runtime vaultService.put when no test hook is provided", async () => {
   const vaultCalls: Array<{ vault: string; key: string; value: string }> = [];
   const { context, getWrittenResources } = createModelTestContext({
     globalArgs: defaultGlobalArgs(),
   });
-  (context as any).putSecret = makeVaultPut(vaultCalls);
+  (context as any).vaultService = { put: makeVaultPut(vaultCalls) };
 
   await model.methods.generate.execute({}, context as any);
 
@@ -164,6 +164,18 @@ Deno.test("generate — uses runtime putSecret when no test hook is provided", a
   assertEquals(
     getWrittenResources().filter((r) => r.specName === "cert").length,
     1,
+  );
+});
+
+Deno.test("generate — rejects when runtime vaultService.put is unavailable", async () => {
+  const { context } = createModelTestContext({
+    globalArgs: defaultGlobalArgs(),
+  });
+
+  await assertRejects(
+    () => model.methods.generate.execute({}, context as any),
+    Error,
+    "context.vaultService.put",
   );
 });
 
