@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Run an adversarial code review locally against the current branch diff vs main.
-# Works with both `claude` (Claude Code CLI) and `kiro-cli`.
+# Works with `opencode`, `claude` (Claude Code CLI), and `kiro-cli`.
 #
 # Usage:
 #   ./scripts/local-adversarial-review.sh           # auto-detect tool
+#   ./scripts/local-adversarial-review.sh --opencode # force opencode
 #   ./scripts/local-adversarial-review.sh --claude  # force claude
 #   ./scripts/local-adversarial-review.sh --kiro    # force kiro-cli
-#   REVIEW_TOOL=claude ./scripts/local-adversarial-review.sh
+#   REVIEW_TOOL=opencode ./scripts/local-adversarial-review.sh
 #
 # Exit codes:
 #   0 - review passed or no diff
@@ -20,10 +21,11 @@ set -euo pipefail
 TOOL="${REVIEW_TOOL:-auto}"
 for arg in "$@"; do
   case "$arg" in
+    --opencode) TOOL="opencode" ;;
     --claude) TOOL="claude" ;;
     --kiro)   TOOL="kiro" ;;
     --help|-h)
-      echo "Usage: $0 [--claude|--kiro]"
+      echo "Usage: $0 [--opencode|--claude|--kiro]"
       echo "  Auto-detects available tool, or set REVIEW_TOOL env var."
       exit 0
       ;;
@@ -31,12 +33,14 @@ for arg in "$@"; do
 done
 
 if [ "$TOOL" = "auto" ]; then
-  if command -v claude &>/dev/null; then
+  if command -v opencode &>/dev/null; then
+    TOOL="opencode"
+  elif command -v claude &>/dev/null; then
     TOOL="claude"
   elif command -v kiro-cli &>/dev/null; then
     TOOL="kiro"
   else
-    echo "ERROR: Neither 'claude' nor 'kiro-cli' found in PATH." >&2
+    echo "ERROR: None of 'opencode', 'claude', or 'kiro-cli' found in PATH." >&2
     exit 1
   fi
 fi
@@ -182,7 +186,7 @@ attempting the approval. Otherwise a retry creates duplicates. This is HIGH.
 ## CRITICAL RULE: ADVERTISED USE CASES MUST WORK
 For every feature described in the README, description, or code comments, verify the
 code actually supports that use case end-to-end. Specifically:
-- If the README says "optional API key for private forums", trace the auth code path
+- If the README says \"optional API key for private forums\", trace the auth code path
   with a user-level key. Does it work, or does a hardcoded value break it?
 - If global args have defaults, are those defaults correct for ALL valid configurations?
 - Hardcoded values that assume a specific auth level (admin, system) when the docs
@@ -190,9 +194,9 @@ code actually supports that use case end-to-end. Specifically:
 
 ## CRITICAL RULE: FIELD NAMES MUST BE HONEST
 Resource field names must accurately describe what they contain. A field named
-`totalCount` that stores a page-sized number (not the actual total) misleads every
-downstream consumer. If the API doesn't provide totals, name it `pageCount` or
-`resultCount`. Dishonest field names are MEDIUM.
+\`totalCount\` that stores a page-sized number (not the actual total) misleads every
+downstream consumer. If the API doesn't provide totals, name it \`pageCount\` or
+\`resultCount\`. Dishonest field names are MEDIUM.
 
 ## CRITICAL RULE: EVERY METHOD EXECUTE PATH MUST BE TESTED
 Every method in the model must have at least one execute-path test that exercises its
@@ -239,6 +243,9 @@ echo ""
 
 run_review() {
   case "$TOOL" in
+    opencode)
+      opencode run "$PROMPT" | tee "$REVIEW_OUTPUT_FILE"
+      ;;
     claude)
       echo "$PROMPT" | claude -p --model sonnet --allowedTools Read,Glob,Grep - | tee "$REVIEW_OUTPUT_FILE"
       ;;
@@ -273,4 +280,3 @@ else
   echo "Review produced no PASS/FAIL verdict — treating as failure." >&2
   exit 1
 fi
-
