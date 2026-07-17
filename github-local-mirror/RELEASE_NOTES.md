@@ -1,4 +1,4 @@
-## 2026.07.16.1
+## 2026.07.17.1
 
 **Added:** Initial `@evrardjp/github-local-mirror` extension with a repo mirror model, full-fidelity `sync`, `prepare_worktree`, `analyze_worktrees`, and `status` methods.
 

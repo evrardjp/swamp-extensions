@@ -1258,7 +1258,7 @@ async function status(_args: Record<string, never>, ctx: Context) {
 /** Swamp-backed local GitHub mirror model. */
 export const model = {
   type: "@evrardjp/github-local-mirror",
-  version: "2026.07.16.1",
+  version: "2026.07.17.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     mirrorState: {

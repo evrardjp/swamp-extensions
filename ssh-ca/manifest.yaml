@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@evrardjp/ssh-ca"
-version: "2026.07.03.2"
+version: "2026.07.17.1"
 description: >-
   Swamp-native OpenSSH CA lifecycle management for every environment: one
   OpenSSH CA keypair per model, host/user certificate issuance,

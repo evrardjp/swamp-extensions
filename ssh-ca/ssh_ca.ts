@@ -646,7 +646,7 @@ async function issueCertificate(args: {
 /** OpenSSH CA lifecycle model for CA keys, host/user certificates, trust snippets, KRLs, and inventory data. */
 export const model = {
   type: "@evrardjp/ssh-ca",
-  version: "2026.07.03.1",
+  version: "2026.07.17.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     ca: {
