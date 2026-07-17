@@ -119,6 +119,118 @@ Deno.test("plan renders model method global arguments separately from method inp
   });
 });
 
+Deno.test("plan aggregates pacman requirements and preserves non-package capability edges", async () => {
+  const { writes, context } = recordingContext();
+
+  await model.methods.plan.execute({
+    vms: [{
+      name: "node1",
+      ipAddress: "192.0.2.42",
+      sshUser: "admin",
+      capabilities: ["app"],
+    }],
+    capabilities: [
+      {
+        name: "ssh",
+        requires: [],
+        implementation: {
+          type: "model_method" as const,
+          modelType: "@example/ssh",
+          modelName: "ssh",
+          methodName: "wait",
+          globalArgs: {},
+          inputs: {},
+        },
+      },
+      {
+        name: "packages-installation",
+        requires: ["ssh"],
+        implementation: {
+          type: "model_method" as const,
+          modelType: "@adam/cfgmgmt/pacman",
+          modelName: "lab-@{host}-packages",
+          methodName: "apply",
+          globalArgs: {
+            packages: [],
+            ensure: "present",
+            nodeHost: "@{vm.ipAddress}",
+            nodeUser: "@{vm.sshUser}",
+            nodePort: 22,
+            nodeIdentityFile: "~/.ssh/id_ed25519",
+            become: true,
+            becomeUser: "root",
+          },
+          inputs: {},
+        },
+      },
+      {
+        name: "base",
+        requires: ["packages-installation"],
+        implementation: {
+          type: "model_method" as const,
+          modelType: "@adam/cfgmgmt/pacman",
+          modelName: "base-package-wrapper",
+          methodName: "apply",
+          globalArgs: { packages: ["sudo"], ensure: "present" },
+          inputs: {},
+        },
+      },
+      {
+        name: "docker-packages",
+        requires: ["packages-installation"],
+        implementation: {
+          type: "model_method" as const,
+          modelType: "@adam/cfgmgmt/pacman",
+          modelName: "docker-package-wrapper",
+          methodName: "apply",
+          globalArgs: { packages: ["docker"], ensure: "present" },
+          inputs: {},
+        },
+      },
+      {
+        name: "docker",
+        requires: ["base", "docker-packages"],
+        implementation: {
+          type: "workflow" as const,
+          workflowIdOrName: "docker",
+          inputs: {},
+        },
+      },
+      {
+        name: "app",
+        requires: ["docker"],
+        implementation: {
+          type: "workflow" as const,
+          workflowIdOrName: "app",
+          inputs: {},
+        },
+      },
+    ],
+  }, context as never);
+
+  const waves = writes[0].data.waves as Array<{
+    items: Array<
+      { capability: string; implementation: Record<string, unknown> }
+    >;
+  }>;
+  assertEquals(waves.map((wave) => wave.items.map((item) => item.capability)), [
+    ["ssh"],
+    ["packages-installation"],
+    ["docker"],
+    ["app"],
+  ]);
+  assertEquals(waves[1].items[0].implementation.globalArgs, {
+    packages: ["docker", "sudo"],
+    ensure: "present",
+    nodeHost: "192.0.2.42",
+    nodeUser: "admin",
+    nodePort: 22,
+    nodeIdentityFile: "~/.ssh/id_ed25519",
+    become: true,
+    becomeUser: "root",
+  });
+});
+
 Deno.test("plan rejects unknown requested capabilities", async () => {
   const { context } = recordingContext();
 

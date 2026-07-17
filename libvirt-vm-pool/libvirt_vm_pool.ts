@@ -130,10 +130,28 @@ function makeCloudInitIso(files: Array<[string, string]>): Uint8Array {
 }
 
 const DesiredStateSchema = z.enum([
+  "deleted",
+  "poweredOff",
+  "poweredOn",
+]);
+const LegacyDesiredStateSchema = z.enum([
   "absent",
   "defined",
   "running",
   "reachable",
+]);
+const DesiredStateInputSchema = z.union([
+  DesiredStateSchema,
+  LegacyDesiredStateSchema,
+]).transform((state) => {
+  if (state === "absent") return "deleted" as const;
+  if (state === "defined") return "poweredOff" as const;
+  if (state === "running" || state === "reachable") return "poweredOn" as const;
+  return state;
+});
+const StoredDesiredStateSchema = z.union([
+  DesiredStateSchema,
+  LegacyDesiredStateSchema,
 ]);
 const BootstrapSSHUserSchema = z.object({
   username: z.string().default("admin"),
@@ -171,9 +189,28 @@ const SshCertificateAuthoritiesSchema = z.object({
   })).default([]),
 }).default({ host: [], user: [] });
 
+const DefaultPacmanMirrors = [
+  "https://archlinux.cu.be/$repo/os/$arch",
+  "https://mirror.netcologne.de/archlinux/$repo/os/$arch",
+  "https://ftp.halifax.rwth-aachen.de/archlinux/$repo/os/$arch",
+];
+const PacmanMirrorsSchema = z.array(z.string().url().regex(/^\S+$/)).min(1)
+  .default(
+    DefaultPacmanMirrors,
+  );
+
+function pacmanMirrorlist(mirrors: string[]): string {
+  return [
+    "## Managed by Swamp libvirt-vm-pool cloud-init.",
+    "## Prefer Belgian and German Arch Linux mirrors for local lab VMs.",
+    ...mirrors.map((mirror) => `Server = ${mirror}`),
+    "",
+  ].join("\n");
+}
+
 const VmSpecSchema = z.object({
   name: z.string(),
-  desiredState: DesiredStateSchema.default("reachable"),
+  desiredState: DesiredStateInputSchema.default("poweredOn"),
   hostname: z.string().optional(),
   fqdn: z.string().optional(),
   serviceFqdn: z.string().optional(),
@@ -200,6 +237,9 @@ const VmSpecSchema = z.object({
   baseImageUrl: z.string().default(
     "https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2",
   ),
+  pacmanMirrors: PacmanMirrorsSchema.describe(
+    "Ordered Arch Linux pacman mirrors written to /etc/pacman.d/mirrorlist during cloud-init",
+  ),
   capabilities: z.array(z.string()).default([]),
 });
 type VmSpec = z.infer<typeof VmSpecSchema>;
@@ -213,7 +253,7 @@ const VmResultSchema = z.object({
   hostname: z.string(),
   fqdn: z.string().optional(),
   serviceFqdn: z.string().optional(),
-  desiredState: DesiredStateSchema,
+  desiredState: StoredDesiredStateSchema,
   previousState: z.string(),
   currentState: z.string(),
   ipAddress: z.string(),
@@ -233,7 +273,7 @@ const SummarySchema = z.object({
   total: z.number().int(),
   changed: z.number().int(),
   failed: z.number().int(),
-  desired: z.record(z.string(), DesiredStateSchema),
+  desired: z.record(z.string(), StoredDesiredStateSchema),
   actions: z.array(z.string()),
   syncedAt: z.string(),
 });
@@ -342,10 +382,9 @@ async function ensureImage(vm: VmSpec, actions: string[]): Promise<void> {
       username: vm.sshUser,
       publicKeyPath: vm.sshPubKeyPath,
     };
-    const keyPath = bootstrap.publicKeyPath.replace(
-      /^~/,
-      DenoFs.env.get("HOME") ?? "",
-    );
+    const keyPath = bootstrap.publicKeyPath.startsWith("~")
+      ? bootstrap.publicKeyPath.replace(/^~/, DenoFs.env.get("HOME") ?? "")
+      : bootstrap.publicKeyPath;
     const sshPubKey = (await DenoFs.readTextFile(keyPath)).trim();
     const hostname = vm.hostname ?? vm.name;
     const metaData = [
@@ -372,11 +411,21 @@ async function ensureImage(vm: VmSpec, actions: string[]): Promise<void> {
       "    shell: /bin/bash",
       "    ssh_authorized_keys:",
       `      - ${sshPubKey}`,
+      "write_files:",
+      "  - path: /etc/pacman.d/mirrorlist",
+      "    owner: root:root",
+      "    permissions: '0644'",
+      "    content: |",
+      ...pacmanMirrorlist(vm.pacmanMirrors).split("\n").map((line) =>
+        `      ${line}`
+      ),
       "bootcmd:",
       "  - systemctl disable --now systemd-time-wait-sync.service || true",
       "  - systemctl mask systemd-time-wait-sync.service || true",
       "packages:",
       "  - openssh",
+      "  - ca-certificates",
+      "  - sudo",
       "runcmd:",
       "  - systemctl enable --now sshd",
       "",
@@ -403,7 +452,7 @@ async function reconcile(
   const isoPath = `${vm.imagesDir}/${vm.name}-cloud-init.iso`;
   const previousState = await domainState(uri, vm.name);
   try {
-    if (vm.desiredState === "absent") {
+    if (vm.desiredState === "deleted") {
       if (previousState !== "absent") {
         actions.push(
           previousState === "running" ? "destroy" : "skipDestroyAlreadyStopped",
@@ -450,7 +499,7 @@ async function reconcile(
       } else {
         actions.push("skipDefineAlreadyExists");
       }
-      if (["running", "reachable"].includes(vm.desiredState)) {
+      if (vm.desiredState === "poweredOn") {
         actions.push("start");
         if (apply && (await domainState(uri, vm.name)) !== "running") {
           const r = await run("virsh", ["-c", uri, "start", vm.name]);
@@ -461,8 +510,16 @@ async function reconcile(
           }
         }
       }
-      if (vm.desiredState === "reachable") {
-        actions.push("publishReachabilityIntent");
+      if (vm.desiredState === "poweredOff") {
+        actions.push("stop");
+        if (apply && (await domainState(uri, vm.name)) === "running") {
+          const r = await run("virsh", ["-c", uri, "shutdown", vm.name]);
+          if (r.code !== 0) {
+            throw new Error(
+              `virsh shutdown failed for ${vm.name}: ${r.stderr.slice(-500)}`,
+            );
+          }
+        }
       }
     }
   } catch (err) {
@@ -476,7 +533,7 @@ async function reconcile(
     serviceFqdn: vm.serviceFqdn,
     desiredState: vm.desiredState,
     previousState,
-    currentState: vm.desiredState === "absent" && apply && errors.length === 0
+    currentState: vm.desiredState === "deleted" && apply && errors.length === 0
       ? "absent"
       : currentState,
     ipAddress: vm.ipAddress,
@@ -498,13 +555,14 @@ async function reconcile(
 }
 
 async function executePool(context: PoolContext, apply: boolean) {
+  const globalArgs = GlobalArgsSchema.parse(context.globalArgs);
   const handles: unknown[] = [];
   const results: Array<z.infer<typeof VmResultSchema>> = [];
-  for (const vm of context.globalArgs.vms) {
+  for (const vm of globalArgs.vms) {
     context.logger.info(
       `${apply ? "Syncing" : "Planning"} VM ${vm.name} -> ${vm.desiredState}`,
     );
-    const result = await reconcile(vm, context.globalArgs.uri, apply);
+    const result = await reconcile(vm, globalArgs.uri, apply);
     results.push(result);
     handles.push(await context.writeResource("vm", vm.name, result));
   }
@@ -528,8 +586,14 @@ async function executePool(context: PoolContext, apply: boolean) {
 /** Desired-state reconciler for a local libvirt VM pool. Produces per-VM Swamp data for downstream SSH/config models. */
 export const model = {
   type: "@evrardjp/libvirt-vm-pool",
-  version: "2026.07.16.1",
+  version: "2026.07.17.2",
   globalArguments: GlobalArgsSchema,
+  upgrades: [{
+    toVersion: "2026.07.17.2",
+    description:
+      "Normalize legacy desired-state names while keeping stored VM attributes readable",
+    upgradeAttributes: (old: Record<string, unknown>) => old,
+  }],
   resources: {
     vm: {
       description: "Observed and desired state for one VM in the pool",

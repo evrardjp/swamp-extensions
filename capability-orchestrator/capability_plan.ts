@@ -34,9 +34,11 @@ const TaskImplementationSchema = z.discriminatedUnion("type", [
   ModelMethodTaskImplementationSchema,
 ]);
 
+const CapabilityRequirementSchema = z.string().min(1);
+
 const CapabilitySchema = z.object({
   name: z.string(),
-  requires: z.array(z.string()).default([]),
+  requires: z.array(CapabilityRequirementSchema).default([]),
   implementation: CapabilityImplementationSchema,
 }).passthrough();
 
@@ -185,17 +187,121 @@ function resolveForVm(vm: Vm, catalog: Map<string, Capability>): string[] {
   return [...resolved];
 }
 
+function pacmanPackagesFor(spec: Capability): string[] {
+  const implementation = spec.implementation;
+  if (
+    implementation.type === "model_method" &&
+    implementation.modelType === "@adam/cfgmgmt/pacman" &&
+    implementation.methodName === "apply" &&
+    implementation.globalArgs.ensure !== "absent" &&
+    Array.isArray(implementation.globalArgs.packages)
+  ) {
+    return implementation.globalArgs.packages.filter((pkg): pkg is string =>
+      typeof pkg === "string"
+    );
+  }
+  return [];
+}
+
+function isPackageCollector(spec: Capability): boolean {
+  return spec.implementation.type === "model_method" &&
+    spec.implementation.modelType === "@adam/cfgmgmt/pacman" &&
+    spec.implementation.methodName === "apply" &&
+    pacmanPackagesFor(spec).length === 0;
+}
+
+function isPackageOnlyCapability(spec: Capability): boolean {
+  return pacmanPackagesFor(spec).length > 0;
+}
+
+function packageCollectorDeps(
+  spec: Capability,
+  catalog: Map<string, Capability>,
+): string[] {
+  return spec.requires.filter((dep) => {
+    const depSpec = catalog.get(dep);
+    return depSpec ? isPackageCollector(depSpec) : false;
+  });
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return [...new Set(values)].sort((a, b) => a.localeCompare(b));
+}
+
 function buildWaves(vms: Vm[], capabilities: Capability[]) {
   const catalog = new Map(capabilities.map((c) => [c.name, c]));
   const requested: Record<string, string[]> = {};
   const resolved: Record<string, string[]> = {};
   const itemsByKey = new Map<string, PlanItem>();
+  const packageOnlyCaps = new Set<string>();
+  const packageCollectors = new Set<string>();
+  for (const [name, spec] of catalog) {
+    if (isPackageOnlyCapability(spec)) packageOnlyCaps.add(name);
+    if (isPackageCollector(spec)) packageCollectors.add(name);
+  }
+  for (const [name, spec] of catalog) {
+    if (
+      isPackageOnlyCapability(spec) &&
+      packageCollectorDeps(spec, catalog).length === 0
+    ) {
+      throw new Error(
+        `Package capability ${name} must require a pacman collector capability`,
+      );
+    }
+  }
+
   for (const vm of vms) {
     requested[vm.name] = vm.capabilities;
     resolved[vm.name] = resolveForVm(vm, catalog);
+    for (
+      const collector of resolved[vm.name].filter((cap) =>
+        packageCollectors.has(cap)
+      )
+    ) {
+      const collectorSpec = catalog.get(collector)!;
+      const collectorPackages = uniqueSorted(
+        resolved[vm.name].flatMap((cap) => {
+          const spec = catalog.get(cap);
+          if (!spec) return [];
+          const implementation = spec.implementation;
+          if (
+            implementation.type !== "model_method" ||
+            implementation.modelType !== "@adam/cfgmgmt/pacman" ||
+            implementation.methodName !== "apply" ||
+            !Array.isArray(implementation.globalArgs.packages) ||
+            implementation.globalArgs.packages.length === 0
+          ) return [];
+          return implementation.globalArgs.packages.filter((
+            pkg,
+          ): pkg is string => typeof pkg === "string");
+        }),
+      );
+      const implementation = materializeImplementation(
+        collectorSpec.implementation,
+        {
+          host: vm.name,
+          vm,
+          capability: collector,
+        },
+      );
+      if (implementation.type !== "model_method") {
+        throw new Error(`Package collector ${collector} must use model_method`);
+      }
+      implementation.globalArgs = {
+        ...implementation.globalArgs,
+        packages: collectorPackages,
+      };
+      itemsByKey.set(`${vm.name}:${collector}`, {
+        host: vm.name,
+        vm,
+        capability: collector,
+        implementation,
+      });
+    }
     for (const cap of resolved[vm.name]) {
       const spec = catalog.get(cap);
       if (!spec) throw new Error(`internal error: missing ${cap}`);
+      if (isPackageOnlyCapability(spec) || packageCollectors.has(cap)) continue;
       itemsByKey.set(`${vm.name}:${cap}`, {
         host: vm.name,
         vm,
@@ -217,9 +323,14 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
     const waveItems: PlanItem[] = [];
     for (const key of [...remaining].sort()) {
       const item = itemsByKey.get(key)!;
+      let depsSatisfied = false;
       const spec = catalog.get(item.capability)!;
-      const depsSatisfied = spec.requires.every((dep) =>
-        done.has(`${item.host}:${dep}`)
+      depsSatisfied = spec.requires.every((dep) =>
+        packageOnlyCaps.has(dep)
+          ? packageCollectorDeps(catalog.get(dep)!, catalog).every((
+            collector,
+          ) => done.has(`${item.host}:${collector}`))
+          : done.has(`${item.host}:${dep}`)
       );
       if (depsSatisfied) waveItems.push(item);
     }
@@ -241,7 +352,7 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
 /** Capability planner model that resolves requested VM capabilities into dependency-ordered waves. */
 export const model = {
   type: "@evrardjp/capability-plan",
-  version: "2026.07.16.1",
+  version: "2026.07.17.3",
   globalArguments: z.object({}),
   resources: {
     plan: {
@@ -256,13 +367,14 @@ export const model = {
       description:
         "Resolve VM requested capabilities and catalog dependencies into execution waves",
       arguments: PlanArgsSchema,
-      execute: async (args: z.infer<typeof PlanArgsSchema>, context: {
+      execute: async (rawArgs: z.input<typeof PlanArgsSchema>, context: {
         writeResource: (
           specName: string,
           name: string,
           data: Record<string, unknown>,
         ) => Promise<unknown>;
       }) => {
+        const args = PlanArgsSchema.parse(rawArgs);
         const built = buildWaves(args.vms, args.capabilities);
         const handle = await context.writeResource("plan", "current", {
           ...built,
