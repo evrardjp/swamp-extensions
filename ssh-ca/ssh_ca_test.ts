@@ -83,6 +83,10 @@ async function generateSubjectPublicKey(): Promise<string> {
   }
 }
 
+Deno.test("model declares upgrade to current version", () => {
+  assertEquals(model.upgrades.at(-1)?.toVersion, model.version);
+});
+
 Deno.test("duration parsing handles operational validity units", () => {
   const start = new Date("2026-01-01T00:00:00.000Z");
   assertEquals(
