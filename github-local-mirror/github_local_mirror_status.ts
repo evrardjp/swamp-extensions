@@ -158,10 +158,16 @@ export const report = {
       lines.push(`- Latest sync started: ${md(latestSync.startedAt)}`);
       lines.push(`- Latest sync finished: ${md(latestSync.finishedAt)}`);
       lines.push(`- PRs synced in latest run: ${md(latestSync.prCount ?? 0)}`);
-      lines.push(`- Issues synced in latest run: ${md(latestSync.issueCount ?? 0)}`);
-      lines.push(`- Events synced in latest run: ${md(latestSync.eventCount ?? 0)}`);
       lines.push(
-        `- Check runs synced in latest run: ${md(latestSync.checkRunCount ?? 0)}`,
+        `- Issues synced in latest run: ${md(latestSync.issueCount ?? 0)}`,
+      );
+      lines.push(
+        `- Events synced in latest run: ${md(latestSync.eventCount ?? 0)}`,
+      );
+      lines.push(
+        `- Check runs synced in latest run: ${
+          md(latestSync.checkRunCount ?? 0)
+        }`,
       );
     }
     lines.push(

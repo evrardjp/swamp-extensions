@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: '@evrardjp/openbao-configurator'
-version: 2026.07.03.4
+version: 2026.07.17.1
 description: >-
   OpenBao configuration rendering and API lifecycle control: render HCL, status,
   initialize, unseal, and seal. File deployment and service management are
