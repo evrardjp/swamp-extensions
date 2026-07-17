@@ -145,3 +145,7 @@ Deno.test("prepare_worktree uses mirrored PR data and records push hints", async
   const stat = await Deno.stat(result.path);
   assertEquals(stat.isDirectory, true);
 });
+
+Deno.test("model declares upgrade to current version", () => {
+  assertEquals(model.upgrades.at(-1)?.toVersion, model.version);
+});

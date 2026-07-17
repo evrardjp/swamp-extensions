@@ -648,6 +648,13 @@ export const model = {
   type: "@evrardjp/ssh-ca",
   version: "2026.07.17.1",
   globalArguments: GlobalArgsSchema,
+  upgrades: [
+    {
+      toVersion: "2026.07.17.1",
+      description: "Version bump with no global argument schema changes",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+  ],
   resources: {
     ca: {
       description:
