@@ -25,4 +25,7 @@ labels:
   - qemu
   - vm
   - convenience
+platforms:
+  - linux-x86_64
+  - linux-aarch64
 dependencies: []
