@@ -1,5 +1,6 @@
 import { assertEquals } from "jsr:@std/assert@1";
 import { model } from "./github_project_activity.ts";
+import { report as prReviewReport } from "./github_pr_review.ts";
 
 type WriteCall = {
   specName: string;
@@ -434,7 +435,70 @@ Deno.test("render_pr_report reads new activity database resources", async () => 
   assertEquals(result.dataHandles.length, 1);
   assertEquals(writes[0].specName, "prReport");
   const markdown = String(writes[0].data.markdown);
-  assertEquals(markdown.includes("# PR #42 — Add feature"), true);
+  assertEquals(
+    markdown.includes("# PR Review Report: owner/repo#42 — Add feature"),
+    true,
+  );
   assertEquals(markdown.includes("Review comment"), true);
   assertEquals(markdown.includes("Please update this."), true);
+});
+
+Deno.test("pr-review report generates prReport-shaped output when prReport is missing", async () => {
+  const encoder = new TextEncoder();
+  const entries = [
+    {
+      name: "pr-owner-repo-42-snapshot",
+      version: 1,
+      tags: { specName: "prSnapshot" },
+      value: {
+        repo: "owner/repo",
+        number: 42,
+        title: "Add feature",
+        state: "open",
+        author: "alice",
+        labels: ["kind/feature"],
+        reviewersRequestingChanges: [],
+        mergeConflict: false,
+        checksState: "success",
+        additions: 10,
+        deletions: 2,
+        changedFiles: 1,
+        createdAt: "2026-07-01T10:00:00.000Z",
+        updatedAt: "2026-07-01T11:00:00.000Z",
+        syncedAt: "2026-07-01T11:00:00.000Z",
+      },
+    },
+  ];
+  const contentByName = new Map(
+    entries.map((entry) => [
+      `${entry.name}:${entry.version}`,
+      encoder.encode(JSON.stringify(entry.value)),
+    ]),
+  );
+  const { writes, context } = recordingContext();
+  const reportContext = {
+    ...context,
+    modelType: "@evrardjp/github-project-activity",
+    modelId: "model-id",
+    methodArgs: { prNumber: 42 },
+    dataRepository: {
+      findAllForModel: async () =>
+        entries.map(({ name, version, tags }) => ({ name, version, tags })),
+      getContent: async (
+        _modelType: unknown,
+        _modelId: string,
+        dataName: string,
+        version?: number,
+      ) => contentByName.get(`${dataName}:${version}`) ?? null,
+    },
+  };
+
+  const result = await prReviewReport.execute(reportContext);
+
+  assertEquals(
+    result.markdown.includes("# PR Review Report: owner/repo#42 — Add feature"),
+    true,
+  );
+  assertEquals(result.json.source, "generated-prReport");
+  assertEquals(writes[0].specName, "prReport");
 });

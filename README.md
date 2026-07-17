@@ -22,6 +22,12 @@ swamp-extensions/
     LICENSE.txt
     models/
     reports/
+  github-local-mirror/
+    manifest.yaml
+    README.md
+    LICENSE.txt
+    models/
+    reports/
   libvirt-vm-pool/
     manifest.yaml
     README.md
@@ -58,6 +64,15 @@ Low-volume maintainer ledger. Stores curated PR/issue lifecycle events,
 classifications, CI attention records, and distilled Pi agent-session findings.
 
 Use it for daily maintainer briefings and PR/issue drill-downs.
+
+### `@evrardjp/github-local-mirror`
+
+Local GitHub mirror for maintainers and agents. It keeps a local git object
+cache plus Swamp-indexed PRs, issues, comments, reviews, checks, patch revision
+metadata, and local review worktree analysis.
+
+Use it when you want frequent lightweight syncs, durable local PR/issue context,
+and editable worktrees for human or agent review/fix workflows.
 
 ### `@evrardjp/libvirt-vm-pool`
 

@@ -205,6 +205,42 @@ const ArtifactIndexSchema = z.object({
   createdAt: IsoDateTime,
 }).passthrough();
 
+const RawGithubApiResponseSchema = z.object({
+  scenario: z.string().min(1),
+  method: z.string().default("GET"),
+  url: z.string().min(1),
+  path: z.string().min(1),
+  status: z.number().int(),
+  ok: z.boolean(),
+  requestHeaders: z.record(z.string(), z.string()).default({}),
+  responseHeaders: z.record(z.string(), z.string()).default({}),
+  body: z.any(),
+  bodyBytes: z.number().int().nonnegative(),
+  fetchedAt: IsoDateTime,
+}).passthrough();
+
+const FetchFromGithubArgsSchema = z.object({
+  scenario: z.string().min(1),
+  sourceMethod: z.enum([
+    "sync_github_backfill",
+    "sync_github_prs",
+    "sync_github_issues",
+    "sync_github_recent_activity",
+    "sync_github_repo",
+    "sync_github_file_inventory",
+    "sync_github_fork_index",
+  ]).default("sync_github_backfill"),
+  methodArgs: z.record(z.string(), z.any()).default({}),
+});
+
+const IngestFetchedDataArgsSchema = z.object({
+  scenario: z.string().min(1),
+  sourceMethod: FetchFromGithubArgsSchema.shape.sourceMethod.default(
+    "sync_github_backfill",
+  ),
+  methodArgs: z.record(z.string(), z.any()).default({}),
+});
+
 const RecordActivityArgsSchema = z.object({
   event: ActivityEventSchema.omit({ id: true, createdAt: true }).partial({
     repo: true,
@@ -378,6 +414,114 @@ async function ghPagesUpdatedSince<T extends { updated_at?: string }>(
     ) break;
   }
   return limit ? out.slice(0, limit) : out;
+}
+
+async function readResponseBody(resp: Response): Promise<unknown> {
+  const text = await resp.text();
+  if (text.length === 0) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function headersToRecord(headers: Headers): Record<string, string> {
+  const out = Object.fromEntries([...headers.entries()]);
+  for (const key of Object.keys(out)) {
+    if (["authorization", "cookie", "set-cookie"].includes(key.toLowerCase())) {
+      out[key] = "<redacted>";
+    }
+  }
+  return out;
+}
+
+type CapturedGithubResponse = z.infer<typeof RawGithubApiResponseSchema>;
+
+async function runSourceMethodNoWrites(
+  sourceMethod: string,
+  methodArgs: Record<string, unknown>,
+  ctx: WriteContext & {
+    definition?: { name?: string };
+    globalArgs: GlobalArgs;
+  },
+): Promise<void> {
+  const noopCtx = {
+    ...ctx,
+    dataRepository: undefined,
+    writeResource: async (
+      specName: string,
+      name: string,
+      _data: Record<string, unknown>,
+    ) => ({ name, specName, kind: "resource", version: 0 }),
+    createFileWriter: (specName: string, name: string) => ({
+      writeText: async (_content: string) => ({
+        name,
+        specName,
+        kind: "file",
+        version: 0,
+      }),
+    }),
+  };
+  const method = (model.methods as Record<
+    string,
+    {
+      execute: (
+        args: Record<string, unknown>,
+        ctx: unknown,
+      ) => Promise<unknown>;
+    }
+  >)[sourceMethod];
+  if (!method) throw new Error(`Unknown sourceMethod: ${sourceMethod}`);
+  await method.execute(methodArgs, noopCtx);
+}
+
+async function runSourceMethodWithFixtureFetch(
+  sourceMethod: string,
+  methodArgs: Record<string, unknown>,
+  ctx: WriteContext & {
+    definition?: { name?: string };
+    globalArgs: GlobalArgs;
+  },
+  byUrl: Map<string, CapturedGithubResponse>,
+): Promise<unknown> {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request) => {
+    const url = input instanceof Request ? input.url : String(input);
+    const captured = byUrl.get(url);
+    if (!captured) {
+      throw new Error(`No fetched GitHub fixture for URL: ${url}`);
+    }
+    return new Response(JSON.stringify(captured.body), {
+      status: captured.status,
+      headers: {
+        "content-type": captured.responseHeaders["content-type"] ??
+          "application/json",
+      },
+    });
+  };
+  try {
+    const method = (model.methods as Record<
+      string,
+      {
+        execute: (
+          args: Record<string, unknown>,
+          ctx: unknown,
+        ) => Promise<unknown>;
+      }
+    >)[sourceMethod];
+    if (!method) throw new Error(`Unknown sourceMethod: ${sourceMethod}`);
+    const replayCtx = {
+      ...ctx,
+      globalArgs: {
+        ...ctx.globalArgs,
+        githubToken: ctx.globalArgs.githubToken ?? "fixture-replay",
+      },
+    };
+    return await method.execute(methodArgs, replayCtx);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 }
 
 type WriteContext = {
@@ -1455,11 +1599,12 @@ async function clearStaleCandidates(
 /** GitHub maintainer activity database model for repository snapshots, PR dossiers, artifacts, and maintainer notes. */
 export const model = {
   type: "@evrardjp/github-project-activity",
-  version: "2026.07.03.5",
+  version: "2026.07.06.1",
   globalArguments: GlobalArgsSchema,
   reports: [
     "@evrardjp/github-project-briefing",
     "@evrardjp/github-codebase-heatmap",
+    "@evrardjp/pr-review",
   ],
   resources: {
     repoSnapshot: {
@@ -1517,6 +1662,13 @@ export const model = {
       lifetime: "infinite",
       garbageCollection: 100000,
     },
+    rawGithubApiResponse: {
+      description:
+        "Raw/minimally processed GitHub API response captured for fixture replay and ingestion benchmarks",
+      schema: RawGithubApiResponseSchema,
+      lifetime: "infinite",
+      garbageCollection: 100000,
+    },
     prReport: {
       description: "Rendered PR dossier markdown and machine-readable source",
       schema: z.object({
@@ -1537,6 +1689,147 @@ export const model = {
     },
   },
   methods: {
+    fetch_from_github: {
+      description:
+        "Fetch GitHub API data once and store raw/minimally processed responses as Swamp fixtures for later replay",
+      arguments: FetchFromGithubArgsSchema,
+      execute: async (args: any, ctx: any) => {
+        const parsed = FetchFromGithubArgsSchema.parse(args);
+        const captured = new Map<string, CapturedGithubResponse>();
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = async (
+          input: string | URL | Request,
+          init?: RequestInit,
+        ) => {
+          const request = input instanceof Request
+            ? input
+            : new Request(input, init);
+          const resp = await originalFetch(request);
+          const clone = resp.clone();
+          const body = await readResponseBody(clone);
+          const url = request.url;
+          const path = url.startsWith("https://api.github.com")
+            ? url.slice("https://api.github.com".length)
+            : new URL(url).pathname + new URL(url).search;
+          const encoded = new TextEncoder().encode(JSON.stringify(body));
+          captured.set(
+            url,
+            RawGithubApiResponseSchema.parse({
+              scenario: parsed.scenario,
+              method: request.method,
+              url,
+              path,
+              status: resp.status,
+              ok: resp.ok,
+              requestHeaders: headersToRecord(request.headers),
+              responseHeaders: headersToRecord(resp.headers),
+              body,
+              bodyBytes: encoded.byteLength,
+              fetchedAt: nowIso(),
+            }),
+          );
+          return resp;
+        };
+        try {
+          await runSourceMethodNoWrites(
+            parsed.sourceMethod,
+            parsed.methodArgs,
+            ctx,
+          );
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+        const handles: DataHandle[] = [];
+        for (const response of captured.values()) {
+          handles.push(
+            await ctx.writeResource(
+              "rawGithubApiResponse",
+              safeName("github-api", [
+                parsed.scenario,
+                response.method.toLowerCase(),
+                await sha1(response.url),
+              ]),
+              response,
+              { tags: { scenario: parsed.scenario, method: response.method } },
+            ),
+          );
+        }
+        return {
+          dataHandles: handles,
+          summary: {
+            scenario: parsed.scenario,
+            sourceMethod: parsed.sourceMethod,
+            responseCount: captured.size,
+            totalBodyBytes: [...captured.values()].reduce(
+              (sum, r) => sum + r.bodyBytes,
+              0,
+            ),
+          },
+        };
+      },
+    },
+    ingest_fetched_data: {
+      description:
+        "Replay stored GitHub API fixtures and ingest them into the derived project activity resources without calling GitHub",
+      arguments: IngestFetchedDataArgsSchema,
+      execute: async (args: any, ctx: any) => {
+        const parsed = IngestFetchedDataArgsSchema.parse(args);
+        if (!ctx.dataRepository || !ctx.modelType || !ctx.modelId) {
+          throw new Error(
+            "dataRepository, modelType, and modelId are required to ingest fetched data",
+          );
+        }
+        const entries = await ctx.dataRepository.findAllForModel(
+          ctx.modelType,
+          ctx.modelId,
+        );
+        const byUrl = new Map<string, CapturedGithubResponse>();
+        for (
+          const entry of entries.filter((e: any) =>
+            tagsOf(e).specName === "rawGithubApiResponse" &&
+            (tagsOf(e).scenario === parsed.scenario ||
+              tagsOf(e).scenario === undefined)
+          )
+        ) {
+          const value = await readJson(
+            ctx.dataRepository,
+            ctx.modelType,
+            ctx.modelId,
+            entry,
+          );
+          if (value?.scenario === parsed.scenario && value?.url) {
+            const existing = byUrl.get(value.url);
+            if (!existing || entry.version >= (existing as any).__version) {
+              byUrl.set(value.url, { ...value, __version: entry.version });
+            }
+          }
+        }
+        if (byUrl.size === 0) {
+          throw new Error(
+            `No rawGithubApiResponse fixtures found for scenario ${parsed.scenario}`,
+          );
+        }
+        const started = performance.now();
+        const result: any = await runSourceMethodWithFixtureFetch(
+          parsed.sourceMethod,
+          parsed.methodArgs,
+          ctx,
+          byUrl,
+        );
+        const durationMs = performance.now() - started;
+        return {
+          ...result,
+          summary: {
+            ...(result?.summary ?? {}),
+            scenario: parsed.scenario,
+            sourceMethod: parsed.sourceMethod,
+            fixtureResponses: byUrl.size,
+            durationMs,
+            dataHandleCount: result?.dataHandles?.length ?? 0,
+          },
+        };
+      },
+    },
     sync_github_repo: {
       description:
         "Fetch repository metadata and optionally refresh fork index (for tracking fork repositories that may appear as PR heads without ingesting full fork activity)",
@@ -1861,7 +2154,7 @@ export const model = {
     },
     render_pr_report: {
       description:
-        "Render a timeline-first PR dossier from stored Swamp data only",
+        "Render a parameterized, durable PR dossier for one pull request. This is a model method rather than only a Swamp report because it needs runtime inputs (prNumber, includePrivate, since/until), writes a durable prReport data object named for that PR, and is an explicit render-this-PR action rather than a passive post-run execution summary.",
       arguments: z.object({
         prNumber: z.number().int().positive(),
         includePrivate: z.boolean().optional(),
@@ -1935,9 +2228,174 @@ export const model = {
           events = events.filter((e) => e.createdAt <= args.until!);
         }
         events.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        const singleLine = (value: unknown, max = 500) => {
+          const text = String(value ?? "")
+            .replace(/\r?\n/g, " / ")
+            .replace(/\s+/g, " ")
+            .trim();
+          return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+        };
+        const md = (value: unknown) =>
+          String(value ?? "")
+            .replace(/\|/g, "\\|")
+            .replace(/\r?\n/g, "<br>");
+        const artifactLink = (name?: string) =>
+          name ? `\`swamp data get ${ctx.definition.name} ${name}\`` : "";
+        const formatState = () =>
+          pr ? `${pr.state}${pr.merged ? " / merged" : ""}` : "unknown";
+        const codeAreas = (() => {
+          const roots = new Map<
+            string,
+            { count: number; additions: number; deletions: number }
+          >();
+          for (const f of files) {
+            const area = String(f.path ?? "").split("/")[0] || "(root)";
+            const current = roots.get(area) ??
+              { count: 0, additions: 0, deletions: 0 };
+            current.count += 1;
+            current.additions += f.additions ?? 0;
+            current.deletions += f.deletions ?? 0;
+            roots.set(area, current);
+          }
+          return [...roots.entries()]
+            .sort((a, b) => b[1].count - a[1].count || a[0].localeCompare(b[0]))
+            .slice(0, 8);
+        })();
+        const failingChecks = checks.filter((c) =>
+          c.conclusion &&
+          !["success", "neutral", "skipped"].includes(String(c.conclusion))
+        );
+        const reviewEvents = events.filter((e) =>
+          String(e.eventType ?? "").includes("review") ||
+          (e.tags ?? []).includes("review")
+        );
+        const privateEvents = events.filter((e) => e.visibility === "private");
+        const questionEvents = events.filter((e) =>
+          e.eventType === "pi-llm-questions" ||
+          (e.tags ?? []).some((tag: string) =>
+            ["llm-question", "follow-up-question", "question"].includes(tag)
+          )
+        );
         const lines: string[] = [];
         lines.push(
-          `# PR #${args.prNumber} — ${pr?.title ?? "unknown title"}`,
+          `# PR Review Report: ${repo}#${args.prNumber} — ${
+            pr?.title ?? "unknown title"
+          }`,
+          "",
+          "## Labels",
+          "",
+          (pr?.labels ?? []).length
+            ? (pr?.labels ?? []).map((l: string) => `- ${l}`).join("\n")
+            : "- _(none recorded)_",
+          "",
+          "## Context Summary",
+          "",
+          `- **State:** ${formatState()}${pr?.draft ? " (draft)" : ""}`,
+          `- **Author:** ${pr?.author ?? "unknown"}`,
+          `- **Branches:** ${pr?.baseBranch ?? "?"} ← ${pr?.headBranch ?? "?"}`,
+          `- **Review decision:** ${pr?.reviewDecision ?? "unknown"}`,
+          `- **CI/checks:** ${pr?.checksState ?? "unknown"}${
+            failingChecks.length
+              ? ` (${failingChecks.length} non-success checks recorded)`
+              : ""
+          }`,
+          `- **Size:** +${pr?.additions ?? 0} / -${pr?.deletions ?? 0}, ${
+            pr?.changedFiles ?? files.length
+          } changed files`,
+          `- **Synced at:** ${pr?.syncedAt ?? "unknown"}`,
+          "",
+          "## Code Path Walkthrough",
+          "",
+        );
+        if (files.length === 0) {
+          lines.push("_No changed-file snapshots are stored for this PR._", "");
+        } else {
+          lines.push(
+            "| Area | Files | + | - |",
+            "|---|---:|---:|---:|",
+          );
+          for (const [area, stat] of codeAreas) {
+            lines.push(
+              `| \`${
+                md(area)
+              }\` | ${stat.count} | ${stat.additions} | ${stat.deletions} |`,
+            );
+          }
+          lines.push(
+            "",
+            "### Changed Files",
+            "",
+            "| Path | Status | + | - | Patch artifact |",
+            "|---|---:|---:|---:|---|",
+          );
+          for (const f of files.sort((a, b) => a.path.localeCompare(b.path))) {
+            lines.push(
+              `| \`${md(f.path)}\` | ${
+                md(f.statusShort)
+              } | ${f.additions} | ${f.deletions} | ${
+                artifactLink(f.patchArtifact)
+              } |`,
+            );
+          }
+          lines.push("");
+        }
+        lines.push(
+          "## Review Findings",
+          "",
+          "This section is intentionally data-backed, not a substitute for Pi's human-quality analysis. Use the timeline, changed files, and artifacts below to draft findings in the conversation.",
+          "",
+          "| Signal | Value |",
+          "|---|---|",
+          `| Review comments/events | ${reviewEvents.length} |`,
+          `| Private/manual events included | ${privateEvents.length} |`,
+          `| Reviewers requesting changes | ${
+            md((pr?.reviewersRequestingChanges ?? []).join(", ") || "none")
+          } |`,
+          `| Merge conflicts | ${md(String(pr?.mergeConflict ?? "unknown"))} |`,
+          `| Conflict files | ${
+            md((pr?.conflictFiles ?? []).join(", ") || "none")
+          } |`,
+          "",
+          "## Test Plan",
+          "",
+          "| Job | Status | Conclusion | Artifact |",
+          "|---|---|---|---|",
+        );
+        if (checks.length === 0) {
+          lines.push("| _(no CI/check snapshots)_ |  |  |  |");
+        } else {
+          for (const c of checks) {
+            lines.push(
+              `| ${md(c.name)} | ${md(c.status ?? "")} | ${
+                md(c.conclusion ?? "")
+              } | ${artifactLink(c.artifact)} |`,
+            );
+          }
+        }
+        lines.push(
+          "",
+          "## Follow-up Questions",
+          "",
+        );
+        if (questionEvents.length > 0) {
+          for (const e of questionEvents) {
+            const artifacts = (e.artifactRefs ?? []).map(artifactLink).join(
+              ", ",
+            );
+            lines.push(
+              `- ${singleLine(e.summary ?? e.body ?? "Recorded LLM question")}${
+                artifacts ? ` (${artifacts})` : ""
+              }`,
+            );
+          }
+        } else {
+          lines.push(
+            "- Which maintainer decision is needed next (approve, request changes, wait for author/CI, or close)?",
+            "- Are any changed areas missing tests or local/e2e validation?",
+            "- Do private/manual notes below change the public review stance?",
+          );
+        }
+        lines.push(
           "",
           "## Timeline",
           "",
@@ -1949,13 +2407,6 @@ export const model = {
             ? `${value.slice(0, actorWidth - 1)}…`
             : value.padEnd(actorWidth, " ");
         };
-        const singleLine = (value: unknown, max = 500) => {
-          const text = String(value ?? "")
-            .replace(/\r?\n/g, " / ")
-            .replace(/\s+/g, " ")
-            .trim();
-          return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-        };
         const detailsFor = (e: any) => {
           const details = [`visibility=${e.visibility}`];
           if (e.filePath) {
@@ -1965,14 +2416,15 @@ export const model = {
           }
           if (e.body) details.push(`body="${singleLine(e.body)}"`);
           for (const a of e.artifactRefs ?? []) {
-            details.push(
-              `artifact=swamp data get ${ctx.definition.name} ${a}`,
-            );
+            details.push(`artifact=${artifactLink(a)}`);
           }
           return details.join("; ");
         };
         let day = "";
         let hour = "";
+        if (events.length === 0) {
+          lines.push("_No activity events are stored for this PR._", "");
+        }
         for (const e of events) {
           const d = e.createdAt.slice(0, 10);
           const h = e.createdAt.slice(11, 13);
@@ -1995,32 +2447,13 @@ export const model = {
         lines.push(
           "## Reference",
           "",
-          "### Changed Files",
-          "",
-          "| Path | Status | + | - | Artifact link |",
-          "|---|---:|---:|---:|---|",
-        );
-        for (const f of files.sort((a, b) => a.path.localeCompare(b.path))) {
-          lines.push(
-            `| \`${f.path}\` | ${f.statusShort} | ${f.additions} | ${f.deletions} | ${
-              f.patchArtifact
-                ? `\`swamp data get ${ctx.definition.name} ${f.patchArtifact}\``
-                : ""
-            } |`,
-          );
-        }
-        lines.push(
-          "",
           "### Current State",
           "",
           "| Field | Value |",
           "|---|---|",
         );
         const stateRows = [
-          [
-            "PR state",
-            pr ? `${pr.state}${pr.merged ? " / merged" : ""}` : "unknown",
-          ],
+          ["PR state", formatState()],
           ["Draft", pr?.draft ? "yes" : "no"],
           ["Author", pr?.author ?? ""],
           ["Base branch", pr?.baseBranch ?? ""],
@@ -2036,34 +2469,12 @@ export const model = {
           ["Assignees", (pr?.assignees ?? []).join(", ")],
           ["Requested reviewers", (pr?.requestedReviewers ?? []).join(", ")],
           ["Created", pr?.createdAt ?? ""],
+          ["Updated", pr?.updatedAt ?? ""],
           ["Last code change", pr?.lastCodeChangeAt ?? ""],
           ["Last conversation", pr?.lastConversationAt ?? ""],
-          [
-            "Size",
-            pr
-              ? `+${pr.additions ?? 0} / -${pr.deletions ?? 0}, ${
-                pr.changedFiles ?? files.length
-              } files`
-              : "",
-          ],
+          ["Synced", pr?.syncedAt ?? ""],
         ];
-        for (const [k, v] of stateRows) lines.push(`| ${k} | ${v} |`);
-        lines.push(
-          "",
-          "### CI Statuses",
-          "",
-          "| Job | Status | Conclusion | Artifact link |",
-          "|---|---|---|---|",
-        );
-        for (const c of checks) {
-          lines.push(
-            `| ${c.name} | ${c.status ?? ""} | ${c.conclusion ?? ""} | ${
-              c.artifact
-                ? `\`swamp data get ${ctx.definition.name} ${c.artifact}\``
-                : ""
-            } |`,
-          );
-        }
+        for (const [k, v] of stateRows) lines.push(`| ${md(k)} | ${md(v)} |`);
         const markdown = lines.join("\n");
         const handle = await ctx.writeResource(
           "prReport",

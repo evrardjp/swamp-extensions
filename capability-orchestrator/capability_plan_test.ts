@@ -69,7 +69,7 @@ Deno.test("plan resolves dependencies into ordered waves", async () => {
   assertEquals(writes[0].data.resolved, { gitea: ["base", "app"] });
 });
 
-Deno.test("plan renders model method global arguments into task inputs", async () => {
+Deno.test("plan renders model method global arguments separately from method inputs", async () => {
   const { writes, context } = recordingContext();
 
   await model.methods.plan.execute({
@@ -108,14 +108,14 @@ Deno.test("plan renders model method global arguments into task inputs", async (
     modelType: "@example/package",
     modelName: "lab-gitea-base",
     methodName: "apply",
-    inputs: {
+    globalArgs: {
       packages: ["gitea"],
       ensure: "present",
       nodeHost: "192.0.2.12",
       nodeUser: "admin",
       url: "https://gitea.example.com",
-      timeout: 30,
     },
+    inputs: { timeout: 30 },
   });
 });
 

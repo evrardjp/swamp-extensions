@@ -20,8 +20,24 @@ const ImplementationSchema = z.discriminatedUnion("type", [
   ModelMethodImplementationSchema,
 ]);
 
+const CapabilityExposeSchema = z.object({
+  name: z.string(),
+  listen: z.string().describe(
+    "Backend listen endpoint in SOCAT-like PROTO:HOST:PORT form",
+  ),
+  upstreamScheme: z.enum(["http", "https"]).default("http"),
+  tlsInsecureSkipVerify: z.boolean(),
+  public: z.object({
+    fqdn: z.string(),
+    listen: z.string().default("TCP:0.0.0.0:443"),
+    scheme: z.enum(["http", "https"]).default("https"),
+    tls: z.enum(["internal", "off"]).default("internal"),
+  }),
+});
+
 const CapabilitySpecSchema = z.object({
   description: z.string().optional(),
+  exposes: z.array(CapabilityExposeSchema).default([]),
   requires: z.array(z.string()).default([]),
   implementation: ImplementationSchema,
 });
@@ -33,6 +49,7 @@ const GlobalArgsSchema = z.object({
 const CapabilityResourceSchema = z.object({
   name: z.string(),
   description: z.string().optional(),
+  exposes: z.array(CapabilityExposeSchema).default([]),
   requires: z.array(z.string()),
   implementation: ImplementationSchema,
 });
@@ -62,7 +79,7 @@ function validateCatalog(catalog: Record<string, CapabilitySpec>) {
 /** Capability catalog model that validates and publishes capability definitions. */
 export const model = {
   type: "@evrardjp/capability-catalog",
-  version: "2026.07.05.1",
+  version: "2026.07.16.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     capability: {

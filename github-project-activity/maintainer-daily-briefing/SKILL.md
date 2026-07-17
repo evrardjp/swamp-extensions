@@ -15,10 +15,9 @@ Use when the user asks for a daily maintainer briefing, urgent matters, importan
 4. Fetch the refreshed briefing with `swamp report get @evrardjp/github-project-briefing --model <activity-model> --json` and/or `--markdown`.
 5. If refresh fails or the briefing is missing/stale, offer to run the relevant Swamp refresh workflow/model rather than querying GitHub directly.
 6. For repo-wide questions, answer from the briefing JSON: open PRs with failing CI, requested changes, merge conflicts, stale PRs/issues, and recent activity events.
-7. For a PR/issue drill-down, filter the briefing JSON by repo + subject type + number, or run `render_pr_report` for a timeline-first PR dossier.
-8. When the current conversation produces an actionable maintainer conclusion, record a concise private event with `record_activity`. Use `source: "pi-agent"` or `source: "manual"`, `visibility: "private"`, and include an artifact reference if there is a longer transcript/log.
-9. When the user asks to preserve a whole conversation/session/log for later, store the large content with `record_artifact`, then record a short `record_activity` event pointing to that artifact in `artifactRefs`.
-10. Before continuing a long-running discussion about a specific item, compare the latest Swamp data timestamps/revision with what is in the conversation. If stale, tell the user and refresh via Swamp.
+7. When the current conversation produces an actionable maintainer conclusion, record a concise private event with `record_activity`. Use `source: "pi-agent"` or `source: "manual"`, `visibility: "private"`, and include an artifact reference if there is a longer transcript/log.
+8. When the user asks to preserve a whole conversation/session/log for later, store the large content with `record_artifact`, then record a short `record_activity` event pointing to that artifact in `artifactRefs`.
+9. Before continuing a long-running discussion or a review about a specific pull request or issue, compare the latest Swamp data timestamps/revision with what is in the conversation. Ask the user if the data is still fresh. If stale, tell the user and refresh via Swamp.
 
 ## Pitfalls
 - Do not assume the current working directory is the Swamp repo; always cd/use the configured maintainer Swamp repo path.
