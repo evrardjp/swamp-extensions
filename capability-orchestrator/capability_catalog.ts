@@ -35,10 +35,12 @@ const CapabilityExposeSchema = z.object({
   }),
 });
 
+const CapabilityRequirementSchema = z.string().min(1);
+
 const CapabilitySpecSchema = z.object({
   description: z.string().optional(),
   exposes: z.array(CapabilityExposeSchema).default([]),
-  requires: z.array(z.string()).default([]),
+  requires: z.array(CapabilityRequirementSchema).default([]),
   implementation: ImplementationSchema,
 });
 
@@ -50,7 +52,7 @@ const CapabilityResourceSchema = z.object({
   name: z.string(),
   description: z.string().optional(),
   exposes: z.array(CapabilityExposeSchema).default([]),
-  requires: z.array(z.string()),
+  requires: z.array(CapabilityRequirementSchema),
   implementation: ImplementationSchema,
 });
 
@@ -79,7 +81,7 @@ function validateCatalog(catalog: Record<string, CapabilitySpec>) {
 /** Capability catalog model that validates and publishes capability definitions. */
 export const model = {
   type: "@evrardjp/capability-catalog",
-  version: "2026.07.16.1",
+  version: "2026.07.17.3",
   globalArguments: GlobalArgsSchema,
   resources: {
     capability: {
@@ -107,20 +109,18 @@ export const model = {
           data: Record<string, unknown>,
         ) => Promise<unknown>;
       }) => {
-        validateCatalog(context.globalArgs.capabilities);
+        const globalArgs = GlobalArgsSchema.parse(context.globalArgs);
+        validateCatalog(globalArgs.capabilities);
         const handles: unknown[] = [];
-        for (
-          const [name, spec] of Object.entries(context.globalArgs.capabilities)
-        ) {
+        for (const [name, spec] of Object.entries(globalArgs.capabilities)) {
           handles.push(
             await context.writeResource("capability", name, { name, ...spec }),
           );
         }
         handles.push(
           await context.writeResource("summary", "current", {
-            capabilityCount:
-              Object.keys(context.globalArgs.capabilities).length,
-            capabilities: Object.keys(context.globalArgs.capabilities).sort(),
+            capabilityCount: Object.keys(globalArgs.capabilities).length,
+            capabilities: Object.keys(globalArgs.capabilities).sort(),
             publishedAt: new Date().toISOString(),
           }),
         );
