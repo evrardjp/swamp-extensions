@@ -1,4 +1,8 @@
-import { assertEquals } from "jsr:@std/assert@1";
+import {
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "jsr:@std/assert@1";
 import { model } from "./libvirt_vm_pool.ts";
 
 type WriteCall = {
@@ -116,4 +120,96 @@ Deno.test("plan reports destructive cleanup actions for a deleted desired VM", a
       "gitea:removeCloudInitIso",
     ]);
   });
+});
+
+Deno.test("sync writes configured pacman mirrors on separate lines", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const baseImagePath = `${dir}/base.qcow2`;
+    const diskPath = `${dir}/gitea.qcow2`;
+    const publicKeyPath = `${dir}/id.pub`;
+    await Promise.all([
+      Deno.writeTextFile(baseImagePath, "base"),
+      Deno.writeTextFile(diskPath, "disk"),
+      Deno.writeTextFile(publicKeyPath, "ssh-ed25519 test"),
+    ]);
+    const { context } = recordingContext([
+      baseVm({
+        imagesDir: dir,
+        baseImagePath,
+        sshPubKeyPath: publicKeyPath,
+        pacmanMirrors: [
+          "https://mirror1.example/$repo/os/$arch",
+          "https://mirror2.example/$repo/os/$arch",
+        ],
+      }),
+    ]);
+
+    await withFakeVirsh(
+      'case "$*" in *domstate*) exit 1;; *) exit 0;; esac',
+      async () => {
+        await model.methods.sync.execute({}, context as never);
+      },
+    );
+
+    const iso = new TextDecoder().decode(
+      await Deno.readFile(`${dir}/gitea-cloud-init.iso`),
+    );
+    assertStringIncludes(
+      iso,
+      "Server = https://mirror1.example/$repo/os/$arch\n" +
+        "      Server = https://mirror2.example/$repo/os/$arch",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("plan rejects mirror values containing injected directives", async () => {
+  const { context } = recordingContext([
+    baseVm({
+      pacmanMirrors: [
+        "https://mirror.example/$repo/os/$arch\nInclude = /tmp/mirrorlist",
+      ],
+    }),
+  ]);
+
+  await assertRejects(
+    () => model.methods.plan.execute({}, context as never),
+    Error,
+    "Invalid string",
+  );
+});
+
+Deno.test("sync normalizes legacy states and shuts down poweredOff VMs", async () => {
+  const dir = await Deno.makeTempDir();
+  const commandLog = `${dir}/virsh.log`;
+  try {
+    const baseImagePath = `${dir}/base.qcow2`;
+    await Promise.all([
+      Deno.writeTextFile(baseImagePath, "base"),
+      Deno.writeTextFile(`${dir}/gitea.qcow2`, "disk"),
+      Deno.writeTextFile(`${dir}/gitea-cloud-init.iso`, "iso"),
+    ]);
+    const { writes, context } = recordingContext([
+      baseVm({
+        desiredState: "defined",
+        imagesDir: dir,
+        baseImagePath,
+      }),
+    ]);
+
+    await withFakeVirsh(
+      `printf '%s\\n' "$*" >> "${commandLog}"; ` +
+        'case "$*" in *domstate*) echo running;; *) exit 0;; esac',
+      async () => {
+        await model.methods.sync.execute({}, context as never);
+      },
+    );
+
+    assertEquals(writes[0].data.desiredState, "poweredOff");
+    assertStringIncludes(await Deno.readTextFile(commandLog), "shutdown gitea");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });

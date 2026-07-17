@@ -43,7 +43,7 @@ globalArguments:
 
   vms:
     - name: gitea
-      desiredState: reachable # absent | defined | running | reachable
+      desiredState: poweredOn # deleted | poweredOff | poweredOn
       hostname: gitea
       fqdn: gitea.lab.example
       serviceFqdn: git.lab.example
@@ -84,6 +84,9 @@ globalArguments:
       imagesDir: /var/lib/libvirt/images
       baseImagePath: /var/lib/libvirt/images/arch-cloud-base.qcow2
       baseImageUrl: https://geo.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2
+      pacmanMirrors:
+        - https://archlinux.cu.be/$repo/os/$arch
+        - https://mirror.netcologne.de/archlinux/$repo/os/$arch
       capabilities:
         - git
         - docker-host
@@ -91,11 +94,9 @@ globalArguments:
 
 `desiredState` values:
 
-- `absent` — destroy/undefine the domain and remove disk/seed ISO.
-- `defined` — ensure disk/seed/domain exist, do not start.
-- `running` — ensure defined and started.
-- `reachable` — same substrate actions as `running`, plus publish the intent
-  that downstream SSH wait/config models should expect connectivity.
+- `deleted` - destroy/undefine the domain and remove disk/seed ISO.
+- `poweredOff` - ensure the disk, seed, and domain exist, then shut it down.
+- `poweredOn` - ensure the disk, seed, and domain exist, then start it.
 
 ## SSH identity metadata
 
@@ -125,7 +126,7 @@ swamp model method run lab-vm-pool sync
 ```
 
 Use `plan` before destructive changes, especially before changing a VM to
-`absent`.
+`deleted`.
 
 ## Generated Swamp data
 
@@ -150,7 +151,7 @@ A per-VM resource contains fields like:
   "hostname": "gitea",
   "fqdn": "gitea.lab.example",
   "serviceFqdn": "git.lab.example",
-  "desiredState": "reachable",
+  "desiredState": "poweredOn",
   "previousState": "shut off",
   "currentState": "running",
   "ipAddress": "192.0.2.12",
