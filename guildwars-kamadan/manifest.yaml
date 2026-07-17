@@ -1,0 +1,27 @@
+manifestVersion: 1
+name: "@evrardjp/guildwars-kamadan"
+version: "2026.07.17.1"
+description: >-
+  Guild Wars Kamadan trade-feed ingestion, item metadata synchronization, raw
+  listing parsing, and hourly market aggregation for Swamp.
+repository: "https://github.com/evrardjp/swamp-extensions"
+paths:
+  base: manifest
+models:
+  - guildwars_kamadan.ts
+reports: []
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+labels:
+  - guild-wars
+  - kamadan
+  - websocket
+  - market-data
+  - ingestion
+platforms: []
+dependencies: []

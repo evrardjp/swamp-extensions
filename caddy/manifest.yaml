@@ -1,0 +1,29 @@
+manifestVersion: 1
+name: "@evrardjp/caddy"
+version: "2026.07.17.1"
+description: >-
+  Render, validate, and remotely apply Caddy JSON reverse-proxy configuration
+  using a containerized Caddy runtime.
+repository: "https://github.com/evrardjp/swamp-extensions"
+paths:
+  base: manifest
+models:
+  - caddy.ts
+reports: []
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+labels:
+  - caddy
+  - reverse-proxy
+  - tls
+  - docker
+  - infrastructure
+platforms:
+  - linux-x86_64
+  - linux-aarch64
+dependencies: []

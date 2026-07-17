@@ -1,0 +1,29 @@
+manifestVersion: 1
+name: "@evrardjp/capability-caddy-sites"
+version: "2026.07.17.1"
+description: >-
+  Adapter from capability-orchestrator expose metadata to generic Caddy
+  reverse-proxy site definitions.
+repository: "https://github.com/evrardjp/swamp-extensions"
+paths:
+  base: manifest
+models:
+  - capability_caddy_sites.ts
+reports: []
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+labels:
+  - capability
+  - caddy
+  - reverse-proxy
+  - adapter
+  - orchestration
+platforms: []
+dependencies:
+  - "@evrardjp/capability-orchestrator"
+  - "@evrardjp/caddy"
