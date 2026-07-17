@@ -5,7 +5,7 @@ const IsoDateTime = z.string().datetime({ offset: true });
 const GlobalArgsSchema = z.object({
   owner: z.string().min(1),
   repo: z.string().min(1),
-  githubToken: z.string().min(1).optional(),
+  githubToken: z.string().min(1).optional().meta({ sensitive: true }),
   gitObjectPath: z.string().min(1).describe(
     "Path to the managed bare git object repository used by the mirror",
   ),
@@ -316,6 +316,17 @@ const SyncRunSummarySchema = z.object({
   gitFetched: z.boolean(),
   cursorPrUpdatedAt: z.string().optional(),
   cursorIssueUpdatedAt: z.string().optional(),
+}).passthrough();
+
+const MirrorStatusSchema = z.object({
+  repo: z.string(),
+  modelName: z.string(),
+  state: MirrorStateSchema,
+  worktreeCount: z.number().int().nonnegative(),
+  artifactRoot: z.string(),
+  workspaceRoot: z.string(),
+  gitObjectPath: z.string(),
+  generatedAt: IsoDateTime,
 }).passthrough();
 
 function repoFullName(g: GlobalArgs): string {
@@ -1341,7 +1352,7 @@ export const model = {
     },
     mirrorStatus: {
       description: "Current mirror status summary",
-      schema: z.object({}).passthrough(),
+      schema: MirrorStatusSchema,
       lifetime: "infinite",
       garbageCollection: 50,
     },
