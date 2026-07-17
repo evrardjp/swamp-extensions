@@ -1,0 +1,24 @@
+payload:
+  schemaVersion: 1
+  exportedAt: "2026-07-17T12:00:00.000Z"
+  reason: manual
+  metadata:
+    sessionID: ses_synthetic_smoke
+    projectID: project-synthetic
+    title: "[archive] Synthetic OpenCode archive smoke test"
+    opencodeVersion: 1.18.3
+    createdAt: "2026-07-17T11:00:00.000Z"
+    updatedAt: "2026-07-17T12:00:00.000Z"
+    durationMs: 3600000
+    messageCount: 1
+    userMessageCount: 1
+    assistantMessageCount: 0
+    toolCallCount: 0
+    errorCount: 0
+    discussion: "Synthetic discussion about webhook ingestion and native restore."
+    discussionTruncated: false
+    archived: true
+    models: []
+    tools: {}
+  archiveJson: >-
+    {"info":{"id":"ses_synthetic_smoke","projectID":"project-synthetic","directory":"/synthetic/project","title":"[archive] Synthetic OpenCode archive smoke test","version":"1.18.3","time":{"created":1784286000000,"updated":1784289600000}},"messages":[{"info":{"id":"msg_synthetic","sessionID":"ses_synthetic_smoke","role":"user","time":{"created":1784286000000},"agent":"build","model":{"providerID":"example","modelID":"synthetic"}},"parts":[{"id":"part_synthetic","sessionID":"ses_synthetic_smoke","messageID":"msg_synthetic","type":"text","text":"Synthetic content only; no OpenCode datastore was read."}]}]}
