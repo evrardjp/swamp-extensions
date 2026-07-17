@@ -372,6 +372,9 @@ async function ensureImage(vm: VmSpec, actions: string[]): Promise<void> {
       "    shell: /bin/bash",
       "    ssh_authorized_keys:",
       `      - ${sshPubKey}`,
+      "bootcmd:",
+      "  - systemctl disable --now systemd-time-wait-sync.service || true",
+      "  - systemctl mask systemd-time-wait-sync.service || true",
       "packages:",
       "  - openssh",
       "runcmd:",
@@ -525,7 +528,7 @@ async function executePool(context: PoolContext, apply: boolean) {
 /** Desired-state reconciler for a local libvirt VM pool. Produces per-VM Swamp data for downstream SSH/config models. */
 export const model = {
   type: "@evrardjp/libvirt-vm-pool",
-  version: "2026.07.03.1",
+  version: "2026.07.16.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     vm: {

@@ -2,10 +2,10 @@
 
 Desired-state local libvirt VM pool reconciler for Swamp.
 
-This model owns the VM substrate layer only: libvirt domain lifecycle, cloud-init
-seed/disk creation, power state, and connection facts. App packages, services,
-SSH CA issuance, SSH daemon configuration, templates, and verification should
-stay in downstream SSH/config models and workflows.
+This model owns the VM substrate layer only: libvirt domain lifecycle,
+cloud-init seed/disk creation, power state, and connection facts. App packages,
+services, SSH CA issuance, SSH daemon configuration, templates, and verification
+should stay in downstream SSH/config models and workflows.
 
 ## Model type
 
@@ -129,8 +129,8 @@ Use `plan` before destructive changes, especially before changing a VM to
 
 ## Generated Swamp data
 
-The model writes one `vm` resource per VM using the VM name as the data name, and
-one `summary` resource named `current`.
+The model writes one `vm` resource per VM using the VM name as the data name,
+and one `summary` resource named `current`.
 
 Example downstream CEL references:
 

@@ -25,6 +25,7 @@ const ModelMethodTaskImplementationSchema = z.object({
   modelType: z.string(),
   modelName: z.string(),
   methodName: z.string(),
+  globalArgs: z.record(z.string(), z.unknown()).default({}),
   inputs: z.record(z.string(), z.unknown()).default({}),
 });
 
@@ -158,10 +159,8 @@ function materializeImplementation(
       implementation.methodName,
       context,
     ) as string,
-    inputs: {
-      ...renderTemplateRecord(implementation.globalArgs, context),
-      ...renderTemplateRecord(implementation.inputs, context),
-    },
+    globalArgs: renderTemplateRecord(implementation.globalArgs, context),
+    inputs: renderTemplateRecord(implementation.inputs, context),
   };
 }
 
@@ -242,7 +241,7 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
 /** Capability planner model that resolves requested VM capabilities into dependency-ordered waves. */
 export const model = {
   type: "@evrardjp/capability-plan",
-  version: "2026.07.05.1",
+  version: "2026.07.16.1",
   globalArguments: z.object({}),
   resources: {
     plan: {
