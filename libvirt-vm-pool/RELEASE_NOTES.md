@@ -1,4 +1,4 @@
-## 2026.07.17.1
+## 2026.07.17.2
 
 **Added:** VM cloud-init now installs CA certificates and sudo, writes a configurable ordered Arch Linux pacman mirror list, and disables the systemd time-wait service that can delay local lab bootstrapping.
 

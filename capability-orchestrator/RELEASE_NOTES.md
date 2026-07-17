@@ -5,6 +5,10 @@
 as host, user, port, and package lists is preserved when generated plan items
 are executed by Swamp workflows.
 
+**Fixed:** Aggregated pacman package tasks now retain their non-package
+prerequisites, and package removals remain independent tasks instead of being
+folded into collectors.
+
 **Added:** Capability catalog entries can declare public endpoint exposure metadata, including backend and public listeners, schemes, and TLS behavior.
 
 **Changed:** Rendered `model_method` plan items now follow Swamp's workflow task

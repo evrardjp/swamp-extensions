@@ -207,6 +207,7 @@ function isPackageCollector(spec: Capability): boolean {
   return spec.implementation.type === "model_method" &&
     spec.implementation.modelType === "@adam/cfgmgmt/pacman" &&
     spec.implementation.methodName === "apply" &&
+    spec.implementation.globalArgs.ensure !== "absent" &&
     pacmanPackagesFor(spec).length === 0;
 }
 
@@ -233,6 +234,7 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
   const requested: Record<string, string[]> = {};
   const resolved: Record<string, string[]> = {};
   const itemsByKey = new Map<string, PlanItem>();
+  const requirementsByKey = new Map<string, string[]>();
   const packageOnlyCaps = new Set<string>();
   const packageCollectors = new Set<string>();
   for (const [name, spec] of catalog) {
@@ -259,22 +261,15 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
       )
     ) {
       const collectorSpec = catalog.get(collector)!;
+      const packageCapabilities = resolved[vm.name].filter((cap) => {
+        const spec = catalog.get(cap);
+        return spec && packageOnlyCaps.has(cap) &&
+          packageCollectorDeps(spec, catalog).includes(collector);
+      });
       const collectorPackages = uniqueSorted(
-        resolved[vm.name].flatMap((cap) => {
-          const spec = catalog.get(cap);
-          if (!spec) return [];
-          const implementation = spec.implementation;
-          if (
-            implementation.type !== "model_method" ||
-            implementation.modelType !== "@adam/cfgmgmt/pacman" ||
-            implementation.methodName !== "apply" ||
-            !Array.isArray(implementation.globalArgs.packages) ||
-            implementation.globalArgs.packages.length === 0
-          ) return [];
-          return implementation.globalArgs.packages.filter((
-            pkg,
-          ): pkg is string => typeof pkg === "string");
-        }),
+        packageCapabilities.flatMap((cap) =>
+          pacmanPackagesFor(catalog.get(cap)!)
+        ),
       );
       const implementation = materializeImplementation(
         collectorSpec.implementation,
@@ -297,6 +292,17 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
         capability: collector,
         implementation,
       });
+      requirementsByKey.set(
+        `${vm.name}:${collector}`,
+        uniqueSorted([
+          ...collectorSpec.requires,
+          ...packageCapabilities.flatMap((cap) =>
+            catalog.get(cap)!.requires.filter((dep) =>
+              !packageCollectors.has(dep)
+            )
+          ),
+        ]),
+      );
     }
     for (const cap of resolved[vm.name]) {
       const spec = catalog.get(cap);
@@ -325,7 +331,8 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
       const item = itemsByKey.get(key)!;
       let depsSatisfied = false;
       const spec = catalog.get(item.capability)!;
-      depsSatisfied = spec.requires.every((dep) =>
+      const requirements = requirementsByKey.get(key) ?? spec.requires;
+      depsSatisfied = requirements.every((dep) =>
         packageOnlyCaps.has(dep)
           ? packageCollectorDeps(catalog.get(dep)!, catalog).every((
             collector,
