@@ -3,6 +3,9 @@
 **Fixed:** Failed qcow2 or cloud-init ISO creation no longer leaves partial
 artifacts that later `prepare` runs mistake for completed files.
 
+**Fixed:** Concurrent `prepare` runs no longer delete or overwrite an overlay
+disk successfully created by another invocation.
+
 **Added:** Configurable ordered Arch Linux pacman mirrors in generated
 cloud-init seed images, with Belgian and German mirrors as defaults.
 
