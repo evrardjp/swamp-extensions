@@ -9,6 +9,7 @@ const DenoFs = {
   open: (p: string, o: Deno.OpenOptions) => Deno.open(p, o),
   writeFile: (p: string, d: Uint8Array) => Deno.writeFile(p, d),
   readTextFile: (p: string) => Deno.readTextFile(p),
+  link: (oldpath: string, newpath: string) => Deno.link(oldpath, newpath),
   remove: (p: string) => Deno.remove(p),
   env: Deno.env,
 };
@@ -343,6 +344,7 @@ export const model = {
         const diskStat = await DenoFs.stat(diskPath).catch(() => null);
         if (!diskStat) {
           await log(`Creating ${diskSizeGb}G qcow2 overlay at ${diskPath}…`);
+          const temporaryDiskPath = `${diskPath}.${crypto.randomUUID()}.tmp`;
           const proc = new DenoCmd("qemu-img", {
             args: [
               "create",
@@ -352,23 +354,32 @@ export const model = {
               baseImagePath,
               "-F",
               "qcow2",
-              diskPath,
+              temporaryDiskPath,
               `${diskSizeGb}G`,
             ],
             stdout: "piped",
             stderr: "piped",
           });
-          const result = await proc.output();
-          if (result.code !== 0) {
-            await DenoFs.remove(diskPath).catch(() => {});
-            throw new Error(
-              `qemu-img failed (exit ${result.code}): ${
-                new TextDecoder().decode(result.stderr).slice(-500)
-              }`,
-            );
+          try {
+            const result = await proc.output();
+            if (result.code !== 0) {
+              throw new Error(
+                `qemu-img failed (exit ${result.code}): ${
+                  new TextDecoder().decode(result.stderr).slice(-500)
+                }`,
+              );
+            }
+            try {
+              await DenoFs.link(temporaryDiskPath, diskPath);
+              diskCreated = true;
+              await log(`Overlay disk created: ${diskPath}`);
+            } catch (err) {
+              if (!(await DenoFs.stat(diskPath).catch(() => null))) throw err;
+              await log(`Overlay disk already present: ${diskPath}`);
+            }
+          } finally {
+            await DenoFs.remove(temporaryDiskPath).catch(() => {});
           }
-          diskCreated = true;
-          await log(`Overlay disk created: ${diskPath}`);
         } else {
           await log(`Overlay disk already present: ${diskPath}`);
         }
