@@ -1,0 +1,34 @@
+id: c5d4ef8d-6619-46ed-9e9b-ee93985ad583
+name: "@evrardjp/opencode-session-ingest"
+description: Ingest a verified OpenCode exporter webhook payload into Swamp
+tags:
+  opencode: session-archive
+inputs:
+  type: object
+  properties:
+    payload:
+      type: object
+  required:
+    - payload
+trigger:
+  inputs:
+    payload: "${{ webhook.body }}"
+jobs:
+  - name: main
+    description: Persist metadata and an optional native OpenCode archive
+    steps:
+      - name: ingest
+        description: Validate and store the OpenCode export
+        task:
+          type: model_method
+          modelType: "@evrardjp/opencode-session-archive"
+          modelName: opencode-sessions
+          methodName: ingest
+          inputs:
+            payload: "${{ inputs.payload }}"
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+version: 1

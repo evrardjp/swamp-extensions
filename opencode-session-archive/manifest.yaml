@@ -1,0 +1,30 @@
+manifestVersion: 1
+name: "@evrardjp/opencode-session-archive"
+version: "2026.07.17.1"
+description: >-
+  OpenCode session metadata analytics and infinite-lifetime native conversation
+  archives, with webhook ingestion, an OpenCode exporter plugin, and an overview report.
+repository: "https://github.com/evrardjp/swamp-extensions"
+paths:
+  base: manifest
+models:
+  - opencode_session_archive.ts
+reports:
+  - opencode_session_overview.ts
+workflows:
+  - workflows/workflow-c5d4ef8d-6619-46ed-9e9b-ee93985ad583.yaml
+vaults: []
+drivers: []
+datastores: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+  - opencode/opencode_swamp_exporter.ts
+labels:
+  - opencode
+  - sessions
+  - analytics
+  - archive
+  - webhook
+  - privacy
+dependencies: []

@@ -10,6 +10,13 @@ relative to that extension directory.
 
 ```text
 swamp-extensions/
+  opencode-session-archive/
+    manifest.yaml
+    README.md
+    opencode_session_archive.ts
+    opencode_session_overview.ts
+    workflows/
+    opencode/
   pi-session-telemetry/
     manifest.yaml
     README.md
@@ -49,6 +56,12 @@ This is preferable to one giant manifest because each extension can be versioned
 quality-checked, reviewed, and published independently.
 
 ## Extensions
+
+### `@evrardjp/opencode-session-archive`
+
+Long-term OpenCode session analytics and native, re-importable conversation
+archives. Includes signed webhook ingestion, privacy controls, and a session
+overview report; the companion OpenCode exporter remains opt-in.
 
 ### `@evrardjp/pi-session-telemetry`
 
