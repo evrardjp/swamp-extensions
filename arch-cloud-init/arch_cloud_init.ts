@@ -150,6 +150,10 @@ const DefaultPacmanMirrors = [
   "https://mirror.netcologne.de/archlinux/$repo/os/$arch",
   "https://ftp.halifax.rwth-aachen.de/archlinux/$repo/os/$arch",
 ];
+const PacmanMirrorsSchema = z.array(
+  z.string().url().regex(/^\S+$/, "Mirror URLs must not contain whitespace"),
+).min(1).default(DefaultPacmanMirrors);
+
 function pacmanMirrorlist(mirrors: string[]): string {
   return [
     "## Managed by Swamp arch-cloud-init.",
@@ -221,9 +225,7 @@ const GlobalArgsSchema = z.object({
   extraRuncmd: z.array(z.string()).default([]).describe(
     "Additional cloud-init runcmd entries appended after enabling sshd",
   ),
-  pacmanMirrors: z.array(
-    z.string().url().regex(/^\S+$/, "Mirror URLs must not contain whitespace"),
-  ).min(1).default(DefaultPacmanMirrors).describe(
+  pacmanMirrors: PacmanMirrorsSchema.describe(
     "Ordered Arch Linux pacman mirrors written to /etc/pacman.d/mirrorlist during cloud-init",
   ),
   fileAclUser: z.string().optional().describe(
