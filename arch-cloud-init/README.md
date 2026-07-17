@@ -18,7 +18,7 @@ The `prepare` method:
 1. Downloads the Arch Linux cloud image if the configured base image is absent.
 2. Creates a qcow2 overlay disk for one VM.
 3. Generates a NoCloud seed ISO with hostname, static network config, one SSH
-   user, `openssh`, and `sshd` enabled.
+   user, an ordered pacman mirrorlist, `openssh`, and `sshd` enabled.
 4. Optionally appends extra Arch-specific `runcmd` entries.
 5. Optionally grants a local user read/write ACLs on the image artifacts.
 
@@ -36,6 +36,8 @@ globalArguments:
   diskSizeGb: 20
   imagesDir: /var/lib/libvirt/images
   baseImagePath: /var/lib/libvirt/images/arch-cloud-base.qcow2
+  pacmanMirrors:
+    - https://geo.mirror.pkgbuild.com/$repo/os/$arch
   extraRuncmd:
     - pacman-key --init
     - pacman-key --populate archlinux
@@ -45,6 +47,9 @@ globalArguments:
 ```bash
 swamp model method run demo-image-prep prepare
 ```
+
+The method leaves an existing cloud-init ISO unchanged. Remove the existing ISO
+before rerunning `prepare` when changing seed settings such as `pacmanMirrors`.
 
 For reusable non-Arch workflows, prefer composing generic image prep and generic
 NoCloud ISO generation instead of this wrapper.

@@ -145,6 +145,53 @@ export function makeCloudInitIso(files: Array<[string, string]>): Uint8Array {
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
+const DefaultPacmanMirrors = [
+  "https://archlinux.cu.be/$repo/os/$arch",
+  "https://mirror.netcologne.de/archlinux/$repo/os/$arch",
+  "https://ftp.halifax.rwth-aachen.de/archlinux/$repo/os/$arch",
+];
+function pacmanMirrorlist(mirrors: string[]): string {
+  return [
+    "## Managed by Swamp arch-cloud-init.",
+    "## Prefer Belgian and German Arch Linux mirrors for local lab VMs.",
+    ...mirrors.map((mirror) => `Server = ${mirror}`),
+    "",
+  ].join("\n");
+}
+
+/** Render the cloud-config user-data installed in the NoCloud seed image. */
+export function makeCloudInitUserData(args: {
+  sshUser: string;
+  sshPubKey: string;
+  pacmanMirrors: string[];
+  extraRuncmd: string[];
+}): string {
+  return [
+    "#cloud-config",
+    "users:",
+    `  - name: ${args.sshUser}`,
+    "    sudo: ALL=(ALL) NOPASSWD:ALL",
+    "    groups: [wheel]",
+    "    shell: /bin/bash",
+    "    ssh_authorized_keys:",
+    `      - ${args.sshPubKey}`,
+    "write_files:",
+    "  - path: /etc/pacman.d/mirrorlist",
+    "    owner: root:root",
+    "    permissions: '0644'",
+    "    content: |",
+    ...pacmanMirrorlist(args.pacmanMirrors).split("\n").map((line) =>
+      `      ${line}`
+    ),
+    "packages:",
+    "  - openssh",
+    "runcmd:",
+    "  - systemctl enable --now sshd",
+    ...args.extraRuncmd.map((cmd) => `  - ${cmd}`),
+    "",
+  ].join("\n");
+}
+
 const GlobalArgsSchema = z.object({
   vmName: z.string().describe(
     "VM name — used as prefix for disk and ISO filenames",
@@ -174,6 +221,11 @@ const GlobalArgsSchema = z.object({
   extraRuncmd: z.array(z.string()).default([]).describe(
     "Additional cloud-init runcmd entries appended after enabling sshd",
   ),
+  pacmanMirrors: z.array(
+    z.string().url().regex(/^\S+$/, "Mirror URLs must not contain whitespace"),
+  ).min(1).default(DefaultPacmanMirrors).describe(
+    "Ordered Arch Linux pacman mirrors written to /etc/pacman.d/mirrorlist during cloud-init",
+  ),
   fileAclUser: z.string().optional().describe(
     "Optional user to grant rw ACLs on generated image files, e.g. qemu",
   ),
@@ -196,7 +248,7 @@ const PrepResultSchema = z.object({
 /** Arch Linux cloud-init image prep: downloads base image, creates qcow2 overlay, and generates NoCloud seed ISO. Idempotent — skips steps that are already complete. */
 export const model = {
   type: "@evrardjp/arch-cloud-init",
-  version: "2026.06.29.1",
+  version: "2026.07.17.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     prep: {
@@ -235,15 +287,15 @@ export const model = {
           baseImagePath,
           baseImageUrl,
           extraRuncmd,
+          pacmanMirrors,
           fileAclUser,
         } = context.globalArgs;
 
         const diskPath = `${imagesDir}/${vmName}.qcow2`;
         const isoPath = `${imagesDir}/${vmName}-cloud-init.iso`;
-        const resolvedKeyPath = sshPubKeyPath.replace(
-          /^~/,
-          DenoFs.env.get("HOME") ?? "",
-        );
+        const resolvedKeyPath = sshPubKeyPath.startsWith("~")
+          ? sshPubKeyPath.replace(/^~/, DenoFs.env.get("HOME") ?? "")
+          : sshPubKeyPath;
 
         const logWriter = context.createFileWriter("log", "prepare");
         const log = async (msg: string) => {
@@ -306,6 +358,7 @@ export const model = {
           });
           const result = await proc.output();
           if (result.code !== 0) {
+            await DenoFs.remove(diskPath).catch(() => {});
             throw new Error(
               `qemu-img failed (exit ${result.code}): ${
                 new TextDecoder().decode(result.stderr).slice(-500)
@@ -340,22 +393,12 @@ export const model = {
             "",
           ].join("\n");
 
-          const userData = [
-            "#cloud-config",
-            "users:",
-            `  - name: ${sshUser}`,
-            "    sudo: ALL=(ALL) NOPASSWD:ALL",
-            "    groups: [wheel]",
-            "    shell: /bin/bash",
-            "    ssh_authorized_keys:",
-            `      - ${sshPubKey}`,
-            "packages:",
-            "  - openssh",
-            "runcmd:",
-            "  - systemctl enable --now sshd",
-            ...extraRuncmd.map((cmd) => `  - ${cmd}`),
-            "",
-          ].join("\n");
+          const userData = makeCloudInitUserData({
+            sshUser,
+            sshPubKey,
+            pacmanMirrors,
+            extraRuncmd,
+          });
 
           await log(`Generating cloud-init ISO at ${isoPath}…`);
           const isoBytes = makeCloudInitIso([
@@ -363,7 +406,16 @@ export const model = {
             ["network-config", networkConfig],
             ["user-data", userData],
           ]);
-          await DenoFs.writeFile(isoPath, isoBytes);
+          try {
+            await DenoFs.writeFile(isoPath, isoBytes);
+          } catch (err) {
+            await DenoFs.remove(isoPath).catch(() => {});
+            throw new Error(
+              `Cloud-init ISO write failed and partial file removed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
           isoCreated = true;
           await log(
             `Cloud-init ISO created: ${isoPath} (${isoBytes.length} bytes)`,
