@@ -144,7 +144,7 @@ Deno.test("plan aggregates pacman requirements and preserves non-package capabil
       },
       {
         name: "packages-installation",
-        requires: ["ssh"],
+        requires: [],
         implementation: {
           type: "model_method" as const,
           modelType: "@adam/cfgmgmt/pacman",
@@ -165,7 +165,7 @@ Deno.test("plan aggregates pacman requirements and preserves non-package capabil
       },
       {
         name: "base",
-        requires: ["packages-installation"],
+        requires: ["ssh", "packages-installation"],
         implementation: {
           type: "model_method" as const,
           modelType: "@adam/cfgmgmt/pacman",
@@ -228,6 +228,61 @@ Deno.test("plan aggregates pacman requirements and preserves non-package capabil
     nodeIdentityFile: "~/.ssh/id_ed25519",
     become: true,
     becomeUser: "root",
+  });
+});
+
+Deno.test("plan keeps package removals as independent tasks", async () => {
+  const { writes, context } = recordingContext();
+
+  await model.methods.plan.execute({
+    vms: [{
+      name: "node1",
+      ipAddress: "192.0.2.42",
+      sshUser: "admin",
+      capabilities: ["packages-installation", "remove-foo"],
+    }],
+    capabilities: [
+      {
+        name: "packages-installation",
+        requires: [],
+        implementation: {
+          type: "model_method" as const,
+          modelType: "@adam/cfgmgmt/pacman",
+          modelName: "packages",
+          methodName: "apply",
+          globalArgs: { packages: [], ensure: "present" },
+          inputs: {},
+        },
+      },
+      {
+        name: "remove-foo",
+        requires: [],
+        implementation: {
+          type: "model_method" as const,
+          modelType: "@adam/cfgmgmt/pacman",
+          modelName: "remove-foo",
+          methodName: "apply",
+          globalArgs: { packages: ["foo"], ensure: "absent" },
+          inputs: {},
+        },
+      },
+    ],
+  }, context as never);
+
+  const waves = writes[0].data.waves as Array<{
+    items: Array<{
+      capability: string;
+      implementation: { globalArgs: Record<string, unknown> };
+    }>;
+  }>;
+  assertEquals(waves[0].items.map((item) => item.capability), [
+    "packages-installation",
+    "remove-foo",
+  ]);
+  assertEquals(waves[0].items[0].implementation.globalArgs.packages, []);
+  assertEquals(waves[0].items[1].implementation.globalArgs, {
+    packages: ["foo"],
+    ensure: "absent",
   });
 });
 
