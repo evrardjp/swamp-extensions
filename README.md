@@ -10,6 +10,10 @@ relative to that extension directory.
 
 ```text
 swamp-extensions/
+  caddy/
+  capability-caddy-sites/
+  guildwars-kamadan/
+  kind-cluster-pool/
   opencode-session-archive/
     manifest.yaml
     README.md
@@ -56,6 +60,22 @@ This is preferable to one giant manifest because each extension can be versioned
 quality-checked, reviewed, and published independently.
 
 ## Extensions
+
+### `@evrardjp/caddy`
+
+Generic Caddy JSON rendering, validation, and remote Docker deployment.
+
+### `@evrardjp/capability-caddy-sites`
+
+Adapter from capability catalog exposure metadata to generic Caddy sites.
+
+### `@evrardjp/guildwars-kamadan`
+
+Guild Wars Kamadan trade-feed ingestion and market aggregation.
+
+### `@evrardjp/kind-cluster-pool`
+
+Reservable and self-reconciling pool of local kind test clusters.
 
 ### `@evrardjp/opencode-session-archive`
 

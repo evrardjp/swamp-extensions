@@ -1,0 +1,29 @@
+manifestVersion: 1
+name: "@evrardjp/kind-cluster-pool"
+version: "2026.07.17.1"
+description: >-
+  Desired-size pool of local kind clusters with reserve, release, reconciliation,
+  and status operations for test infrastructure.
+repository: "https://github.com/evrardjp/swamp-extensions"
+paths:
+  base: manifest
+models:
+  - kind_cluster_pool.ts
+reports: []
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+labels:
+  - kind
+  - kubernetes
+  - cluster-pool
+  - testing
+  - infrastructure
+platforms:
+  - linux-x86_64
+  - linux-aarch64
+dependencies: []
