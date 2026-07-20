@@ -3,7 +3,14 @@ import { model } from "./guildwars_kamadan.ts";
 
 Deno.test("guildwars-kamadan exposes ingestion and aggregation methods", () => {
   assertEquals(model.type, "@evrardjp/guildwars-kamadan");
-  for (const method of ["captureLiveFeed", "drainLiveFeed", "syncItemCatalog", "aggregateMarketValues"]) {
+  for (
+    const method of [
+      "captureLiveFeed",
+      "drainLiveFeed",
+      "syncItemCatalog",
+      "aggregateMarketValues",
+    ]
+  ) {
     assert(method in model.methods);
   }
 });

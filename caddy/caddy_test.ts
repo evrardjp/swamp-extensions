@@ -3,7 +3,14 @@ import { model } from "./caddy.ts";
 
 Deno.test("caddy exposes render, validation, and apply methods", () => {
   assertEquals(model.type, "@evrardjp/caddy");
-  for (const method of ["renderReverseProxy", "validateConfig", "applyConfig", "applyReverseProxy"]) {
+  for (
+    const method of [
+      "renderReverseProxy",
+      "validateConfig",
+      "applyConfig",
+      "applyReverseProxy",
+    ]
+  ) {
     assert(method in model.methods);
   }
 });

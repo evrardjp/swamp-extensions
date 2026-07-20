@@ -9,7 +9,10 @@ Deno.test("kind-cluster-pool exposes its lifecycle methods", () => {
 });
 
 Deno.test("kind-cluster-pool applies safe naming defaults", () => {
-  const parsed = model.globalArguments.parse({ n: 2, kindConfig: "kind: Cluster" });
+  const parsed = model.globalArguments.parse({
+    n: 2,
+    kindConfig: "kind: Cluster",
+  });
   assertEquals(parsed.clusterNamePrefix, "swamp-pool");
   assertEquals(parsed.kindBinary, "kind");
 });
