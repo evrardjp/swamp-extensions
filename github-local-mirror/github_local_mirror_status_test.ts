@@ -24,6 +24,8 @@ Deno.test("mirror status report summarizes stored data", async () => {
         issueCount: 3,
         eventCount: 4,
         checkRunCount: 5,
+        complete: false,
+        errors: [{ component: "activityEvent", error: "budget exhausted" }],
       },
     ],
   ]);
@@ -52,6 +54,8 @@ Deno.test("mirror status report summarizes stored data", async () => {
 
   assertStringIncludes(result.markdown, "Repository: `owner/repo`");
   assertStringIncludes(result.markdown, "PRs synced in latest run: 2");
+  assertStringIncludes(result.markdown, "Latest sync complete: false");
+  assertStringIncludes(result.markdown, "budget exhausted");
   assertStringIncludes(result.markdown, "| syncRunSummary | 1 |");
 });
 

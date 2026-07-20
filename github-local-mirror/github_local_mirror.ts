@@ -21,9 +21,19 @@ const GlobalArgsSchema = z.object({
   syncOverlapMinutes: z.number().int().nonnegative().default(5),
   firstSyncSince: z.string().optional(),
   knownRemotes: z.record(z.string(), z.string()).default({}),
+  timelineCodeGranularity: z.enum(["observed-push", "commit"]).default(
+    "observed-push",
+  ),
+  needsClarificationLabels: z.array(z.string()).default([
+    "needs-info",
+    "needs-information",
+    "needs-clarification",
+  ]),
+  maxApiPages: z.number().int().positive().max(1000).default(100),
 });
 
-type GlobalArgs = z.infer<typeof GlobalArgsSchema>;
+type GlobalArgs = z.input<typeof GlobalArgsSchema>;
+type ParsedGlobalArgs = z.output<typeof GlobalArgsSchema>;
 type WriteResource = (
   specName: string,
   name: string,
@@ -68,6 +78,7 @@ type GhIssue = {
   updated_at?: string;
   closed_at?: string | null;
   html_url?: string;
+  body?: string | null;
   pull_request?: unknown;
 };
 type GhPr = GhIssue & {
@@ -79,6 +90,9 @@ type GhPr = GhIssue & {
   additions?: number;
   deletions?: number;
   changed_files?: number;
+  requested_reviewers?: GhUser[];
+  mergeable?: boolean | null;
+  mergeable_state?: string;
 };
 type GhComment = {
   id?: string | number;
@@ -87,6 +101,9 @@ type GhComment = {
   html_url?: string;
   created_at?: string;
   path?: string;
+  line?: number | null;
+  side?: string | null;
+  commit_id?: string;
 };
 type GhTimelineEvent = {
   id?: string | number;
@@ -95,6 +112,7 @@ type GhTimelineEvent = {
   html_url?: string;
   state?: string;
   created_at?: string;
+  [key: string]: unknown;
 };
 type GhReview = GhComment & {
   state?: string;
@@ -121,6 +139,26 @@ type GhCheckRun = {
   completed_at?: string | null;
 };
 type GhCheckRuns = { check_runs?: GhCheckRun[] };
+type GhCommit = {
+  sha: string;
+  parents?: Array<{ sha?: string }>;
+  commit?: {
+    message?: string;
+    author?: { name?: string; email?: string; date?: string | null };
+    committer?: { date?: string | null };
+  };
+  html_url?: string;
+};
+
+const ChangedFileSchema = z.object({
+  path: z.string(),
+  previousPath: z.string().optional(),
+  status: z.string(),
+  additions: z.number().int().nonnegative().optional(),
+  deletions: z.number().int().nonnegative().optional(),
+}).passthrough();
+
+type ChangedFile = z.infer<typeof ChangedFileSchema>;
 
 type PrRecord = {
   number: number;
@@ -142,6 +180,8 @@ type PrRecord = {
   remoteName?: string;
   updatedAt?: string;
   observedAt: string;
+  body?: string;
+  url?: string;
 };
 
 type WorktreeRecord = {
@@ -187,6 +227,13 @@ const PrSnapshotSchema = z.object({
   draft: z.boolean().optional(),
   merged: z.boolean().optional(),
   author: z.string().optional(),
+  body: z.string().optional(),
+  url: z.string().optional(),
+  labels: z.array(z.string()).default([]),
+  requestedReviewers: z.array(z.string()).default([]),
+  reviewDecision: z.string().optional(),
+  mergeable: z.boolean().nullable().optional(),
+  mergeableState: z.string().optional(),
   baseRef: z.string().optional(),
   baseSha: z.string().optional(),
   headOwner: z.string().optional(),
@@ -211,11 +258,20 @@ const PrRevisionSchema = z.object({
   prNumber: z.number().int().positive(),
   baseSha: z.string().optional(),
   headSha: z.string().min(1),
+  previousHeadSha: z.string().optional(),
   patchHeadShort: z.string(),
   observedAt: IsoDateTime,
   gitObjectPath: z.string(),
   patchPath: z.string().optional(),
   filesPath: z.string().optional(),
+  changedFiles: z.array(ChangedFileSchema).default([]),
+}).passthrough();
+
+const PrHeadStateSchema = z.object({
+  repo: z.string(),
+  prNumber: z.number().int().positive(),
+  headSha: z.string().regex(/^[0-9a-f]{40,64}$/i),
+  fetchedAt: IsoDateTime,
 }).passthrough();
 
 const PrFileSnapshotSchema = z.object({
@@ -240,6 +296,8 @@ const IssueSnapshotSchema = z.object({
   title: z.string().optional(),
   state: z.string().optional(),
   author: z.string().optional(),
+  body: z.string().optional(),
+  url: z.string().optional(),
   labels: z.array(z.string()).default([]),
   createdAt: z.string().optional(),
   updatedAt: z.string().optional(),
@@ -258,9 +316,72 @@ const ActivityEventSchema = z.object({
   body: z.string().optional(),
   url: z.string().optional(),
   filePath: z.string().optional(),
+  line: z.number().int().optional(),
+  side: z.string().optional(),
+  commitSha: z.string().optional(),
+  payload: z.record(z.string(), z.unknown()).optional(),
   state: z.string().optional(),
   createdAt: z.string(),
   syncedAt: IsoDateTime,
+}).passthrough();
+
+const SubjectReferenceSchema = z.object({
+  repo: z.string(),
+  sourceType: z.enum(["issue", "pr"]),
+  sourceNumber: z.number().int().positive(),
+  targetRepo: z.string(),
+  targetType: z.enum(["issue", "pr", "unknown"]),
+  targetNumber: z.number().int().positive(),
+  url: z.string().optional(),
+  relationship: z.enum(["closing", "cross-reference", "text"]),
+  external: z.boolean(),
+  createdAt: z.string().optional(),
+  syncedAt: IsoDateTime,
+}).passthrough();
+
+const PrCommitSchema = z.object({
+  repo: z.string(),
+  prNumber: z.number().int().positive(),
+  sha: z.string().min(1),
+  parentShas: z.array(z.string()),
+  message: z.string().optional(),
+  authorName: z.string().optional(),
+  authorEmail: z.string().optional(),
+  authoredAt: z.string().nullable().optional(),
+  committedAt: z.string().nullable().optional(),
+  url: z.string().optional(),
+  changedFiles: z.array(ChangedFileSchema).default([]),
+  syncedAt: IsoDateTime,
+}).passthrough();
+
+const CollectionStatusSchema = z.object({
+  repo: z.string(),
+  subjectType: z.enum(["issue", "pr", "repo"]).optional(),
+  subjectNumber: z.number().int().positive().optional(),
+  component: z.enum([
+    "prSnapshot",
+    "checkRunSnapshot",
+    "activityEvent",
+    "prCommit",
+  ]),
+  complete: z.boolean(),
+  error: z.string().optional(),
+  itemCount: z.number().int().nonnegative(),
+  syncedAt: IsoDateTime,
+}).passthrough();
+
+const PrAnalysisEvidenceSchema = z.object({
+  repo: z.string(),
+  prNumber: z.number().int().positive(),
+  baseSha: z.string().optional(),
+  headSha: z.string().min(1),
+  generatedAt: IsoDateTime,
+  generator: z.string().min(1),
+  sections: z.object({
+    codePathWalkthrough: z.string().min(1),
+    reviewAttentionMap: z.string().min(1),
+  }),
+  evidenceRefs: z.array(z.string()),
 }).passthrough();
 
 const CheckRunSchema = z.object({
@@ -301,6 +422,8 @@ const WorktreeAnalysisSchema = z.object({
   isDirty: z.boolean(),
   aheadCommitCount: z.number().int().nonnegative(),
   missing: z.boolean(),
+  analysisComplete: z.boolean().default(true),
+  errors: z.array(z.string()).default([]),
   recommendedAction: z.string(),
   analyzedAt: IsoDateTime,
 }).passthrough();
@@ -314,6 +437,17 @@ const SyncRunSummarySchema = z.object({
   eventCount: z.number().int().nonnegative(),
   checkRunCount: z.number().int().nonnegative(),
   gitFetched: z.boolean(),
+  githubStartedAt: IsoDateTime.optional(),
+  githubFinishedAt: IsoDateTime.optional(),
+  gitFetchStartedAt: IsoDateTime.optional(),
+  gitFetchFinishedAt: IsoDateTime.optional(),
+  errors: z.array(z.object({
+    component: z.string(),
+    subjectType: z.string().optional(),
+    subjectNumber: z.number().int().positive().optional(),
+    error: z.string(),
+  })).default([]),
+  complete: z.boolean().nullable().default(null),
   cursorPrUpdatedAt: z.string().optional(),
   cursorIssueUpdatedAt: z.string().optional(),
 }).passthrough();
@@ -355,6 +489,15 @@ function shortSha(sha: string): string {
   return sha.slice(0, 12);
 }
 
+async function hashPrefix(value: string): Promise<string> {
+  const bytes = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return Array.from(new Uint8Array(bytes).slice(0, 10))
+    .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function remoteNameForOwner(owner: string): string {
   return safeName("fork", [owner]);
 }
@@ -369,9 +512,23 @@ function githubApiHeaders(g: GlobalArgs): HeadersInit {
   return headers;
 }
 
-async function gh<T>(g: GlobalArgs, path: string): Promise<T> {
+function deadlineSignal(deadlineMs?: number): AbortSignal | undefined {
+  if (!deadlineMs) return undefined;
+  const remaining = deadlineMs - Date.now();
+  if (remaining <= 0) {
+    return AbortSignal.abort(new Error("sync budget exhausted"));
+  }
+  return AbortSignal.timeout(remaining);
+}
+
+async function gh<T>(
+  g: GlobalArgs,
+  path: string,
+  deadlineMs?: number,
+): Promise<T> {
   const res = await fetch(`https://api.github.com${path}`, {
     headers: githubApiHeaders(g),
+    signal: deadlineSignal(deadlineMs),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -388,11 +545,15 @@ function parseNext(link: string | null): string | undefined {
   }
 }
 
+type PageResult<T> = { items: T[]; complete: boolean; error?: string };
+
 async function ghPages<T>(
-  g: GlobalArgs,
+  g: ParsedGlobalArgs,
   path: string,
   params: Record<string, string | number | undefined> = {},
-): Promise<T[]> {
+  extract: (value: unknown) => T[] = (value) => value as T[],
+  deadlineMs?: number,
+): Promise<PageResult<T>> {
   const url = new URL(`https://api.github.com${path}`);
   url.searchParams.set("per_page", "100");
   for (const [k, v] of Object.entries(params)) {
@@ -400,32 +561,107 @@ async function ghPages<T>(
   }
   const out: T[] = [];
   let next: string | undefined = url.toString();
-  while (next) {
-    const res = await fetch(next, { headers: githubApiHeaders(g) });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(
-        `GitHub ${res.status} for ${new URL(next).pathname}: ${
-          body.slice(0, 500)
-        }`,
-      );
+  for (let page = 0; next && page < g.maxApiPages; page++) {
+    if (deadlineMs && Date.now() > deadlineMs) {
+      return {
+        items: out,
+        complete: false,
+        error: `sync budget exhausted while collecting ${path}`,
+      };
     }
-    out.push(...(await res.json() as T[]));
-    next = parseNext(res.headers.get("link"));
+    try {
+      const res = await fetch(next, {
+        headers: githubApiHeaders(g),
+        signal: deadlineSignal(deadlineMs),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        return {
+          items: out,
+          complete: false,
+          error: `GitHub ${res.status} for ${new URL(next).pathname}: ${
+            body.slice(0, 500)
+          }`,
+        };
+      }
+      out.push(...extract(await res.json()));
+      next = parseNext(res.headers.get("link"));
+    } catch (err) {
+      return { items: out, complete: false, error: errorMessage(err) };
+    }
   }
-  return out;
+  if (next) {
+    return {
+      items: out,
+      complete: false,
+      error: `pagination exceeded maxApiPages=${g.maxApiPages} for ${path}`,
+    };
+  }
+  return { items: out, complete: true };
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+type SyncError = {
+  component: string;
+  subjectType?: string;
+  subjectNumber?: number;
+  error: string;
+};
+
+async function writeCollectionStatus(
+  ctx: Context,
+  component: "prSnapshot" | "checkRunSnapshot" | "activityEvent" | "prCommit",
+  complete: boolean,
+  itemCount: number,
+  syncedAt: string,
+  subjectType?: "issue" | "pr" | "repo",
+  subjectNumber?: number,
+  error?: string,
+): Promise<unknown> {
+  return await ctx.writeResource(
+    "collectionStatus",
+    safeName("collection", [subjectType ?? "repo", subjectNumber, component]),
+    {
+      repo: repoFullName(ctx.globalArgs),
+      subjectType,
+      subjectNumber,
+      component,
+      complete,
+      error,
+      itemCount,
+      syncedAt,
+    },
+  );
 }
 
 async function runGit(
   gitObjectPath: string,
   args: string[],
+  deadlineMs?: number,
 ): Promise<RunResult> {
-  const cmd = new Deno.Command("git", {
+  if (deadlineMs && Date.now() >= deadlineMs) {
+    throw new Error("sync budget exhausted before running git");
+  }
+  const child = new Deno.Command("git", {
     args: ["--git-dir", gitObjectPath, ...args],
     stdout: "piped",
     stderr: "piped",
+  }).spawn();
+  const timer = deadlineMs
+    ? setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // The process may have exited between the timer firing and kill.
+      }
+    }, Math.max(1, deadlineMs - Date.now()))
+    : undefined;
+  const out = await child.output().finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
   });
-  const out = await cmd.output();
   return {
     code: out.code,
     stdout: new TextDecoder().decode(out.stdout),
@@ -436,12 +672,65 @@ async function runGit(
 async function runGitOk(
   gitObjectPath: string,
   args: string[],
+  deadlineMs?: number,
 ): Promise<string> {
-  const res = await runGit(gitObjectPath, args);
+  const res = await runGit(gitObjectPath, args, deadlineMs);
   if (res.code !== 0) {
     throw new Error(`git ${args.join(" ")} failed: ${res.stderr.trim()}`);
   }
   return res.stdout;
+}
+
+async function changedFilesBetween(
+  gitObjectPath: string,
+  fromSha: string | undefined,
+  toSha: string,
+  deadlineMs?: number,
+): Promise<ChangedFile[]> {
+  const range = fromSha ? `${fromSha}..${toSha}` : toSha;
+  const commonArgs = fromSha ? [range] : ["--root", toSha];
+  const [names, stats] = await Promise.all([
+    runGitOk(gitObjectPath, [
+      "diff-tree",
+      "-r",
+      "-M",
+      "--name-status",
+      ...commonArgs,
+    ], deadlineMs),
+    runGitOk(gitObjectPath, [
+      "diff-tree",
+      "-r",
+      "-M",
+      "--numstat",
+      ...commonArgs,
+    ], deadlineMs),
+  ]);
+  const counts = new Map<string, { additions?: number; deletions?: number }>();
+  for (const line of stats.split("\n")) {
+    if (!line) continue;
+    const [added, deleted, ...pathParts] = line.split("\t");
+    const path = pathParts.at(-1);
+    if (!path) continue;
+    counts.set(path, {
+      additions: added === "-" ? undefined : Number(added),
+      deletions: deleted === "-" ? undefined : Number(deleted),
+    });
+  }
+  const files: ChangedFile[] = [];
+  for (const line of names.split("\n")) {
+    if (!line) continue;
+    const [rawStatus, firstPath, secondPath] = line.split("\t");
+    if (!rawStatus || !firstPath) continue;
+    const renamed = rawStatus.startsWith("R") || rawStatus.startsWith("C");
+    const path = renamed && secondPath ? secondPath : firstPath;
+    files.push({
+      path,
+      previousPath: renamed ? firstPath : undefined,
+      status: rawStatus,
+      ...counts.get(path),
+    });
+  }
+  return files;
 }
 
 async function ensureDir(path: string): Promise<void> {
@@ -480,6 +769,10 @@ function prRecordPath(g: GlobalArgs, pr: number): string {
   return `${g.artifactRoot}/prs/${pr}/current.json`;
 }
 
+function issueRecordPath(g: GlobalArgs, issue: number): string {
+  return `${g.artifactRoot}/issues/${issue}/current.json`;
+}
+
 function worktreeIndexPath(g: GlobalArgs): string {
   return `${g.artifactRoot}/worktrees/index.json`;
 }
@@ -506,17 +799,30 @@ async function ensureRemote(
   g: GlobalArgs,
   name: string,
   url: string,
+  deadlineMs?: number,
 ): Promise<void> {
-  const remotes = (await runGit(g.gitObjectPath, ["remote"])).stdout.split("\n")
+  const remotes = (await runGit(g.gitObjectPath, ["remote"], deadlineMs)).stdout
+    .split("\n")
     .map((s) => s.trim()).filter(Boolean);
   if (remotes.includes(name)) {
-    await runGitOk(g.gitObjectPath, ["remote", "set-url", name, url]);
+    await runGitOk(
+      g.gitObjectPath,
+      ["remote", "set-url", name, url],
+      deadlineMs,
+    );
     return;
   }
-  await runGitOk(g.gitObjectPath, ["remote", "add", name, url]);
+  await runGitOk(
+    g.gitObjectPath,
+    ["remote", "add", name, url],
+    deadlineMs,
+  );
 }
 
-async function ensureGitRepo(g: GlobalArgs): Promise<void> {
+async function ensureGitRepo(
+  g: ParsedGlobalArgs,
+  deadlineMs?: number,
+): Promise<void> {
   if (!await exists(g.gitObjectPath)) {
     throw new Error(
       `gitObjectPath ${g.gitObjectPath} does not exist; create it with git init --bare or provide an existing bare repo`,
@@ -524,14 +830,17 @@ async function ensureGitRepo(g: GlobalArgs): Promise<void> {
   }
   const originUrl = g.gitRemoteUrl ??
     `https://github.com/${g.owner}/${g.repo}.git`;
-  await ensureRemote(g, g.gitRemote, originUrl);
+  await ensureRemote(g, g.gitRemote, originUrl, deadlineMs);
   for (const [name, url] of Object.entries(g.knownRemotes)) {
-    await ensureRemote(g, name, url);
+    await ensureRemote(g, name, url, deadlineMs);
   }
 }
 
-async function fetchGit(g: GlobalArgs): Promise<void> {
-  await ensureGitRepo(g);
+async function fetchGit(
+  g: ParsedGlobalArgs,
+  deadlineMs?: number,
+): Promise<void> {
+  await ensureGitRepo(g, deadlineMs);
   await runGitOk(g.gitObjectPath, [
     "fetch",
     "--prune",
@@ -540,7 +849,27 @@ async function fetchGit(g: GlobalArgs): Promise<void> {
     "+refs/tags/*:refs/tags/*",
     "+refs/pull/*/head:refs/remotes/pull/*/head",
     "+refs/pull/*/merge:refs/remotes/pull/*/merge",
-  ]);
+  ], deadlineMs);
+}
+
+async function listMirroredPrHeads(
+  g: ParsedGlobalArgs,
+  deadlineMs?: number,
+): Promise<Array<{ prNumber: number; headSha: string }>> {
+  const output = await runGitOk(g.gitObjectPath, [
+    "for-each-ref",
+    "--format=%(refname) %(objectname)",
+    "refs/remotes/pull/*/head",
+  ], deadlineMs);
+  const heads: Array<{ prNumber: number; headSha: string }> = [];
+  for (const line of output.split("\n")) {
+    const match = line.match(
+      /^refs\/remotes\/pull\/(\d+)\/head ([0-9a-f]{40,64})$/i,
+    );
+    if (!match) continue;
+    heads.push({ prNumber: Number(match[1]), headSha: match[2] });
+  }
+  return heads;
 }
 
 async function exportPatch(
@@ -548,6 +877,7 @@ async function exportPatch(
   prNumber: number,
   baseSha: string | undefined,
   headSha: string | undefined,
+  deadlineMs?: number,
 ): Promise<string | undefined> {
   if (!baseSha || !headSha) return undefined;
   const dir = `${g.artifactRoot}/prs/${prNumber}/revisions/${headSha}`;
@@ -556,8 +886,12 @@ async function exportPatch(
   const diff = await runGit(g.gitObjectPath, [
     "diff",
     `${baseSha}...${headSha}`,
-  ]);
-  if (diff.code !== 0) return undefined;
+  ], deadlineMs);
+  if (diff.code !== 0) {
+    throw new Error(
+      `git diff ${baseSha}...${headSha} failed: ${diff.stderr.trim()}`,
+    );
+  }
   await ensureDir(dir);
   await Deno.writeTextFile(patchPath, diff.stdout);
   return patchPath;
@@ -594,15 +928,127 @@ function eventName(
   ]);
 }
 
+type SubjectKind = "issue" | "pr";
+
+async function writeTextReferences(
+  ctx: Context,
+  sourceType: SubjectKind,
+  sourceNumber: number,
+  text: string | null | undefined,
+  createdAt: string | undefined,
+  syncedAt: string,
+  seen: Set<string>,
+  relationshipOverride?: "cross-reference",
+): Promise<unknown[]> {
+  if (!text) return [];
+  const repo = repoFullName(ctx.globalArgs);
+  const candidates: Array<{
+    targetRepo: string;
+    targetType: SubjectKind | "unknown";
+    targetNumber: number;
+    url?: string;
+    index: number;
+  }> = [];
+  const occupied: Array<[number, number]> = [];
+  const urlPattern =
+    /https?:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/(issues|pull)\/(\d+)/gi;
+  for (const match of text.matchAll(urlPattern)) {
+    const index = match.index ?? 0;
+    occupied.push([index, index + match[0].length]);
+    candidates.push({
+      targetRepo: `${match[1]}/${match[2]}`,
+      targetType: match[3].toLowerCase() === "pull" ? "pr" : "issue",
+      targetNumber: Number(match[4]),
+      url: match[0],
+      index,
+    });
+  }
+  const qualifiedPattern = /\b([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)\b/g;
+  for (const match of text.matchAll(qualifiedPattern)) {
+    const index = match.index ?? 0;
+    if (occupied.some(([start, end]) => index >= start && index < end)) {
+      continue;
+    }
+    occupied.push([index, index + match[0].length]);
+    candidates.push({
+      targetRepo: `${match[1]}/${match[2]}`,
+      targetType: "unknown",
+      targetNumber: Number(match[3]),
+      index,
+    });
+  }
+  for (const match of text.matchAll(/(^|[^A-Za-z0-9_./-])#(\d+)\b/g)) {
+    const index = (match.index ?? 0) + match[1].length;
+    if (occupied.some(([start, end]) => index >= start && index < end)) {
+      continue;
+    }
+    candidates.push({
+      targetRepo: repo,
+      targetType: relationshipOverride ? "issue" : "unknown",
+      targetNumber: Number(match[2]),
+      index,
+    });
+  }
+  const handles: unknown[] = [];
+  for (const candidate of candidates) {
+    const prefix = text.slice(
+      Math.max(0, candidate.index - 24),
+      candidate.index,
+    );
+    const relationship = relationshipOverride ??
+      (/\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*$/i.test(prefix)
+        ? "closing"
+        : "text");
+    if (relationship === "closing") candidate.targetType = "issue";
+    const key = [
+      sourceType,
+      sourceNumber,
+      candidate.targetRepo.toLowerCase(),
+      candidate.targetType,
+      candidate.targetNumber,
+      relationship,
+    ].join(":");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    handles.push(
+      await ctx.writeResource(
+        "subjectReference",
+        safeName("reference", [
+          sourceType,
+          sourceNumber,
+          await hashPrefix(key),
+        ]),
+        {
+          repo,
+          sourceType,
+          sourceNumber,
+          targetRepo: candidate.targetRepo,
+          targetType: candidate.targetType,
+          targetNumber: candidate.targetNumber,
+          url: candidate.url,
+          relationship,
+          external: candidate.targetRepo.toLowerCase() !== repo.toLowerCase(),
+          createdAt,
+          syncedAt,
+        },
+      ),
+    );
+  }
+  return handles;
+}
+
 async function syncIssueDetails(
   ctx: Context,
   issue: GhIssue,
   eventCount: { value: number },
-): Promise<unknown[]> {
-  const g = ctx.globalArgs;
+  deadlineMs?: number,
+): Promise<{ handles: unknown[]; errors: SyncError[] }> {
+  const g = GlobalArgsSchema.parse(ctx.globalArgs);
   const repo = repoFullName(g);
   const handles: unknown[] = [];
   const syncedAt = nowIso();
+  const errors: SyncError[] = [];
+  const referenceKeys = new Set<string>();
   const labels = (issue.labels ?? []).map((l) =>
     typeof l === "string" ? l : l.name
   ).filter(Boolean);
@@ -616,6 +1062,8 @@ async function syncIssueDetails(
         title: issue.title,
         state: issue.state,
         author: issue.user?.login,
+        body: issue.body ?? undefined,
+        url: issue.html_url,
         labels,
         createdAt: issue.created_at,
         updatedAt: issue.updated_at,
@@ -624,11 +1072,34 @@ async function syncIssueDetails(
       },
     ),
   );
-  const comments = await ghPages<GhComment>(
+  await writeJsonFile(issueRecordPath(g, issue.number), {
+    number: issue.number,
+    title: issue.title,
+    state: issue.state,
+    body: issue.body ?? undefined,
+    url: issue.html_url,
+    updatedAt: issue.updated_at,
+    observedAt: syncedAt,
+  });
+  handles.push(
+    ...await writeTextReferences(
+      ctx,
+      "issue",
+      issue.number,
+      issue.body,
+      issue.created_at,
+      syncedAt,
+      referenceKeys,
+    ),
+  );
+  const commentsResult = await ghPages<GhComment>(
     g,
     `/repos/${g.owner}/${g.repo}/issues/${issue.number}/comments`,
+    {},
+    undefined,
+    deadlineMs,
   );
-  for (const c of comments) {
+  for (const c of commentsResult.items) {
     eventCount.value++;
     handles.push(
       await ctx.writeResource(
@@ -651,12 +1122,26 @@ async function syncIssueDetails(
         },
       ),
     );
+    handles.push(
+      ...await writeTextReferences(
+        ctx,
+        "issue",
+        issue.number,
+        c.body,
+        c.created_at,
+        syncedAt,
+        referenceKeys,
+      ),
+    );
   }
-  const timeline = await ghPages<GhTimelineEvent>(
+  const timelineResult = await ghPages<GhTimelineEvent>(
     g,
     `/repos/${g.owner}/${g.repo}/issues/${issue.number}/timeline`,
-  ).catch(() => []);
-  for (const [index, e] of timeline.entries()) {
+    {},
+    undefined,
+    deadlineMs,
+  );
+  for (const [index, e] of timelineResult.items.entries()) {
     if (!e.created_at) continue;
     eventCount.value++;
     handles.push(
@@ -678,34 +1163,85 @@ async function syncIssueDetails(
           summary: `${e.event ?? "timeline event"} on issue #${issue.number}`,
           url: e.html_url,
           state: e.state,
+          payload: e,
           createdAt: e.created_at,
           syncedAt,
         },
       ),
     );
+    if (e.event === "cross-referenced") {
+      handles.push(
+        ...await writeTextReferences(
+          ctx,
+          "issue",
+          issue.number,
+          JSON.stringify(e),
+          e.created_at,
+          syncedAt,
+          referenceKeys,
+          "cross-reference",
+        ),
+      );
+    }
   }
-  return handles;
+  const collectionErrors = [commentsResult, timelineResult]
+    .filter((result) => !result.complete)
+    .map((result) => result.error ?? "incomplete GitHub activity collection");
+  const error = collectionErrors.join("; ") || undefined;
+  if (error) {
+    errors.push({
+      component: "activityEvent",
+      subjectType: "issue",
+      subjectNumber: issue.number,
+      error,
+    });
+  }
+  handles.push(
+    await writeCollectionStatus(
+      ctx,
+      "activityEvent",
+      !error,
+      commentsResult.items.length + timelineResult.items.length,
+      syncedAt,
+      "issue",
+      issue.number,
+      error,
+    ),
+  );
+  return { handles, errors };
 }
 
 async function syncPrDetails(
   ctx: Context,
   listPr: GhPr,
   counters: { eventCount: number; checkRunCount: number },
-): Promise<unknown[]> {
-  const g = ctx.globalArgs;
+  deadlineMs?: number,
+): Promise<{ handles: unknown[]; errors: SyncError[] }> {
+  const g = GlobalArgsSchema.parse(ctx.globalArgs);
   const repo = repoFullName(g);
   const handles: unknown[] = [];
+  const errors: SyncError[] = [];
+  const referenceKeys = new Set<string>();
+  const eventIds = new Set<string>();
+  const previous = await readJsonFile<PrRecord | null>(
+    prRecordPath(g, listPr.number),
+    null,
+  );
   const pr = await gh<GhPr>(
     g,
     `/repos/${g.owner}/${g.repo}/pulls/${listPr.number}`,
+    deadlineMs,
   );
+  if (deadlineMs && Date.now() > deadlineMs) {
+    throw new Error(
+      `sync budget exhausted while collecting PR #${listPr.number}`,
+    );
+  }
   const syncedAt = nowIso();
   const headOwner = pr.head?.repo?.owner?.login;
   const remoteName = headOwner ? remoteNameForOwner(headOwner) : undefined;
   if (remoteName && pr.head?.repo?.ssh_url) {
-    await ensureRemote(g, remoteName, pr.head.repo.ssh_url).catch(() =>
-      undefined
-    );
+    await ensureRemote(g, remoteName, pr.head.repo.ssh_url, deadlineMs);
   }
   const prRecord: PrRecord = {
     number: pr.number,
@@ -727,46 +1263,39 @@ async function syncPrDetails(
     remoteName,
     updatedAt: pr.updated_at,
     observedAt: syncedAt,
+    body: pr.body ?? undefined,
+    url: pr.html_url,
   };
-  await writeJsonFile(prRecordPath(g, pr.number), prRecord);
-  handles.push(
-    await ctx.writeResource("prSnapshot", safeName("pr", [pr.number]), {
-      repo,
-      number: pr.number,
-      title: pr.title,
-      state: pr.state,
-      draft: pr.draft,
-      merged: Boolean(pr.merged_at),
-      author: pr.user?.login,
-      baseRef: pr.base?.ref,
-      baseSha: pr.base?.sha,
-      headOwner,
-      headRepo: pr.head?.repo?.name,
-      headFullName: pr.head?.repo?.full_name,
-      headRef: pr.head?.ref,
-      headSha: pr.head?.sha,
-      maintainerCanModify: pr.maintainer_can_modify,
-      remoteName,
-      additions: pr.additions,
-      deletions: pr.deletions,
-      changedFiles: pr.changed_files,
-      createdAt: pr.created_at,
-      updatedAt: pr.updated_at,
-      closedAt: pr.closed_at,
-      mergedAt: pr.merged_at,
-      syncedAt,
-    }),
-  );
-  const patchPath = await exportPatch(g, pr.number, pr.base?.sha, pr.head?.sha);
-  const files = await ghPages<GhFile>(
-    g,
-    `/repos/${g.owner}/${g.repo}/pulls/${pr.number}/files`,
-  );
-  const filesPath = `${g.artifactRoot}/prs/${pr.number}/revisions/${
-    pr.head?.sha ?? "unknown"
-  }/files.json`;
-  await writeJsonFile(filesPath, files);
-  if (pr.head?.sha) {
+  const isNewHead = Boolean(pr.head?.sha && pr.head.sha !== previous?.headSha);
+  const filesResult = isNewHead
+    ? await ghPages<GhFile>(
+      g,
+      `/repos/${g.owner}/${g.repo}/pulls/${pr.number}/files`,
+      {},
+      undefined,
+      deadlineMs,
+    )
+    : { items: [], complete: true };
+  const patchPath = isNewHead
+    ? await exportPatch(
+      g,
+      pr.number,
+      pr.base?.sha,
+      pr.head?.sha,
+      deadlineMs,
+    )
+    : undefined;
+  const filesPath = isNewHead
+    ? `${g.artifactRoot}/prs/${pr.number}/revisions/${pr.head?.sha}/files.json`
+    : undefined;
+  if (filesPath) await writeJsonFile(filesPath, filesResult.items);
+  if (isNewHead && pr.head?.sha) {
+    const changedFiles = await changedFilesBetween(
+      g.gitObjectPath,
+      previous?.headSha ?? pr.base?.sha,
+      pr.head.sha,
+      deadlineMs,
+    );
     handles.push(
       await ctx.writeResource(
         "prRevision",
@@ -776,16 +1305,18 @@ async function syncPrDetails(
           prNumber: pr.number,
           baseSha: pr.base?.sha,
           headSha: pr.head.sha,
+          previousHeadSha: previous?.headSha,
           patchHeadShort: shortSha(pr.head.sha),
           observedAt: syncedAt,
           gitObjectPath: g.gitObjectPath,
           patchPath,
           filesPath,
+          changedFiles,
         },
       ),
     );
   }
-  for (const f of files) {
+  for (const f of filesResult.items) {
     const filePatchPath = await exportFilePatch(
       g,
       pr.number,
@@ -815,11 +1346,79 @@ async function syncPrDetails(
       ),
     );
   }
-  const reviews = await ghPages<GhReview>(
+  const reviewsResult = await ghPages<GhReview>(
     g,
     `/repos/${g.owner}/${g.repo}/pulls/${pr.number}/reviews`,
+    {},
+    undefined,
+    deadlineMs,
   );
-  for (const r of reviews) {
+  const latestReviewByUser = new Map<string, string>();
+  for (const review of reviewsResult.items) {
+    if (review.user?.login && review.state) {
+      latestReviewByUser.set(review.user.login, review.state.toLowerCase());
+    }
+  }
+  const latestReviewStates = [...latestReviewByUser.values()];
+  const reviewDecision = !reviewsResult.complete
+    ? undefined
+    : latestReviewStates.includes("changes_requested")
+    ? "CHANGES_REQUESTED"
+    : latestReviewStates.includes("approved")
+    ? "APPROVED"
+    : undefined;
+  handles.push(
+    await ctx.writeResource("prSnapshot", safeName("pr", [pr.number]), {
+      repo,
+      number: pr.number,
+      title: pr.title,
+      body: pr.body ?? undefined,
+      url: pr.html_url,
+      labels: (pr.labels ?? []).map((label) =>
+        typeof label === "string" ? label : label.name
+      ).filter(Boolean),
+      requestedReviewers: (pr.requested_reviewers ?? []).map((user) =>
+        user.login
+      ).filter(Boolean),
+      reviewDecision,
+      mergeable: pr.mergeable,
+      mergeableState: pr.mergeable_state,
+      state: pr.state,
+      draft: pr.draft,
+      merged: Boolean(pr.merged_at),
+      author: pr.user?.login,
+      baseRef: pr.base?.ref,
+      baseSha: pr.base?.sha,
+      headOwner,
+      headRepo: pr.head?.repo?.name,
+      headFullName: pr.head?.repo?.full_name,
+      headRef: pr.head?.ref,
+      headSha: pr.head?.sha,
+      maintainerCanModify: pr.maintainer_can_modify,
+      remoteName,
+      additions: pr.additions,
+      deletions: pr.deletions,
+      changedFiles: pr.changed_files,
+      createdAt: pr.created_at,
+      updatedAt: pr.updated_at,
+      closedAt: pr.closed_at,
+      mergedAt: pr.merged_at,
+      syncedAt,
+    }),
+  );
+  handles.push(
+    ...await writeTextReferences(
+      ctx,
+      "pr",
+      pr.number,
+      pr.body,
+      pr.created_at,
+      syncedAt,
+      referenceKeys,
+    ),
+  );
+  for (const r of reviewsResult.items) {
+    if (r.id != null) eventIds.add(`review:${r.id}`);
     counters.eventCount++;
     handles.push(
       await ctx.writeResource(
@@ -836,17 +1435,33 @@ async function syncPrDetails(
           body: r.body,
           url: r.html_url,
           state: r.state,
+          commitSha: r.commit_id,
           createdAt: r.submitted_at ?? pr.updated_at,
           syncedAt,
         },
       ),
     );
+    handles.push(
+      ...await writeTextReferences(
+        ctx,
+        "pr",
+        pr.number,
+        r.body,
+        r.submitted_at,
+        syncedAt,
+        referenceKeys,
+      ),
+    );
   }
-  const reviewComments = await ghPages<GhComment>(
+  const reviewCommentsResult = await ghPages<GhComment>(
     g,
     `/repos/${g.owner}/${g.repo}/pulls/${pr.number}/comments`,
+    {},
+    undefined,
+    deadlineMs,
   );
-  for (const c of reviewComments) {
+  for (const c of reviewCommentsResult.items) {
+    if (c.id != null) eventIds.add(`comment:${c.id}`);
     counters.eventCount++;
     handles.push(
       await ctx.writeResource(
@@ -863,17 +1478,35 @@ async function syncPrDetails(
           body: c.body,
           url: c.html_url,
           filePath: c.path,
+          line: c.line ?? undefined,
+          side: c.side ?? undefined,
+          commitSha: c.commit_id,
           createdAt: c.created_at,
           syncedAt,
         },
       ),
     );
+    handles.push(
+      ...await writeTextReferences(
+        ctx,
+        "pr",
+        pr.number,
+        c.body,
+        c.created_at,
+        syncedAt,
+        referenceKeys,
+      ),
+    );
   }
-  const issueComments = await ghPages<GhComment>(
+  const issueCommentsResult = await ghPages<GhComment>(
     g,
     `/repos/${g.owner}/${g.repo}/issues/${pr.number}/comments`,
+    {},
+    undefined,
+    deadlineMs,
   );
-  for (const c of issueComments) {
+  for (const c of issueCommentsResult.items) {
+    if (c.id != null) eventIds.add(`comment:${c.id}`);
     counters.eventCount++;
     handles.push(
       await ctx.writeResource(
@@ -896,13 +1529,36 @@ async function syncPrDetails(
         },
       ),
     );
+    handles.push(
+      ...await writeTextReferences(
+        ctx,
+        "pr",
+        pr.number,
+        c.body,
+        c.created_at,
+        syncedAt,
+        referenceKeys,
+      ),
+    );
   }
-  const timeline = await ghPages<GhTimelineEvent>(
+  const timelineResult = await ghPages<GhTimelineEvent>(
     g,
     `/repos/${g.owner}/${g.repo}/issues/${pr.number}/timeline`,
-  ).catch(() => []);
-  for (const [index, e] of timeline.entries()) {
+    {},
+    undefined,
+    deadlineMs,
+  );
+  for (const [index, e] of timelineResult.items.entries()) {
     if (!e.created_at) continue;
+    const duplicateFamily = e.event === "reviewed"
+      ? "review"
+      : e.event === "commented"
+      ? "comment"
+      : undefined;
+    if (
+      duplicateFamily && e.id != null &&
+      eventIds.has(`${duplicateFamily}:${e.id}`)
+    ) continue;
     counters.eventCount++;
     handles.push(
       await ctx.writeResource(
@@ -923,18 +1579,42 @@ async function syncPrDetails(
           summary: `${e.event ?? "timeline event"} on PR #${pr.number}`,
           url: e.html_url,
           state: e.state,
+          commitSha: typeof e.commit_id === "string"
+            ? e.commit_id
+            : typeof e.sha === "string"
+            ? e.sha
+            : undefined,
+          payload: e,
           createdAt: e.created_at,
           syncedAt,
         },
       ),
     );
+    if (e.event === "cross-referenced") {
+      handles.push(
+        ...await writeTextReferences(
+          ctx,
+          "pr",
+          pr.number,
+          JSON.stringify(e),
+          e.created_at,
+          syncedAt,
+          referenceKeys,
+          "cross-reference",
+        ),
+      );
+    }
   }
+  let checksResult: PageResult<GhCheckRun> = { items: [], complete: true };
   if (pr.head?.sha) {
-    const checks = await gh<GhCheckRuns>(
+    checksResult = await ghPages<GhCheckRun>(
       g,
-      `/repos/${g.owner}/${g.repo}/commits/${pr.head.sha}/check-runs?per_page=100`,
-    ).catch(() => ({ check_runs: [] }));
-    for (const check of checks.check_runs ?? []) {
+      `/repos/${g.owner}/${g.repo}/commits/${pr.head.sha}/check-runs`,
+      {},
+      (value) => (value as GhCheckRuns).check_runs ?? [],
+      deadlineMs,
+    );
+    for (const check of checksResult.items) {
       counters.checkRunCount++;
       handles.push(
         await ctx.writeResource(
@@ -956,7 +1636,116 @@ async function syncPrDetails(
       );
     }
   }
-  return handles;
+  const commitsResult = await ghPages<GhCommit>(
+    g,
+    `/repos/${g.owner}/${g.repo}/pulls/${pr.number}/commits`,
+    {},
+    undefined,
+    deadlineMs,
+  );
+  for (const commit of commitsResult.items) {
+    if (deadlineMs && Date.now() > deadlineMs) {
+      commitsResult.complete = false;
+      commitsResult.error =
+        `sync budget exhausted while processing commits for PR #${pr.number}`;
+      break;
+    }
+    const changedFiles = await changedFilesBetween(
+      g.gitObjectPath,
+      commit.parents?.[0]?.sha,
+      commit.sha,
+      deadlineMs,
+    );
+    handles.push(
+      await ctx.writeResource(
+        "prCommit",
+        safeName("pr-commit", [pr.number, commit.sha]),
+        {
+          repo,
+          prNumber: pr.number,
+          sha: commit.sha,
+          parentShas: (commit.parents ?? []).map((parent) => parent.sha).filter(
+            Boolean,
+          ),
+          message: commit.commit?.message,
+          authorName: commit.commit?.author?.name,
+          authorEmail: commit.commit?.author?.email,
+          authoredAt: commit.commit?.author?.date,
+          committedAt: commit.commit?.committer?.date,
+          url: commit.html_url,
+          changedFiles,
+          syncedAt,
+        },
+      ),
+    );
+  }
+  const activityResults = [
+    reviewsResult,
+    reviewCommentsResult,
+    issueCommentsResult,
+    timelineResult,
+  ];
+  const activityError = activityResults.filter((result) => !result.complete)
+    .map((result) => result.error ?? "incomplete GitHub activity collection")
+    .join("; ") || undefined;
+  const statuses: Array<{
+    component: "prSnapshot" | "checkRunSnapshot" | "activityEvent" | "prCommit";
+    complete: boolean;
+    itemCount: number;
+    error?: string;
+  }> = [
+    {
+      component: "prSnapshot",
+      complete: filesResult.complete,
+      itemCount: 1,
+      error: filesResult.error,
+    },
+    {
+      component: "activityEvent",
+      complete: !activityError,
+      itemCount: activityResults.reduce(
+        (sum, result) => sum + result.items.length,
+        0,
+      ),
+      error: activityError,
+    },
+    {
+      component: "checkRunSnapshot",
+      complete: checksResult.complete,
+      itemCount: checksResult.items.length,
+      error: checksResult.error,
+    },
+    {
+      component: "prCommit",
+      complete: commitsResult.complete,
+      itemCount: commitsResult.items.length,
+      error: commitsResult.error,
+    },
+  ];
+  for (const status of statuses) {
+    handles.push(
+      await writeCollectionStatus(
+        ctx,
+        status.component,
+        status.complete,
+        status.itemCount,
+        syncedAt,
+        "pr",
+        pr.number,
+        status.error,
+      ),
+    );
+    if (!status.complete) {
+      errors.push({
+        component: status.component,
+        subjectType: "pr",
+        subjectNumber: pr.number,
+        error: status.error ?? "incomplete collection",
+      });
+    }
+  }
+  await writeJsonFile(prRecordPath(g, pr.number), prRecord);
+  return { handles, errors };
 }
 
 function cursorSince(
@@ -971,7 +1760,11 @@ function cursorSince(
 
 async function syncMirror(args: { budgetSeconds?: number }, ctx: Context) {
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  const normalizedContext = { ...ctx, globalArgs: g };
   const startedAt = nowIso();
+  const deadlineMs = args.budgetSeconds
+    ? Date.parse(startedAt) + args.budgetSeconds * 1000
+    : undefined;
   await ensureDir(g.artifactRoot);
   await ensureDir(g.workspaceRoot);
   const state = await readState(g);
@@ -984,10 +1777,37 @@ async function syncMirror(args: { budgetSeconds?: number }, ctx: Context) {
   let issueCount = 0;
   const issueEventCount = { value: 0 };
   const counters = { eventCount: 0, checkRunCount: 0 };
+  const errors: SyncError[] = [];
+  let gitFetchStartedAt: string | undefined;
+  let gitFetchFinishedAt: string | undefined;
+  let githubStartedAt: string | undefined;
+  let githubFinishedAt: string | undefined;
+  let budgetExhausted = false;
   try {
-    await fetchGit(g);
+    gitFetchStartedAt = nowIso();
+    await fetchGit(g, deadlineMs);
+    gitFetchFinishedAt = nowIso();
     gitFetched = true;
-    const repo = await gh<GhRepo>(g, `/repos/${g.owner}/${g.repo}`);
+    for (const head of await listMirroredPrHeads(g, deadlineMs)) {
+      handles.push(
+        await ctx.writeResource(
+          "prHeadState",
+          safeName("pr-head", [head.prNumber]),
+          {
+            repo: repoFullName(g),
+            prNumber: head.prNumber,
+            headSha: head.headSha,
+            fetchedAt: gitFetchFinishedAt,
+          },
+        ),
+      );
+    }
+    githubStartedAt = nowIso();
+    const repo = await gh<GhRepo>(
+      g,
+      `/repos/${g.owner}/${g.repo}`,
+      deadlineMs,
+    );
     handles.push(
       await ctx.writeResource("repoSnapshot", "repo-current", {
         repo: repoFullName(g),
@@ -1005,50 +1825,275 @@ async function syncMirror(args: { budgetSeconds?: number }, ctx: Context) {
       state.cursor.lastSuccessfulSyncAt,
       g.syncOverlapMinutes,
     );
-    const prs = await ghPages<GhPr>(g, `/repos/${g.owner}/${g.repo}/pulls`, {
-      state: "all",
-      sort: "updated",
-      direction: "desc",
-    });
+    const prsResult = await ghPages<GhPr>(
+      g,
+      `/repos/${g.owner}/${g.repo}/pulls`,
+      {
+        state: "all",
+        sort: "updated",
+        direction: "desc",
+      },
+      undefined,
+      deadlineMs,
+    );
+    if (!prsResult.complete) {
+      errors.push({
+        component: "prSnapshot",
+        subjectType: "repo",
+        error: prsResult.error ?? "incomplete PR collection",
+      });
+    }
+    handles.push(
+      await writeCollectionStatus(
+        normalizedContext,
+        "prSnapshot",
+        prsResult.complete,
+        prsResult.items.length,
+        nowIso(),
+        "repo",
+        undefined,
+        prsResult.error,
+      ),
+    );
     const selectedPrs = since
-      ? prs.filter((p) => (p.updated_at ?? "") >= since)
-      : prs;
+      ? prsResult.items.filter((p) => (p.updated_at ?? "") >= since)
+      : prsResult.items;
     let maxPrUpdated = state.cursor.lastPrUpdatedAt;
     for (const pr of selectedPrs) {
+      if (
+        args.budgetSeconds &&
+        Date.now() - Date.parse(startedAt) > args.budgetSeconds * 1000
+      ) {
+        budgetExhausted = true;
+        break;
+      }
       prCount++;
       if (pr.updated_at && (!maxPrUpdated || pr.updated_at > maxPrUpdated)) {
         maxPrUpdated = pr.updated_at;
       }
-      handles.push(...await syncPrDetails(ctx, pr, counters));
+      try {
+        const result = await syncPrDetails(
+          normalizedContext,
+          pr,
+          counters,
+          deadlineMs,
+        );
+        handles.push(...result.handles);
+        errors.push(...result.errors);
+      } catch (err) {
+        const message = errorMessage(err);
+        for (
+          const component of [
+            "prSnapshot",
+            "checkRunSnapshot",
+            "activityEvent",
+            "prCommit",
+          ] as const
+        ) {
+          errors.push({
+            component,
+            subjectType: "pr",
+            subjectNumber: pr.number,
+            error: message,
+          });
+          handles.push(
+            await writeCollectionStatus(
+              normalizedContext,
+              component,
+              false,
+              0,
+              nowIso(),
+              "pr",
+              pr.number,
+              message,
+            ),
+          );
+        }
+      }
       if (
         args.budgetSeconds &&
         Date.now() - Date.parse(startedAt) > args.budgetSeconds * 1000
-      ) break;
+      ) {
+        budgetExhausted = true;
+        const error = "sync budget exhausted before all PRs were processed";
+        errors.push({
+          component: "prSnapshot",
+          error,
+        });
+        handles.push(
+          await writeCollectionStatus(
+            normalizedContext,
+            "prSnapshot",
+            false,
+            prCount,
+            nowIso(),
+            "repo",
+            undefined,
+            error,
+          ),
+        );
+        break;
+      }
     }
-    const issues =
-      (await ghPages<GhIssue>(g, `/repos/${g.owner}/${g.repo}/issues`, {
-        state: "all",
-        since,
-      })).filter((i) => !i.pull_request);
+    if (
+      budgetExhausted &&
+      !errors.some((error) =>
+        error.component === "prSnapshot" &&
+        error.error.includes("budget exhausted")
+      )
+    ) {
+      const error = "sync budget exhausted before all PRs were processed";
+      errors.push({ component: "prSnapshot", error });
+      handles.push(
+        await writeCollectionStatus(
+          normalizedContext,
+          "prSnapshot",
+          false,
+          prCount,
+          nowIso(),
+          "repo",
+          undefined,
+          error,
+        ),
+      );
+    }
+    const issuesResult = budgetExhausted
+      ? {
+        items: [] as GhIssue[],
+        complete: false,
+        error: "issue collection skipped because the sync budget was exhausted",
+      }
+      : await ghPages<GhIssue>(
+        g,
+        `/repos/${g.owner}/${g.repo}/issues`,
+        {
+          state: "all",
+          since,
+        },
+        undefined,
+        deadlineMs,
+      );
+    if (!issuesResult.complete) {
+      errors.push({
+        component: "activityEvent",
+        subjectType: "repo",
+        error: issuesResult.error ?? "incomplete issue collection",
+      });
+    }
+    handles.push(
+      await writeCollectionStatus(
+        normalizedContext,
+        "activityEvent",
+        issuesResult.complete,
+        issuesResult.items.length,
+        nowIso(),
+        "repo",
+        undefined,
+        issuesResult.error,
+      ),
+    );
+    const issues = issuesResult.items.filter((i) => !i.pull_request);
     let maxIssueUpdated = state.cursor.lastIssueUpdatedAt;
     for (const issue of issues) {
+      if (
+        args.budgetSeconds &&
+        Date.now() - Date.parse(startedAt) > args.budgetSeconds * 1000
+      ) {
+        budgetExhausted = true;
+        break;
+      }
       issueCount++;
       if (
         issue.updated_at &&
         (!maxIssueUpdated || issue.updated_at > maxIssueUpdated)
       ) {
+        budgetExhausted = true;
         maxIssueUpdated = issue.updated_at;
       }
-      handles.push(...await syncIssueDetails(ctx, issue, issueEventCount));
+      try {
+        const result = await syncIssueDetails(
+          normalizedContext,
+          issue,
+          issueEventCount,
+          deadlineMs,
+        );
+        handles.push(...result.handles);
+        errors.push(...result.errors);
+      } catch (err) {
+        const message = errorMessage(err);
+        errors.push({
+          component: "activityEvent",
+          subjectType: "issue",
+          subjectNumber: issue.number,
+          error: message,
+        });
+        handles.push(
+          await writeCollectionStatus(
+            normalizedContext,
+            "activityEvent",
+            false,
+            0,
+            nowIso(),
+            "issue",
+            issue.number,
+            message,
+          ),
+        );
+      }
       if (
         args.budgetSeconds &&
         Date.now() - Date.parse(startedAt) > args.budgetSeconds * 1000
-      ) break;
+      ) {
+        const error = "sync budget exhausted before all issues were processed";
+        errors.push({
+          component: "activityEvent",
+          error,
+        });
+        handles.push(
+          await writeCollectionStatus(
+            normalizedContext,
+            "activityEvent",
+            false,
+            issueCount,
+            nowIso(),
+            "repo",
+            undefined,
+            error,
+          ),
+        );
+        break;
+      }
     }
+    if (
+      budgetExhausted && issues.length > issueCount &&
+      !errors.some((error) =>
+        error.component === "activityEvent" &&
+        error.error.includes("budget exhausted before all issues")
+      )
+    ) {
+      const error = "sync budget exhausted before all issues were processed";
+      errors.push({ component: "activityEvent", error });
+      handles.push(
+        await writeCollectionStatus(
+          normalizedContext,
+          "activityEvent",
+          false,
+          issueCount,
+          nowIso(),
+          "repo",
+          undefined,
+          error,
+        ),
+      );
+    }
+    githubFinishedAt = nowIso();
     const finishedAt = nowIso();
-    state.cursor.lastSuccessfulSyncAt = finishedAt;
-    state.cursor.lastPrUpdatedAt = maxPrUpdated;
-    state.cursor.lastIssueUpdatedAt = maxIssueUpdated;
+    const complete = errors.length === 0;
+    if (complete) {
+      state.cursor.lastSuccessfulSyncAt = finishedAt;
+      state.cursor.lastPrUpdatedAt = maxPrUpdated;
+      state.cursor.lastIssueUpdatedAt = maxIssueUpdated;
+    }
     state.syncInProgress = false;
     state.updatedAt = finishedAt;
     await writeState(g, state);
@@ -1065,11 +2110,17 @@ async function syncMirror(args: { budgetSeconds?: number }, ctx: Context) {
         eventCount: counters.eventCount + issueEventCount.value,
         checkRunCount: counters.checkRunCount,
         gitFetched,
+        githubStartedAt,
+        githubFinishedAt,
+        gitFetchStartedAt,
+        gitFetchFinishedAt,
+        errors,
+        complete,
         cursorPrUpdatedAt: state.cursor.lastPrUpdatedAt,
         cursorIssueUpdatedAt: state.cursor.lastIssueUpdatedAt,
       }),
     );
-    return { dataHandles: handles };
+    return { dataHandles: handles, errors, complete };
   } catch (err) {
     state.syncInProgress = false;
     state.updatedAt = nowIso();
@@ -1094,6 +2145,21 @@ async function readPrRecord(
   return record;
 }
 
+async function readMirroredPrHead(
+  g: GlobalArgs,
+  prNumber: number,
+): Promise<string> {
+  const ref = `refs/remotes/pull/${prNumber}/head`;
+  const result = await runGit(g.gitObjectPath, ["rev-parse", "--verify", ref]);
+  const headSha = result.stdout.trim();
+  if (result.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(headSha)) {
+    throw new Error(
+      `PR ${prNumber} head is not present in the local git mirror; run sync first`,
+    );
+  }
+  return headSha;
+}
+
 async function readWorktrees(g: GlobalArgs): Promise<WorktreeRecord[]> {
   return await readJsonFile<WorktreeRecord[]>(worktreeIndexPath(g), []);
 }
@@ -1115,7 +2181,7 @@ async function prepareWorktree(
 ) {
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
   const pr = await readPrRecord(g, args.prNumber);
-  const headSha = pr.headSha!;
+  const headSha = await readMirroredPrHead(g, args.prNumber);
   const suffix = `pr-${args.prNumber}-patchhead-${shortSha(headSha)}${
     identitySuffix(args.identity)
   }`;
@@ -1188,32 +2254,46 @@ async function analyzeWorktrees(_args: Record<string, never>, ctx: Context) {
   const handles: unknown[] = [];
   const analyzedAt = nowIso();
   for (const record of records) {
-    const pr = await readJsonFile<PrRecord | null>(
-      prRecordPath(g, record.prNumber),
-      null,
-    );
     const missing = !await exists(record.path);
     let isDirty = false;
     let aheadCommitCount = 0;
+    let analysisComplete = true;
+    const errors: string[] = [];
+    let latest: string | undefined;
+    try {
+      latest = await readMirroredPrHead(g, record.prNumber);
+    } catch (err) {
+      analysisComplete = false;
+      errors.push(errorMessage(err));
+    }
     if (!missing) {
       const status = await gitInWorktree(record.path, [
         "status",
         "--porcelain",
       ]);
-      isDirty = status.stdout.trim().length > 0;
+      if (status.code === 0) {
+        isDirty = status.stdout.trim().length > 0;
+      } else {
+        analysisComplete = false;
+        errors.push(`git status failed: ${status.stderr.trim()}`);
+      }
       const ahead = await gitInWorktree(record.path, [
         "rev-list",
         "--count",
         `${record.baseHeadSha}..HEAD`,
       ]);
-      aheadCommitCount = ahead.code === 0
-        ? Number(ahead.stdout.trim() || "0")
-        : 0;
+      if (ahead.code === 0) {
+        aheadCommitCount = Number(ahead.stdout.trim() || "0");
+      } else {
+        analysisComplete = false;
+        errors.push(`git rev-list failed: ${ahead.stderr.trim()}`);
+      }
     }
-    const latest = pr?.headSha;
     const isPrHeadStale = Boolean(latest && latest !== record.baseHeadSha);
     const recommendedAction = missing
       ? "remove-or-recreate-worktree-record"
+      : !analysisComplete
+      ? "inspect-worktree-analysis-errors"
       : isPrHeadStale && aheadCommitCount > 0
       ? "rebase-or-recreate-after-saving-local-commits"
       : isPrHeadStale
@@ -1237,6 +2317,8 @@ async function analyzeWorktrees(_args: Record<string, never>, ctx: Context) {
         isDirty,
         aheadCommitCount,
         missing,
+        analysisComplete,
+        errors,
         recommendedAction,
         analyzedAt,
       }),
@@ -1266,16 +2348,105 @@ async function status(_args: Record<string, never>, ctx: Context) {
   return { dataHandles: [handle], state, worktreeCount: worktrees.length };
 }
 
+const PrepareReviewContextArgsSchema = z.object({
+  subjectType: z.enum(["pr", "issue"]),
+  number: z.number().int().positive(),
+});
+
+async function prepareReviewContext(args: unknown, ctx: Context) {
+  const parsed = PrepareReviewContextArgsSchema.parse(args);
+  const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  const worktreeResult = await analyzeWorktrees({}, ctx);
+  if (parsed.subjectType === "pr") {
+    const pr = await readPrRecord(g, parsed.number);
+    const headSha = await readMirroredPrHead(g, parsed.number);
+    return {
+      dataHandles: worktreeResult.dataHandles,
+      subject: {
+        repo: repoFullName(g),
+        subjectType: parsed.subjectType,
+        number: parsed.number,
+        headSha,
+        baseSha: pr.baseSha,
+      },
+    };
+  }
+  const issue = await readJsonFile<Record<string, unknown> | null>(
+    issueRecordPath(g, parsed.number),
+    null,
+  );
+  if (!issue) {
+    throw new Error(
+      `Issue ${parsed.number} is not present in the local mirror; run sync first`,
+    );
+  }
+  return {
+    dataHandles: worktreeResult.dataHandles,
+    subject: {
+      repo: repoFullName(g),
+      subjectType: parsed.subjectType,
+      number: parsed.number,
+    },
+  };
+}
+
+const RecordPrAnalysisArgsSchema = z.object({
+  prNumber: z.number().int().positive(),
+  headSha: z.string().min(1),
+  generatedAt: IsoDateTime.optional(),
+  generator: z.string().min(1),
+  codePathWalkthrough: z.string().min(1),
+  reviewAttentionMap: z.string().min(1),
+  evidenceRefs: z.array(z.string()).default([]),
+});
+
+async function recordPrAnalysis(args: unknown, ctx: Context) {
+  const parsed = RecordPrAnalysisArgsSchema.parse(args);
+  const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  const pr = await readPrRecord(g, parsed.prNumber);
+  const currentHeadSha = await readMirroredPrHead(g, parsed.prNumber);
+  if (parsed.headSha !== currentHeadSha) {
+    throw new Error(
+      `stale PR analysis for #${parsed.prNumber}: requested head ${parsed.headSha} does not match current mirrored head ${currentHeadSha}`,
+    );
+  }
+  const data = {
+    repo: repoFullName(g),
+    prNumber: parsed.prNumber,
+    baseSha: pr.baseSha,
+    headSha: parsed.headSha,
+    generatedAt: parsed.generatedAt ?? nowIso(),
+    generator: parsed.generator,
+    sections: {
+      codePathWalkthrough: parsed.codePathWalkthrough,
+      reviewAttentionMap: parsed.reviewAttentionMap,
+    },
+    evidenceRefs: parsed.evidenceRefs,
+  };
+  const handle = await ctx.writeResource(
+    "prAnalysisEvidence",
+    safeName("pr-analysis", [parsed.prNumber, parsed.headSha]),
+    data,
+  );
+  return { dataHandles: [handle], analysis: data };
+}
+
 /** Swamp-backed local GitHub mirror model. */
 export const model = {
   type: "@evrardjp/github-local-mirror",
-  version: "2026.07.17.1",
+  version: "2026.07.20.1",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
       toVersion: "2026.07.17.1",
       description:
         "Initial published version with no global argument schema changes",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.07.20.1",
+      description:
+        "Add bounded collection metadata and pull request review context resources",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -1306,6 +2477,12 @@ export const model = {
       lifetime: "infinite",
       garbageCollection: 500,
     },
+    prHeadState: {
+      description: "Current PR head read from the fetched local Git ref",
+      schema: PrHeadStateSchema,
+      lifetime: "infinite",
+      garbageCollection: 500,
+    },
     prFileSnapshot: {
       description: "Changed file metadata for one PR revision",
       schema: PrFileSnapshotSchema,
@@ -1324,6 +2501,30 @@ export const model = {
       schema: ActivityEventSchema,
       lifetime: "infinite",
       garbageCollection: 5000,
+    },
+    subjectReference: {
+      description: "References between mirrored GitHub subjects",
+      schema: SubjectReferenceSchema,
+      lifetime: "infinite",
+      garbageCollection: 5000,
+    },
+    prCommit: {
+      description: "Commit belonging to a pull request",
+      schema: PrCommitSchema,
+      lifetime: "infinite",
+      garbageCollection: 5000,
+    },
+    collectionStatus: {
+      description: "Completeness status for a GitHub API subcollection",
+      schema: CollectionStatusSchema,
+      lifetime: "infinite",
+      garbageCollection: 2000,
+    },
+    prAnalysisEvidence: {
+      description: "Generated review context tied to an exact PR head",
+      schema: PrAnalysisEvidenceSchema,
+      lifetime: "infinite",
+      garbageCollection: 500,
     },
     checkRunSnapshot: {
       description: "GitHub check run status for PR heads",
@@ -1374,6 +2575,17 @@ export const model = {
         identity: z.string().min(1).optional(),
       }),
       execute: prepareWorktree,
+    },
+    prepare_review_context: {
+      description:
+        "Validate a mirrored review subject and refresh local worktree evidence",
+      arguments: PrepareReviewContextArgsSchema,
+      execute: prepareReviewContext,
+    },
+    record_pr_analysis: {
+      description: "Record generated review evidence for the current PR head",
+      arguments: RecordPrAnalysisArgsSchema,
+      execute: recordPrAnalysis,
     },
     analyze_worktrees: {
       description:
