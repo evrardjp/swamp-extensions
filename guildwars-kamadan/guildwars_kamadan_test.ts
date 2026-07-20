@@ -1,5 +1,9 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { model } from "./guildwars_kamadan.ts";
+import {
+  brokerCommand,
+  isTraderPriceInWindow,
+  model,
+} from "./guildwars_kamadan.ts";
 
 Deno.test("guildwars-kamadan exposes ingestion and aggregation methods", () => {
   assertEquals(model.type, "@evrardjp/guildwars-kamadan");
@@ -20,4 +24,55 @@ Deno.test("guildwars-kamadan applies feed defaults", () => {
   assertEquals(parsed.websocketUrl, "wss://kamadan.gwtoolbox.com/");
   assertEquals(parsed.maxDrainEvents, 500);
   assertEquals(parsed.marketWindowHours, 24);
+});
+
+Deno.test("broker command passes hostile paths and URLs as literal arguments", () => {
+  const command = brokerCommand(
+    "/tmp/broker'; touch /tmp/injected; 'broker.ts",
+    "wss://example.test/'; touch /tmp/injected; '",
+    "/tmp/spool dir/$(touch injected)",
+  );
+
+  assertEquals(command.command, "deno");
+  assertEquals(command.args.slice(-3), [
+    "/tmp/broker'; touch /tmp/injected; 'broker.ts",
+    "wss://example.test/'; touch /tmp/injected; '",
+    "/tmp/spool dir/$(touch injected)",
+  ]);
+});
+
+Deno.test("market cutoff excludes stale direct trader prices", () => {
+  assertEquals(isTraderPriceInWindow({ sourceTimestamp: 999 }, 1000), false);
+  assertEquals(isTraderPriceInWindow({ sourceTimestamp: 1000 }, 1000), true);
+});
+
+Deno.test("catalog page cap reports truncation", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetches = 0;
+  let written: Record<string, unknown> | undefined;
+  globalThis.fetch = () => {
+    fetches++;
+    return Promise.resolve(Response.json({
+      query: { categorymembers: [{ title: "Item one" }] },
+      continue: { cmcontinue: "next-page" },
+    }));
+  };
+  try {
+    const globalArgs = model.globalArguments.parse({});
+    await model.methods.syncItemCatalog.execute(
+      { maxCategories: 200, maxPagesPerCategory: 1 },
+      {
+        globalArgs,
+        writeResource: (_specName, _name, data) => {
+          written = data;
+          return Promise.resolve({ name: "itemCatalog-current" });
+        },
+      } as Parameters<typeof model.methods.syncItemCatalog.execute>[1],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assertEquals(fetches, 1);
+  assertEquals(written?.truncated, true);
 });

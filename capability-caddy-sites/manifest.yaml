@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@evrardjp/capability-caddy-sites"
-version: "2026.07.17.1"
+version: "2026.07.20.1"
 description: >-
   Adapter from capability-orchestrator expose metadata to generic Caddy
   reverse-proxy site definitions.

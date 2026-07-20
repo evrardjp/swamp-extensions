@@ -1,9 +1,5 @@
 import { z } from "npm:zod@4";
 
-// Deno globals are available in Swamp extension runtime.
-// @ts-ignore: Deno global available at bundle runtime
-const DenoCommand = Deno.Command;
-
 const GlobalArgs = z.object({
   nodeHost: z.string().optional().describe(
     "SSH hostname or IP of the node running Caddy; required for apply methods",
@@ -90,7 +86,7 @@ async function runCmd(
   input?: string,
 ): Promise<CmdResult> {
   try {
-    const proc = new DenoCommand(binary, {
+    const proc = new Deno.Command(binary, {
       args,
       stdin: input === undefined ? "null" : "piped",
       stdout: "piped",
@@ -156,19 +152,39 @@ async function writeRemote(
   path: string,
   content: string,
 ): Promise<void> {
-  const b64 = btoa(content);
-  await sshExec(args, `base64 -d > ${shellQuote(path)} <<'EOF'\n${b64}\nEOF`);
+  const bytes = new TextEncoder().encode(content);
+  const chunks: string[] = [];
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    chunks.push(String.fromCharCode(...bytes.subarray(i, i + 0x8000)));
+  }
+  const b64 = btoa(chunks.join(""));
+  await sshExec(
+    args,
+    `base64 -d > ${shellQuoteRemotePath(path)} <<'EOF'\n${b64}\nEOF`,
+  );
 }
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+function shellQuoteRemotePath(path: string): string {
+  if (path === "~") return '"$HOME"';
+  if (path.startsWith("~/")) return `"$HOME"${shellQuote(path.slice(1))}`;
+  return shellQuote(path);
+}
+
 function parseSiteAddress(
   address: string,
+  tls: Site["tls"],
 ): { host: string; port: number; scheme: "http" | "https" } {
-  const withScheme = address.includes("://") ? address : `https://${address}`;
+  const withScheme = address.includes("://")
+    ? address
+    : `${tls === "off" ? "http" : "https"}://${address}`;
   const url = new URL(withScheme);
+  if (tls === "off" && url.protocol === "https:") {
+    throw new Error(`TLS is off but site address is HTTPS: ${address}`);
+  }
   return {
     host: url.hostname,
     port: Number(url.port || (url.protocol === "http:" ? 80 : 443)),
@@ -192,12 +208,9 @@ function renderCaddyJson(
   const internalTlsSubjects: string[] = [];
 
   for (const site of sites) {
-    const publicAddr = parseSiteAddress(site.address);
+    const publicAddr = parseSiteAddress(site.address, site.tls);
     ports.add(publicAddr.port);
     if (site.tls === "internal") internalTlsSubjects.push(publicAddr.host);
-    if (site.tls === "off" && publicAddr.scheme === "https") {
-      warnings.push(`${site.address} is HTTPS but tls is off`);
-    }
 
     const upstreams = site.reverseProxy.upstreams.map((u) => {
       const parsed = parseUpstream(u);
@@ -401,7 +414,10 @@ async function applyConfig(configJson: string, context: MethodContext) {
   const globalArgs = GlobalArgs.parse(context.globalArgs);
   const loadConfigJson = ensureAdminApi(configJson);
   const validationHandle = await validateAndWrite(context, loadConfigJson);
-  await sshExec(globalArgs, `mkdir -p ${globalArgs.workDir}`);
+  await sshExec(
+    globalArgs,
+    `mkdir -p -- ${shellQuoteRemotePath(globalArgs.workDir)}`,
+  );
   const bootstrapPath = `${globalArgs.workDir}/bootstrap.json`;
   const configPath = `${globalArgs.workDir}/caddy.json`;
   const composePath = `${globalArgs.workDir}/docker-compose.yml`;
@@ -415,11 +431,13 @@ async function applyConfig(configJson: string, context: MethodContext) {
   );
   await sshExec(
     globalArgs,
-    `cd ${globalArgs.workDir} && (docker compose up -d || { docker rm -f caddy 2>/dev/null; docker compose up -d; })`,
+    `cd -- ${shellQuoteRemotePath(globalArgs.workDir)} && docker compose up -d`,
   );
   await sshExec(
     globalArgs,
-    `cd ${globalArgs.workDir} && curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @caddy.json http://127.0.0.1:2019/load`,
+    `cd -- ${
+      shellQuoteRemotePath(globalArgs.workDir)
+    } && curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @caddy.json http://127.0.0.1:2019/load`,
   );
   const applyHandle = await context.writeResource("apply", "current", {
     success: true,
@@ -434,7 +452,7 @@ async function applyConfig(configJson: string, context: MethodContext) {
 /** Caddy model: render, validate, and run Caddy JSON configuration. */
 export const model = {
   type: "@evrardjp/caddy",
-  version: "2026.07.17.1",
+  version: "2026.07.20.1",
   globalArguments: GlobalArgs,
   resources: {
     config: {

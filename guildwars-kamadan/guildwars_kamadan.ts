@@ -74,6 +74,7 @@ const TraderPriceSchema = z.object({
 const CatalogSchema = z.object({
   syncedAt: z.string(),
   source: z.string(),
+  truncated: z.boolean().default(false),
   items: z.array(z.object({
     name: z.string(),
     normalizedName: z.string(),
@@ -177,12 +178,40 @@ async function readJsonFile(
 }
 
 async function processRunning(pid: number): Promise<boolean> {
-  const result = await new DenoCommand("sh", {
-    args: ["-c", `kill -0 ${pid} 2>/dev/null`],
+  const result = await new DenoCommand("kill", {
+    args: ["-0", "--", String(pid)],
     stdout: "null",
     stderr: "null",
   }).output();
   return result.code === 0;
+}
+
+/** Build a broker process command without shell interpolation. */
+export function brokerCommand(
+  script: string,
+  websocketUrl: string,
+  dir: string,
+): { command: string; args: string[] } {
+  return {
+    command: "deno",
+    args: [
+      "run",
+      "--allow-net",
+      "--allow-read",
+      "--allow-write",
+      script,
+      websocketUrl,
+      dir,
+    ],
+  };
+}
+
+/** Return whether a direct trader price belongs to the current market window. */
+export function isTraderPriceInWindow(
+  price: { sourceTimestamp: number },
+  cutoff: number,
+): boolean {
+  return price.sourceTimestamp >= cutoff;
 }
 
 async function brokerPid(paths: { pid: string }): Promise<number | undefined> {
@@ -496,9 +525,14 @@ async function readSpoolSlice(
 async function fetchCategory(
   apiUrl: string,
   title: string,
-): Promise<Array<{ title: string; url?: string; isCategory: boolean }>> {
+  maxPages: number,
+): Promise<{
+  members: Array<{ title: string; url?: string; isCategory: boolean }>;
+  truncated: boolean;
+}> {
   const out: Array<{ title: string; url?: string; isCategory: boolean }> = [];
   let cmcontinue = "";
+  let pages = 0;
   do {
     const url = new URL(apiUrl);
     url.searchParams.set("action", "query");
@@ -522,8 +556,9 @@ async function fetchCategory(
       });
     }
     cmcontinue = json.continue?.cmcontinue ?? "";
-  } while (cmcontinue);
-  return out;
+    pages++;
+  } while (cmcontinue && pages < maxPages);
+  return { members: out, truncated: Boolean(cmcontinue) };
 }
 
 async function syncLiveItemMetadata(
@@ -572,9 +607,12 @@ async function syncLiveItemMetadata(
 async function syncWikiCatalog(
   apiUrl: string,
   maxCategories: number,
+  maxPagesPerCategory: number,
 ): Promise<Catalog> {
   const seenCategories = new Set<string>();
+  const enqueuedCategories = new Set<string>(["Category:Items"]);
   const queue = ["Category:Items"];
+  let truncated = false;
   const items = new Map<
     string,
     {
@@ -588,10 +626,14 @@ async function syncWikiCatalog(
     const category = queue.shift()!;
     if (seenCategories.has(category)) continue;
     seenCategories.add(category);
-    const members = await fetchCategory(apiUrl, category);
-    for (const member of members) {
+    const result = await fetchCategory(apiUrl, category, maxPagesPerCategory);
+    truncated ||= result.truncated;
+    for (const member of result.members) {
       if (member.isCategory) {
-        if (!seenCategories.has(member.title)) queue.push(member.title);
+        if (!enqueuedCategories.has(member.title)) {
+          enqueuedCategories.add(member.title);
+          queue.push(member.title);
+        }
       } else {
         const name = member.title.replace(/^.*:/, "");
         const key = normalizeName(name);
@@ -614,6 +656,7 @@ async function syncWikiCatalog(
   return {
     syncedAt: nowIso(),
     source: apiUrl,
+    truncated: truncated || queue.length > 0,
     items: Array.from(items.values()).sort((a, b) =>
       a.name.localeCompare(b.name)
     ),
@@ -661,7 +704,7 @@ async function readAllResources<T>(
 /** Ingest and aggregate the Guild Wars Kamadan trade feed. */
 export const model = {
   type: "@evrardjp/guildwars-kamadan",
-  version: "2026.07.17.1",
+  version: "2026.07.20.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     cursor: {
@@ -754,22 +797,26 @@ export const model = {
             );
             return { dataHandles: [handle] };
           }
-          await new DenoCommand("sh", {
-            args: ["-c", `kill ${pid} 2>/dev/null || true`],
-          }).output();
+          try {
+            DenoApi.kill(pid, "SIGTERM");
+          } catch {
+            // The broker may have exited between the liveness check and signal.
+          }
         }
         await ensureBrokerScript(paths);
-        const cmd =
-          `nohup deno run --allow-net --allow-read --allow-write '${paths.script}' '${context.globalArgs.websocketUrl}' '${paths.dir}' >/dev/null 2>&1 & echo $!`;
-        const result = await new DenoCommand("sh", {
-          args: ["-c", cmd],
-          stdout: "piped",
-          stderr: "piped",
-        }).output();
-        if (result.code !== 0) {
-          throw new Error(new TextDecoder().decode(result.stderr));
-        }
-        const newPid = Number(new TextDecoder().decode(result.stdout).trim());
+        const command = brokerCommand(
+          paths.script,
+          context.globalArgs.websocketUrl,
+          paths.dir,
+        );
+        const child = new DenoCommand(command.command, {
+          args: command.args,
+          stdin: "null",
+          stdout: "null",
+          stderr: "null",
+        }).spawn();
+        const newPid = child.pid;
+        child.unref();
         await DenoApi.writeTextFile(paths.pid, String(newPid));
         const cursor = await readCursor(context);
         const handle = await context.writeResource(
@@ -976,15 +1023,17 @@ export const model = {
       description:
         "One-time/infrequent Guild Wars Wiki item catalog sync. Do not schedule frequently.",
       arguments: z.object({
-        maxCategories: z.number().int().positive().default(200),
+        maxCategories: z.number().int().positive().max(1000).default(200),
+        maxPagesPerCategory: z.number().int().positive().max(100).default(20),
       }),
       execute: async (
-        args: { maxCategories: number },
+        args: { maxCategories: number; maxPagesPerCategory: number },
         context: MethodContext,
       ) => {
         const catalog = await syncWikiCatalog(
           context.globalArgs.wikiApiUrl,
           args.maxCategories,
+          args.maxPagesPerCategory,
         );
         const handle = await context.writeResource(
           "itemCatalog",
@@ -1004,11 +1053,11 @@ export const model = {
         const listings =
           (await readAllResources(context, "tradeListing", TradeListingSchema))
             .filter((l) => l.timestampMs >= cutoff && l.itemNameRaw);
-        const prices = await readAllResources(
+        const prices = (await readAllResources(
           context,
           "traderPrice",
           TraderPriceSchema,
-        );
+        )).filter((price) => isTraderPriceInWindow(price, cutoff));
         const metadataRaw = context.readResource
           ? await context.readResource("liveItemMetadata-current")
           : null;

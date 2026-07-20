@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@evrardjp/caddy"
-version: "2026.07.17.1"
+version: "2026.07.20.1"
 description: >-
   Render, validate, and remotely apply Caddy JSON reverse-proxy configuration
   using a containerized Caddy runtime.

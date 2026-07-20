@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@evrardjp/kind-cluster-pool"
-version: "2026.07.17.1"
+version: "2026.07.20.1"
 description: >-
   Desired-size pool of local kind clusters with reserve, release, reconciliation,
   and status operations for test infrastructure.

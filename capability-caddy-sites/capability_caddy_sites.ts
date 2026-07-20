@@ -1,9 +1,5 @@
 import { z } from "npm:zod@4";
 
-// Deno globals are available in Swamp extension runtime.
-// @ts-ignore: Deno global available at bundle runtime
-const DenoCommand = Deno.Command;
-
 const GlobalArgs = z.object({});
 
 const PublicExposeSchema = z.object({
@@ -57,7 +53,7 @@ type MethodContext = {
 };
 
 async function runCmd(binary: string, args: string[]): Promise<CmdResult> {
-  const proc = new DenoCommand(binary, {
+  const proc = new Deno.Command(binary, {
     args,
     stdout: "piped",
     stderr: "piped",
@@ -132,23 +128,54 @@ function upstream(expose: Expose): string {
 async function readCapability(
   catalogModelName: string,
   capability: string,
-): Promise<Record<string, unknown> | null> {
-  const result = await runCmd("swamp", [
-    "data",
-    "get",
-    catalogModelName,
-    capability,
-    "--json",
-  ]);
-  if (result.code !== 0) return null;
-  const parsed = JSON.parse(result.stdout);
-  return parsed?.content ?? null;
+): Promise<Record<string, unknown>> {
+  let result: CmdResult;
+  try {
+    result = await runCmd("swamp", [
+      "data",
+      "get",
+      catalogModelName,
+      capability,
+      "--json",
+    ]);
+  } catch (error) {
+    throw new Error(
+      `Failed to read capability ${capability} from ${catalogModelName}: ` +
+        `could not run swamp data get: ${String(error)}`,
+      { cause: error },
+    );
+  }
+  if (result.code !== 0) {
+    const detail = result.stderr.trim() || result.stdout.trim() || "no output";
+    throw new Error(
+      `Failed to read capability ${capability} from ${catalogModelName}: ` +
+        `swamp data get exited with code ${result.code}: ${detail}`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error(
+      `Failed to read capability ${capability} from ${catalogModelName}: ` +
+        `swamp data get returned invalid JSON: ${String(error)}`,
+      { cause: error },
+    );
+  }
+  const content = (parsed as { content?: unknown })?.content;
+  if (!content || typeof content !== "object" || Array.isArray(content)) {
+    throw new Error(
+      `Failed to read capability ${capability} from ${catalogModelName}: ` +
+        "swamp data get returned no capability content",
+    );
+  }
+  return content as Record<string, unknown>;
 }
 
 /** Catalog-domain adapter: convert capability exposes metadata into generic @evrardjp/caddy sites. */
 export const model = {
   type: "@evrardjp/capability-caddy-sites",
-  version: "2026.07.17.1",
+  version: "2026.07.20.1",
   globalArguments: GlobalArgs,
   resources: {
     sites: {
