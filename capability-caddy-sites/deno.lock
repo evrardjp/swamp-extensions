@@ -2,8 +2,11 @@
   "version": "5",
   "specifiers": {
     "jsr:@std/assert@1": "1.0.19",
+    "jsr:@std/assert@1.0.19": "1.0.19",
     "jsr:@std/internal@^1.0.12": "1.0.13",
-    "npm:zod@4": "4.4.3"
+    "jsr:@systeminit/swamp-testing@0.20260518.13": "0.20260518.13",
+    "npm:zod@4": "4.4.3",
+    "npm:zod@^4.3.6": "4.4.3"
   },
   "jsr": {
     "@std/assert@1.0.19": {
@@ -14,6 +17,13 @@
     },
     "@std/internal@1.0.13": {
       "integrity": "2f9546691d4ac2d32859c82dff284aaeac980ddeca38430d07941e7e288725c0"
+    },
+    "@systeminit/swamp-testing@0.20260518.13": {
+      "integrity": "603f810070d6dadc3ac7846e14b8f0de43ff9728f125d19d7c206214c8e2b9e0",
+      "dependencies": [
+        "jsr:@std/assert@1.0.19",
+        "npm:zod@^4.3.6"
+      ]
     }
   },
   "npm": {

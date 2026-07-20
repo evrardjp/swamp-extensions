@@ -1,7 +1,6 @@
-## 2026.07.17.1
+## 2026.07.20.1
 
-**Added:** Initial release of `@evrardjp/capability-caddy-sites`, which converts
-capability catalog exposure metadata into normalized `@evrardjp/caddy` site
-definitions.
+**Fixed:** Rendering now fails with the requested capability and command error
+when catalog data cannot be read, rather than silently emitting empty sites.
 
 **Upgrade note:** Publish or pull `@evrardjp/caddy` before using this adapter.

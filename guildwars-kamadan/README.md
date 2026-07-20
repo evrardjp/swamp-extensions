@@ -36,6 +36,14 @@ swamp model method run guildwars-kamadan aggregateMarketValues
 
 Catalog synchronization is intentionally separate from frequent ingestion.
 `syncItemCatalog` traverses Guild Wars Wiki categories and should run only
-occasionally. `syncLiveItemMetadata` reads the current Kamadan web bundle. Raw
+occasionally. Pagination is capped per category; the catalog's `truncated`
+field reports when either that cap or the category cap leaves results
+unvisited. `syncLiveItemMetadata` reads the current Kamadan web bundle. Raw
 events and raw price strings are retained so future parsers can replay source
 data without inventing historical normalized prices.
+
+The broker spool is not automatically truncated. It uses a persisted byte
+offset cursor while the broker appends concurrently, so in-place rotation or
+compaction could invalidate the cursor and replay or skip events. A bounded
+policy is deferred until spool generations and cursor updates can be switched
+atomically.

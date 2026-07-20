@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@evrardjp/guildwars-kamadan"
-version: "2026.07.17.1"
+version: "2026.07.20.1"
 description: >-
   Guild Wars Kamadan trade-feed ingestion, item metadata synchronization, raw
   listing parsing, and hourly market aggregation for Swamp.

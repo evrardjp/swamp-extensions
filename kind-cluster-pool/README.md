@@ -8,11 +8,17 @@ clusters for test workloads.
 `@evrardjp/kind-cluster-pool`
 
 The model can initialize the pool, atomically reserve and release clusters,
-reconcile replacements, and report pool health. Kubeconfigs are returned as
-base64-encoded data.
+reconcile replacements, and report pool health. Reservation atomicity relies on
+Swamp's exclusive per-model-instance lock, which is held for the full method
+execution and serializes concurrent reservations of the same pool. Kubeconfigs
+are returned as base64-encoded data.
 
 The host running Swamp must provide the configured `kindBinary` and a working
 container runtime. `initialize` and `sync` create or delete real clusters.
+Pool size is limited to 20, and cluster create/delete operations run with at
+most four concurrent subprocesses. `initialize force=true` is rejected once
+state exists because replacing tracked state could orphan live clusters; use
+`sync` or explicitly remove the existing clusters first.
 
 ## Example
 

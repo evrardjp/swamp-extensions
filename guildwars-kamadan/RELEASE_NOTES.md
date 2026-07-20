@@ -1,7 +1,7 @@
-## 2026.07.17.1
+## 2026.07.20.1
 
-**Added:** Initial release of `@evrardjp/guildwars-kamadan`, with bounded live
-feed capture, optional broker operation, durable spool draining, item metadata
-synchronization, trade parsing, and hourly market aggregation.
+**Fixed:** Broker startup no longer evaluates configured URLs or paths as shell
+code, and hourly aggregation excludes stale direct trader prices.
 
-**Changed:** Source prices are retained as raw values and are not normalized.
+**Changed:** Wiki pagination is bounded per category and catalog output reports
+when results were truncated.

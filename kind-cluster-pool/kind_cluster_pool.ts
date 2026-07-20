@@ -12,10 +12,15 @@ const DenoFs = {
     Deno.remove(p, opts).catch(() => {}),
 };
 
+const MAX_POOL_SIZE = 20;
+const MAX_CONCURRENT_CLUSTER_OPERATIONS = 4;
+
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
 const GlobalArgsSchema = z.object({
-  n: z.number().int().positive().describe("Target pool size"),
+  n: z.number().int().positive().max(MAX_POOL_SIZE).describe(
+    `Target pool size (maximum ${MAX_POOL_SIZE})`,
+  ),
   kindConfig: z.string().describe("kind cluster config YAML"),
   clusterNamePrefix: z
     .string()
@@ -74,8 +79,43 @@ async function runCmd(
 
 async function getKindClusters(kindBinary: string): Promise<string[]> {
   const result = await runCmd(kindBinary, ["get", "clusters"]);
-  if (result.code !== 0) return [];
+  return parseKindClustersResult(result);
+}
+
+/** Parse `kind get clusters`, rejecting failures so reconciliation cannot assume an empty host. */
+export function parseKindClustersResult(
+  result: { stdout: string; stderr: string; code: number },
+): string[] {
+  if (result.code !== 0) {
+    throw new Error(
+      `kind get clusters failed: ${result.stderr.slice(-500)}`,
+    );
+  }
   return result.stdout.trim().split("\n").filter(Boolean);
+}
+
+/** Apply an asynchronous operation with at most `concurrency` active workers. */
+export async function forEachWithConcurrency<T>(
+  items: readonly T[],
+  concurrency: number,
+  operation: (item: T) => Promise<void>,
+): Promise<void> {
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error("Concurrency must be a positive integer");
+  }
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex++];
+      await operation(item);
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(concurrency, items.length) },
+      () => worker(),
+    ),
+  );
 }
 
 async function createCluster(
@@ -172,7 +212,7 @@ async function readState(
 /** Pool of N kind clusters with atomic reserve/release and automatic replenishment. */
 export const model = {
   type: "@evrardjp/kind-cluster-pool",
-  version: "2026.07.17.1",
+  version: "2026.07.20.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     state: {
@@ -206,16 +246,25 @@ export const model = {
   methods: {
     initialize: {
       description:
-        "Create N kind clusters and seed the pool. Idempotent: skips if already initialized unless force=true.",
+        "Create N kind clusters and seed the pool. Existing pools are skipped; force=true is rejected when state exists to prevent cluster leaks.",
       arguments: z.object({
         force: z
           .boolean()
           .default(false)
-          .describe("Re-initialize even if pool already exists"),
+          .describe(
+            "Require a fresh pool; rejected if tracked state already exists",
+          ),
       }),
       execute: async (args: { force: boolean }, context) => {
         const { n, kindConfig, clusterNamePrefix, kindBinary } =
           context.globalArgs;
+
+        const existing = await readState(context);
+        if (existing && args.force) {
+          throw new Error(
+            "Cannot force initialize an existing pool because replacing its state would leak tracked clusters; use sync or delete the existing clusters first",
+          );
+        }
 
         const logWriter = context.createFileWriter("log", "log-init");
         const log = async (msg: string) => {
@@ -223,15 +272,10 @@ export const model = {
           await logWriter.writeLine(msg);
         };
 
-        if (!args.force) {
-          const existing = await readState(context);
-          if (existing) {
-            await log(
-              "Pool already initialized — skipping (use force=true to reinitialize)",
-            );
-            const logHandle = await logWriter.finalize();
-            return { dataHandles: [logHandle] };
-          }
+        if (existing) {
+          await log("Pool already initialized — skipping");
+          const logHandle = await logWriter.finalize();
+          return { dataHandles: [logHandle] };
         }
 
         await log(
@@ -239,8 +283,10 @@ export const model = {
         );
 
         const clusters: PoolState["clusters"] = {};
-        await Promise.all(
-          Array.from({ length: n }, async () => {
+        await forEachWithConcurrency(
+          Array.from({ length: n }),
+          MAX_CONCURRENT_CLUSTER_OPERATIONS,
+          async () => {
             const id = crypto.randomUUID();
             const clusterName = `${clusterNamePrefix}-${shortId()}`;
             await log(`  Creating ${clusterName}...`);
@@ -270,7 +316,7 @@ export const model = {
                 }`,
               );
             }
-          }),
+          },
         );
 
         const stateHandle = await context.writeResource(
@@ -285,7 +331,7 @@ export const model = {
 
     reserve: {
       description:
-        "Atomically claim one ready cluster. Returns clusterId, clusterName, and base64-encoded kubeconfig.",
+        "Atomically claim one ready cluster under Swamp's exclusive per-model method lock. Returns clusterId, clusterName, and base64-encoded kubeconfig.",
       arguments: z.object({
         testId: z
           .string()
@@ -399,8 +445,10 @@ export const model = {
           await log(
             `Deleting ${deletingIds.length} cluster(s) in 'deleting' state...`,
           );
-          await Promise.all(
-            deletingIds.map(async (id) => {
+          await forEachWithConcurrency(
+            deletingIds,
+            MAX_CONCURRENT_CLUSTER_OPERATIONS,
+            async (id) => {
               const name = clusters[id].clusterName;
               if (liveKindClusters.has(name)) {
                 await log(`  Deleting ${name}...`);
@@ -409,7 +457,7 @@ export const model = {
                 await log(`  ${name} already gone`);
               }
               clusters[id] = { ...clusters[id], state: "deleted" };
-            }),
+            },
           );
         }
 
@@ -426,13 +474,15 @@ export const model = {
           await log(
             `Pool oversized by ${surplus} — evicting ${toEvict.length} ready cluster(s)...`,
           );
-          await Promise.all(
-            toEvict.map(async (id) => {
+          await forEachWithConcurrency(
+            toEvict,
+            MAX_CONCURRENT_CLUSTER_OPERATIONS,
+            async (id) => {
               const name = clusters[id].clusterName;
               await log(`  Evicting ${name}...`);
               await deleteCluster(kindBinary, name);
               clusters[id] = { ...clusters[id], state: "deleted" };
-            }),
+            },
           );
         }
 
@@ -445,8 +495,10 @@ export const model = {
           await log(
             `Pool has deficit of ${deficit} — creating ${deficit} new cluster(s)...`,
           );
-          await Promise.all(
-            Array.from({ length: deficit }, async () => {
+          await forEachWithConcurrency(
+            Array.from({ length: deficit }),
+            MAX_CONCURRENT_CLUSTER_OPERATIONS,
+            async () => {
               const id = crypto.randomUUID();
               const clusterName = `${clusterNamePrefix}-${shortId()}`;
               await log(`  Creating ${clusterName}...`);
@@ -476,7 +528,7 @@ export const model = {
                   }`,
                 );
               }
-            }),
+            },
           );
         }
 
