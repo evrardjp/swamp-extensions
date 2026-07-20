@@ -5,3 +5,6 @@ code, and hourly aggregation excludes stale direct trader prices.
 
 **Changed:** Wiki pagination is bounded per category and catalog output reports
 when results were truncated.
+
+**Fixed:** Broker lifecycle operations now verify that persisted PIDs belong to
+the expected generated broker command before reporting or signaling them.

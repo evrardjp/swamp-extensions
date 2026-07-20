@@ -1,8 +1,6 @@
 import { z } from "npm:zod@4";
 import type { ModelDefinition } from "jsr:@systeminit/swamp-testing@0.20260518.13";
 
-// @ts-ignore: Deno global available at bundle runtime
-const DenoCmd = Deno.Command;
 // @ts-ignore: Deno globals available at bundle runtime
 const DenoFs = {
   writeTextFile: (p: string, s: string) => Deno.writeTextFile(p, s),
@@ -68,7 +66,11 @@ async function runCmd(
   binary: string,
   args: string[],
 ): Promise<{ stdout: string; stderr: string; code: number }> {
-  const proc = new DenoCmd(binary, { args, stdout: "piped", stderr: "piped" });
+  const proc = new Deno.Command(binary, {
+    args,
+    stdout: "piped",
+    stderr: "piped",
+  });
   const result = await proc.output();
   return {
     stdout: new TextDecoder().decode(result.stdout),
@@ -283,6 +285,7 @@ export const model = {
         );
 
         const clusters: PoolState["clusters"] = {};
+        const createdClusterNames: string[] = [];
         await forEachWithConcurrency(
           Array.from({ length: n }),
           MAX_CONCURRENT_CLUSTER_OPERATIONS,
@@ -296,6 +299,7 @@ export const model = {
                 clusterName,
                 kindConfig,
               );
+              createdClusterNames.push(clusterName);
               clusters[id] = {
                 clusterName,
                 state: "ready",
@@ -319,11 +323,52 @@ export const model = {
           },
         );
 
-        const stateHandle = await context.writeResource(
-          "state",
-          "state-current",
-          { clusters },
-        );
+        let stateHandle;
+        try {
+          stateHandle = await context.writeResource(
+            "state",
+            "state-current",
+            { clusters },
+          );
+        } catch (persistError) {
+          const cleanupResults = await Promise.allSettled(
+            createdClusterNames.map((clusterName) =>
+              deleteCluster(kindBinary, clusterName)
+            ),
+          );
+          const cleanupErrors = cleanupResults.flatMap((result, index) =>
+            result.status === "rejected"
+              ? [{
+                clusterName: createdClusterNames[index],
+                reason: result.reason,
+              }]
+              : []
+          );
+
+          try {
+            await log(
+              cleanupErrors.length === 0
+                ? `State persistence failed; removed ${createdClusterNames.length} newly created cluster(s)`
+                : `State persistence failed; cleanup failed for ${
+                  cleanupErrors.map(({ clusterName }) => clusterName).join(", ")
+                }`,
+            );
+            await logWriter.finalize();
+          } catch {
+            // Cleanup and the persistence error take precedence over diagnostic logging.
+          }
+
+          if (cleanupErrors.length > 0) {
+            throw new AggregateError(
+              [persistError, ...cleanupErrors.map(({ reason }) => reason)],
+              `Failed to persist initialized pool state; cleanup also failed for ${
+                cleanupErrors.map(({ clusterName }) => clusterName).join(", ")
+              }`,
+              { cause: persistError },
+            );
+          }
+          throw persistError;
+        }
         const logHandle = await logWriter.finalize();
         return { dataHandles: [stateHandle, logHandle] };
       },
@@ -436,6 +481,22 @@ export const model = {
           `kind reports ${liveKindClusters.size} live cluster(s)`,
         );
 
+        // Missing active clusters cannot satisfy capacity. Preserve reservation
+        // metadata for diagnosis while moving them out of the active states.
+        const missingActiveIds = Object.entries(clusters)
+          .filter(([, entry]) =>
+            (entry.state === "ready" || entry.state === "in_use") &&
+            !liveKindClusters.has(entry.clusterName)
+          )
+          .map(([id]) => id);
+        for (const id of missingActiveIds) {
+          const entry = clusters[id];
+          clusters[id] = { ...entry, state: "failed" };
+          await log(
+            `  ${entry.clusterName} was '${entry.state}' but is missing from kind; marking failed`,
+          );
+        }
+
         // 1. Delete all "deleting" clusters and mark as "deleted"
         const deletingIds = Object.entries(clusters)
           .filter(([, e]) => e.state === "deleting")
@@ -533,6 +594,7 @@ export const model = {
         }
 
         if (
+          missingActiveIds.length === 0 &&
           deletingIds.length === 0 &&
           surplus <= 0 &&
           deficit <= 0

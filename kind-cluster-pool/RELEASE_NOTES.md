@@ -10,3 +10,7 @@ container runtime.
 **Changed:** Pool size and subprocess concurrency are bounded, force
 reinitialization cannot orphan existing clusters, and discovery failures abort
 reconciliation.
+
+**Fixed:** Reconciliation replaces tracked clusters that disappeared outside
+the model, and failed initial state persistence cleans up newly created
+clusters.
