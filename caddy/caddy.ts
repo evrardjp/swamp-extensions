@@ -342,7 +342,7 @@ function renderCompose(image: string, ports: number[]): string {
   const effectivePorts = ports.length === 0 ? [8080] : ports;
   const publicPortLines = effectivePorts.map((p) => `      - '${p}:${p}'\n`)
     .join("");
-  return `services:\n  caddy:\n    image: ${image}\n    container_name: caddy\n    restart: unless-stopped\n    command: ["caddy", "run", "--config", "/etc/caddy/bootstrap.json"]\n    ports:\n      - '127.0.0.1:2019:2019'\n${publicPortLines}    volumes:\n      - ./bootstrap.json:/etc/caddy/bootstrap.json:ro\n      - caddy_data:/data\n      - caddy_config:/config\nvolumes:\n  caddy_data:\n  caddy_config:\n`;
+  return `services:\n  caddy:\n    image: ${image}\n    container_name: caddy\n    restart: unless-stopped\n    command: ["caddy", "run", "--config", "/etc/caddy/caddy.json"]\n    ports:\n      - '127.0.0.1:2019:2019'\n${publicPortLines}    volumes:\n      - ./caddy.json:/etc/caddy/caddy.json:ro\n      - caddy_data:/data\n      - caddy_config:/config\nvolumes:\n  caddy_data:\n  caddy_config:\n`;
 }
 
 function ensureAdminApi(configJson: string): string {
@@ -352,31 +352,6 @@ function ensureAdminApi(configJson: string): string {
     listen: "0.0.0.0:2019",
   };
   return JSON.stringify(config, null, 2);
-}
-
-function bootstrapConfigJson(): string {
-  return JSON.stringify(
-    {
-      admin: { listen: "0.0.0.0:2019" },
-      apps: {
-        http: {
-          servers: {
-            bootstrap: {
-              listen: [":8080"],
-              routes: [{
-                handle: [{
-                  handler: "static_response",
-                  body: "caddy admin api ready",
-                }],
-              }],
-            },
-          },
-        },
-      },
-    },
-    null,
-    2,
-  );
 }
 
 async function writeConfigResource(
@@ -418,11 +393,9 @@ async function applyConfig(configJson: string, context: MethodContext) {
     globalArgs,
     `mkdir -p -- ${shellQuoteRemotePath(globalArgs.workDir)}`,
   );
-  const bootstrapPath = `${globalArgs.workDir}/bootstrap.json`;
   const configPath = `${globalArgs.workDir}/caddy.json`;
   const composePath = `${globalArgs.workDir}/docker-compose.yml`;
   const ports = publishedPortsFromConfig(loadConfigJson);
-  await writeRemote(globalArgs, bootstrapPath, bootstrapConfigJson());
   await writeRemote(globalArgs, configPath, loadConfigJson);
   await writeRemote(
     globalArgs,

@@ -44,6 +44,14 @@ function reverseProxySite(
   };
 }
 
+function decodeRemoteWrite(command: string): string {
+  const encoded = command.match(/\n([A-Za-z0-9+/=]+)\nEOF$/)?.[1];
+  assert(encoded);
+  return new TextDecoder().decode(
+    Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0)),
+  );
+}
+
 Deno.test("caddy exposes render, validation, and apply methods", () => {
   assertEquals(model.type, "@evrardjp/caddy");
   for (
@@ -143,16 +151,42 @@ Deno.test("apply quotes an expanded home workDir and writes UTF-8 safely", async
     sshCommands.find((command) => command.includes("docker compose"))!,
     `cd -- ${quotedWorkDir} && docker compose up -d`,
   );
+  assert(sshCommands.every((command) => !command.includes("bootstrap.json")));
 
   const configWrite = sshCommands.find((command) =>
     command.includes("/caddy.json'")
   )!;
-  const encoded = configWrite.match(/\n([A-Za-z0-9+/=]+)\nEOF$/)?.[1];
-  assert(encoded);
-  const decoded = new TextDecoder().decode(
-    Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0)),
+  assertStringIncludes(decodeRemoteWrite(configWrite), "héllo 世界");
+
+  const composeWrite = sshCommands.find((command) =>
+    command.includes("/docker-compose.yml'")
+  )!;
+  const compose = decodeRemoteWrite(composeWrite);
+  assertStringIncludes(
+    compose,
+    'command: ["caddy", "run", "--config", "/etc/caddy/caddy.json"]',
   );
-  assertStringIncludes(decoded, "héllo 世界");
+  assertStringIncludes(
+    compose,
+    "- ./caddy.json:/etc/caddy/caddy.json:ro",
+  );
+  assert(sshCommands.indexOf(configWrite) < sshCommands.indexOf(composeWrite));
+  const composeUp = sshCommands.findIndex((command) =>
+    command.includes("docker compose up -d")
+  );
+  const liveReload = sshCommands.findIndex((command) =>
+    command.includes("http://127.0.0.1:2019/load")
+  );
+  assert(composeUp > sshCommands.indexOf(composeWrite));
+  assert(liveReload > composeUp);
+
+  assertEquals(testContext.writes.map((write) => write.specName), [
+    "validation",
+    "apply",
+  ]);
+  assertEquals(testContext.writes[1].data.success, true);
+  assertEquals(testContext.writes[1].data.configPath, `${workDir}/caddy.json`);
+  assertEquals(testContext.writes[1].data.publishedPorts, [8080]);
 });
 
 Deno.test("compose failure does not remove the running proxy", async () => {
