@@ -157,6 +157,9 @@ export const report = {
       lines.push(`- Latest sync artifact: \`${md(latestSync.dataName)}\``);
       lines.push(`- Latest sync started: ${md(latestSync.startedAt)}`);
       lines.push(`- Latest sync finished: ${md(latestSync.finishedAt)}`);
+      lines.push(
+        `- Latest sync complete: ${md(latestSync.complete ?? "unknown")}`,
+      );
       lines.push(`- PRs synced in latest run: ${md(latestSync.prCount ?? 0)}`);
       lines.push(
         `- Issues synced in latest run: ${md(latestSync.issueCount ?? 0)}`,
@@ -169,6 +172,18 @@ export const report = {
           md(latestSync.checkRunCount ?? 0)
         }`,
       );
+      const syncErrors = Array.isArray(latestSync.errors)
+        ? latestSync.errors.filter((error) =>
+          error && typeof error === "object" && !Array.isArray(error)
+        ) as Record<string, unknown>[]
+        : [];
+      for (const error of syncErrors) {
+        lines.push(
+          `- Sync error (${md(error.component ?? "unknown")}): ${
+            md(error.error ?? "unknown error")
+          }`,
+        );
+      }
     }
     lines.push(
       `- Git object path: \`${
