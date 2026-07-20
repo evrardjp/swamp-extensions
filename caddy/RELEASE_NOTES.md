@@ -10,3 +10,6 @@ TLS certificate verification.
 **Fixed:** Remote paths and file content are safely encoded, HTTP-only sites
 honor disabled TLS, and failed Compose startup no longer removes a running
 proxy.
+
+**Fixed:** Container and host restarts now load the durable managed Caddy
+configuration instead of returning to the bootstrap placeholder.
