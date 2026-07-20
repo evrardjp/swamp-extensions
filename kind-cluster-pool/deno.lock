@@ -1,0 +1,34 @@
+{
+  "version": "5",
+  "specifiers": {
+    "jsr:@std/assert@1": "1.0.19",
+    "jsr:@std/assert@1.0.19": "1.0.19",
+    "jsr:@std/internal@^1.0.12": "1.0.13",
+    "jsr:@systeminit/swamp-testing@0.20260518.13": "0.20260518.13",
+    "npm:zod@4": "4.4.3",
+    "npm:zod@^4.3.6": "4.4.3"
+  },
+  "jsr": {
+    "@std/assert@1.0.19": {
+      "integrity": "eaada96ee120cb980bc47e040f82814d786fe8162ecc53c91d8df60b8755991e",
+      "dependencies": [
+        "jsr:@std/internal"
+      ]
+    },
+    "@std/internal@1.0.13": {
+      "integrity": "2f9546691d4ac2d32859c82dff284aaeac980ddeca38430d07941e7e288725c0"
+    },
+    "@systeminit/swamp-testing@0.20260518.13": {
+      "integrity": "603f810070d6dadc3ac7846e14b8f0de43ff9728f125d19d7c206214c8e2b9e0",
+      "dependencies": [
+        "jsr:@std/assert@1.0.19",
+        "npm:zod@^4.3.6"
+      ]
+    }
+  },
+  "npm": {
+    "zod@4.4.3": {
+      "integrity": "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="
+    }
+  }
+}

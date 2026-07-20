@@ -1,0 +1,17 @@
+{
+  "lint": {
+    "rules": {
+      "exclude": ["no-import-prefix", "require-await"]
+    }
+  },
+  "tasks": {
+    "fmt": "deno fmt --check *.ts",
+    "doc": "deno doc *.ts",
+    "check": "deno check *.ts",
+    "lint": "deno lint *.ts",
+    "test": "deno test --allow-read --allow-write",
+    "swampfmt": "swamp extension fmt manifest.yaml --check",
+    "swampquality": "swamp extension quality manifest.yaml",
+    "swamppushdryrun": "swamp extension push manifest.yaml --dry-run --yes"
+  }
+}
