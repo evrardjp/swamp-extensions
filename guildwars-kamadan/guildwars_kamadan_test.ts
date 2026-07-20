@@ -1,6 +1,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
   brokerCommand,
+  isBrokerProcess,
   isTraderPriceInWindow,
   model,
 } from "./guildwars_kamadan.ts";
@@ -39,6 +40,69 @@ Deno.test("broker command passes hostile paths and URLs as literal arguments", (
     "wss://example.test/'; touch /tmp/injected; '",
     "/tmp/spool dir/$(touch injected)",
   ]);
+});
+
+Deno.test("broker PID ownership requires the exact generated command", async () => {
+  const command = brokerCommand(
+    "/repo/.swamp/kamadan-broker/broker.ts",
+    "wss://kamadan.gwtoolbox.com/",
+    "/repo/.swamp/kamadan-broker",
+  );
+  let readPath = "";
+  const readFile = (path: string) => {
+    readPath = path;
+    return Promise.resolve(
+      new TextEncoder().encode(
+        ["/usr/bin/deno", ...command.args, ""].join("\0"),
+      ),
+    );
+  };
+
+  assertEquals(await isBrokerProcess(123, command, readFile), true);
+  assertEquals(readPath, "/proc/123/cmdline");
+});
+
+Deno.test("broker PID ownership rejects stale or unreadable processes", async () => {
+  const command = brokerCommand(
+    "/repo/.swamp/kamadan-broker/broker.ts",
+    "wss://kamadan.gwtoolbox.com/",
+    "/repo/.swamp/kamadan-broker",
+  );
+  const commandLine = (argv: string[]) =>
+    Promise.resolve(new TextEncoder().encode([...argv, ""].join("\0")));
+
+  assertEquals(
+    await isBrokerProcess(
+      456,
+      command,
+      () => commandLine(["/usr/bin/sleep", "60"]),
+    ),
+    false,
+  );
+  assertEquals(
+    await isBrokerProcess(
+      456,
+      command,
+      () =>
+        commandLine([
+          "/usr/bin/deno",
+          ...brokerCommand(
+            "/tmp/unrelated-broker.ts",
+            "wss://kamadan.gwtoolbox.com/",
+            "/repo/.swamp/kamadan-broker",
+          ).args,
+        ]),
+    ),
+    false,
+  );
+  assertEquals(
+    await isBrokerProcess(
+      456,
+      command,
+      () => Promise.reject(new Error("gone")),
+    ),
+    false,
+  );
 });
 
 Deno.test("market cutoff excludes stale direct trader prices", () => {

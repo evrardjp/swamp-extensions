@@ -177,15 +177,6 @@ async function readJsonFile(
   }
 }
 
-async function processRunning(pid: number): Promise<boolean> {
-  const result = await new DenoCommand("kill", {
-    args: ["-0", "--", String(pid)],
-    stdout: "null",
-    stderr: "null",
-  }).output();
-  return result.code === 0;
-}
-
 /** Build a broker process command without shell interpolation. */
 export function brokerCommand(
   script: string,
@@ -204,6 +195,30 @@ export function brokerCommand(
       dir,
     ],
   };
+}
+
+type ProcessCommand = ReturnType<typeof brokerCommand>;
+type ReadProcessFile = (path: string) => Promise<Uint8Array>;
+
+/** Confirm a Linux PID is running this exact generated broker command. */
+export async function isBrokerProcess(
+  pid: number,
+  command: ProcessCommand,
+  readFile: ReadProcessFile = DenoApi.readFile,
+): Promise<boolean> {
+  try {
+    const raw = await readFile(`/proc/${pid}/cmdline`);
+    const argv = new TextDecoder().decode(raw).split("\0");
+    while (argv.at(-1) === "") argv.pop();
+    if (argv.length !== command.args.length + 1) return false;
+
+    const executable = argv[0].split("/").at(-1);
+    return executable === command.command &&
+      command.args.every((arg, index) => argv[index + 1] === arg);
+  } catch {
+    // Missing /proc entries and permission/read failures must not trust the PID.
+    return false;
+  }
 }
 
 /** Return whether a direct trader price belongs to the current market window. */
@@ -772,8 +787,13 @@ export const model = {
       execute: async (args: { restart: boolean }, context: MethodContext) => {
         const paths = brokerPaths(context.repoDir, context.globalArgs);
         await DenoApi.mkdir(paths.dir, { recursive: true });
+        const command = brokerCommand(
+          paths.script,
+          context.globalArgs.websocketUrl,
+          paths.dir,
+        );
         const pid = await brokerPid(paths);
-        if (pid && await processRunning(pid)) {
+        if (pid && await isBrokerProcess(pid, command)) {
           if (!args.restart) {
             const status = await readJsonFile(paths.status);
             const stat = await DenoApi.stat(paths.spool).catch(() => ({
@@ -804,11 +824,6 @@ export const model = {
           }
         }
         await ensureBrokerScript(paths);
-        const command = brokerCommand(
-          paths.script,
-          context.globalArgs.websocketUrl,
-          paths.dir,
-        );
         const child = new DenoCommand(command.command, {
           args: command.args,
           stdin: "null",
@@ -877,8 +892,16 @@ export const model = {
       arguments: z.object({}),
       execute: async (_args: Record<string, never>, context: MethodContext) => {
         const paths = brokerPaths(context.repoDir, context.globalArgs);
-        const pid = await brokerPid(paths);
-        const running = pid ? await processRunning(pid) : false;
+        const storedPid = await brokerPid(paths);
+        const command = brokerCommand(
+          paths.script,
+          context.globalArgs.websocketUrl,
+          paths.dir,
+        );
+        const running = storedPid
+          ? await isBrokerProcess(storedPid, command)
+          : false;
+        const pid = running ? storedPid : undefined;
         const stat = await DenoApi.stat(paths.spool).catch(() => ({ size: 0 }));
         const cursor = await readCursor(context);
         const handle = await context.writeResource(
