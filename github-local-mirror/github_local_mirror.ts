@@ -342,6 +342,7 @@ const SubjectReferenceSchema = z.object({
 const PrCommitSchema = z.object({
   repo: z.string(),
   prNumber: z.number().int().positive(),
+  headSha: z.string().optional(),
   sha: z.string().min(1),
   parentShas: z.array(z.string()),
   message: z.string().optional(),
@@ -352,6 +353,14 @@ const PrCommitSchema = z.object({
   url: z.string().optional(),
   changedFiles: z.array(ChangedFileSchema).default([]),
   syncedAt: IsoDateTime,
+}).passthrough();
+
+const ReviewSelectionSchema = z.object({
+  repo: z.string(),
+  subjectType: z.enum(["issue", "pr"]),
+  subjectNumber: z.number().int().positive(),
+  headSha: z.string().optional(),
+  selectedAt: IsoDateTime,
 }).passthrough();
 
 const CollectionStatusSchema = z.object({
@@ -553,6 +562,7 @@ async function ghPages<T>(
   params: Record<string, string | number | undefined> = {},
   extract: (value: unknown) => T[] = (value) => value as T[],
   deadlineMs?: number,
+  stopAfterPage?: (items: T[]) => boolean,
 ): Promise<PageResult<T>> {
   const url = new URL(`https://api.github.com${path}`);
   url.searchParams.set("per_page", "100");
@@ -584,8 +594,10 @@ async function ghPages<T>(
           }`,
         };
       }
-      out.push(...extract(await res.json()));
+      const pageItems = extract(await res.json());
+      out.push(...pageItems);
       next = parseNext(res.headers.get("link"));
+      if (stopAfterPage?.(pageItems)) next = undefined;
     } catch (err) {
       return { items: out, complete: false, error: errorMessage(err) };
     }
@@ -731,6 +743,19 @@ async function changedFilesBetween(
     });
   }
   return files;
+}
+
+async function gitMergeBase(
+  gitObjectPath: string,
+  baseSha: string,
+  headSha: string,
+  deadlineMs?: number,
+): Promise<string> {
+  return (await runGitOk(
+    gitObjectPath,
+    ["merge-base", baseSha, headSha],
+    deadlineMs,
+  )).trim();
 }
 
 async function ensureDir(path: string): Promise<void> {
@@ -1336,9 +1361,18 @@ async function syncPrDetails(
     await writeJsonFileAtomically(filesPath, filesResult.items);
   }
   if (isNewHead && pr.head?.sha) {
+    const comparisonBase = previous?.headSha ??
+      (pr.base?.sha
+        ? await gitMergeBase(
+          g.gitObjectPath,
+          pr.base.sha,
+          pr.head.sha,
+          deadlineMs,
+        )
+        : undefined);
     const changedFiles = await changedFilesBetween(
       g.gitObjectPath,
-      previous?.headSha ?? pr.base?.sha,
+      comparisonBase,
       pr.head.sha,
       deadlineMs,
     );
@@ -1408,8 +1442,12 @@ async function syncPrDetails(
   );
   const latestReviewByUser = new Map<string, string>();
   for (const review of reviewsResult.items) {
-    if (review.user?.login && review.state) {
-      latestReviewByUser.set(review.user.login, review.state.toLowerCase());
+    const state = review.state?.toLowerCase();
+    if (
+      review.user?.login &&
+      (state === "approved" || state === "changes_requested")
+    ) {
+      latestReviewByUser.set(review.user.login, state);
     }
   }
   const latestReviewStates = [...latestReviewByUser.values()];
@@ -1716,6 +1754,7 @@ async function syncPrDetails(
         {
           repo,
           prNumber: pr.number,
+          headSha: pr.head?.sha,
           sha: commit.sha,
           parentShas: (commit.parents ?? []).map((parent) => parent.sha).filter(
             Boolean,
@@ -1888,6 +1927,9 @@ async function syncMirror(args: { budgetSeconds?: number }, ctx: Context) {
       },
       undefined,
       deadlineMs,
+      since
+        ? (items) => (items.at(-1)?.updated_at ?? since) < since
+        : undefined,
     );
     if (!prsResult.complete) {
       errors.push({
@@ -2410,35 +2452,44 @@ async function prepareReviewContext(args: unknown, ctx: Context) {
   const parsed = PrepareReviewContextArgsSchema.parse(args);
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
   const worktreeResult = await analyzeWorktrees({}, ctx);
+  let headSha: string | undefined;
+  let baseSha: string | undefined;
   if (parsed.subjectType === "pr") {
     const pr = await readPrRecord(g, parsed.number);
-    const headSha = await readMirroredPrHead(g, parsed.number);
-    return {
-      dataHandles: worktreeResult.dataHandles,
-      subject: {
-        repo: repoFullName(g),
-        subjectType: parsed.subjectType,
-        number: parsed.number,
-        headSha,
-        baseSha: pr.baseSha,
-      },
-    };
-  }
-  const issue = await readJsonFile<Record<string, unknown> | null>(
-    issueRecordPath(g, parsed.number),
-    null,
-  );
-  if (!issue) {
-    throw new Error(
-      `Issue ${parsed.number} is not present in the local mirror; run sync first`,
+    headSha = await readMirroredPrHead(g, parsed.number);
+    baseSha = pr.baseSha;
+  } else {
+    const issue = await readJsonFile<Record<string, unknown> | null>(
+      issueRecordPath(g, parsed.number),
+      null,
     );
+    if (!issue) {
+      throw new Error(
+        `Issue ${parsed.number} is not present in the local mirror; run sync first`,
+      );
+    }
   }
+  const selectedAt = nowIso();
+  const selection = {
+    repo: repoFullName(g),
+    subjectType: parsed.subjectType,
+    subjectNumber: parsed.number,
+    headSha,
+    selectedAt,
+  };
+  const selectionHandle = await ctx.writeResource(
+    "reviewSelection",
+    "review-selection-current",
+    selection,
+  );
   return {
-    dataHandles: worktreeResult.dataHandles,
+    dataHandles: [...worktreeResult.dataHandles, selectionHandle],
     subject: {
-      repo: repoFullName(g),
+      repo: selection.repo,
       subjectType: parsed.subjectType,
       number: parsed.number,
+      headSha,
+      baseSha,
     },
   };
 }
@@ -2487,7 +2538,7 @@ async function recordPrAnalysis(args: unknown, ctx: Context) {
 /** Swamp-backed local GitHub mirror model. */
 export const model = {
   type: "@evrardjp/github-local-mirror",
-  version: "2026.07.20.1",
+  version: "2026.07.21.1",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -2500,6 +2551,12 @@ export const model = {
       toVersion: "2026.07.20.1",
       description:
         "Add bounded collection metadata and pull request review context resources",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.07.21.1",
+      description:
+        "Correct PR review state, revision, pagination, and report selection behavior",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -2578,6 +2635,12 @@ export const model = {
       schema: PrAnalysisEvidenceSchema,
       lifetime: "infinite",
       garbageCollection: 500,
+    },
+    reviewSelection: {
+      description: "PR or issue selected for the current context report",
+      schema: ReviewSelectionSchema,
+      lifetime: "infinite",
+      garbageCollection: 50,
     },
     checkRunSnapshot: {
       description: "GitHub check run status for PR heads",

@@ -256,11 +256,16 @@ Deno.test("prepare_review_context refreshes local state and validates subjects",
     number: 8,
   }, context);
 
-  assertEquals(prResult.dataHandles, []);
+  assertEquals(prResult.dataHandles.length, 1);
   assertEquals(prResult.subject.headSha, headSha);
-  assertEquals(issueResult.dataHandles, []);
+  assertEquals(issueResult.dataHandles.length, 1);
   assertEquals(issueResult.subject.number, 8);
-  assertEquals(writes, []);
+  assertEquals(writes.map((write) => write.specName), [
+    "reviewSelection",
+    "reviewSelection",
+  ]);
+  assertEquals(writes.at(-1)?.data.subjectType, "issue");
+  assertEquals(writes.at(-1)?.data.subjectNumber, 8);
   await assertRejects(
     () =>
       model.methods.prepare_review_context.execute({
@@ -345,6 +350,8 @@ Deno.test("sync retries incomplete PR files for an unchanged head", async () => 
 
   const originalFetch = globalThis.fetch;
   let filesFirstPageRequests = 0;
+  let prListRequests = 0;
+  let prListPageTwoRequests = 0;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = new URL(
       typeof input === "string"
@@ -363,10 +370,26 @@ Deno.test("sync retries incomplete PR files for an unchanged head", async () => 
       return json({ default_branch: "main" });
     }
     if (url.pathname === "/repos/owner/repo/pulls") {
-      return json([{
+      if (url.searchParams.get("page") === "2") {
+        prListPageTwoRequests++;
+        return json([]);
+      }
+      prListRequests++;
+      const headers = new Headers({ "content-type": "application/json" });
+      if (prListRequests >= 3) {
+        headers.set(
+          "link",
+          '<https://api.github.com/repos/owner/repo/pulls?page=2>; rel="next"',
+        );
+      }
+      const items: Record<string, unknown>[] = [{
         number: 1,
         updated_at: "2099-07-20T00:00:00Z",
-      }]);
+      }];
+      if (prListRequests >= 3) {
+        items.push({ number: 999, updated_at: "2000-01-01T00:00:00Z" });
+      }
+      return json(items, { headers });
     }
     if (url.pathname === "/repos/owner/repo/pulls/1") {
       return json({
@@ -403,8 +426,20 @@ Deno.test("sync retries incomplete PR files for an unchanged head", async () => 
         sha: headSha,
       }], { headers });
     }
+    if (url.pathname === "/repos/owner/repo/pulls/1/reviews") {
+      return json([{
+        id: 1,
+        user: { login: "reviewer" },
+        state: "CHANGES_REQUESTED",
+        submitted_at: "2026-07-20T00:00:00Z",
+      }, {
+        id: 2,
+        user: { login: "reviewer" },
+        state: "COMMENTED",
+        submitted_at: "2026-07-20T01:00:00Z",
+      }]);
+    }
     if (
-      url.pathname === "/repos/owner/repo/pulls/1/reviews" ||
       url.pathname === "/repos/owner/repo/pulls/1/comments" ||
       url.pathname === "/repos/owner/repo/issues/1/comments" ||
       url.pathname === "/repos/owner/repo/issues/1/timeline"
@@ -471,6 +506,7 @@ Deno.test("sync retries incomplete PR files for an unchanged head", async () => 
     const forcedRetry = await model.methods.sync.execute({}, context);
     assertEquals(forcedRetry.complete, true);
     assertEquals(filesFirstPageRequests, 4);
+    assertEquals(prListPageTwoRequests, 0);
     const fileStatuses = writes.filter((write) =>
       write.specName === "collectionStatus" &&
       write.data.component === "prSnapshot" &&
@@ -482,6 +518,12 @@ Deno.test("sync retries incomplete PR files for an unchanged head", async () => 
       false,
       true,
     ]);
+    const latestPr = writes.filter((write) => write.specName === "prSnapshot")
+      .at(-1);
+    assertEquals(latestPr?.data.reviewDecision, "CHANGES_REQUESTED");
+    const latestCommit = writes.filter((write) => write.specName === "prCommit")
+      .at(-1);
+    assertEquals(latestCommit?.data.headSha, headSha);
   } finally {
     globalThis.fetch = originalFetch;
   }
