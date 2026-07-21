@@ -747,6 +747,14 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+async function removeFileIfPresent(path: string): Promise<void> {
+  try {
+    await Deno.remove(path);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+}
+
 async function readJsonFile<T>(path: string, fallback: T): Promise<T> {
   try {
     return JSON.parse(await Deno.readTextFile(path)) as T;
@@ -761,12 +769,38 @@ async function writeJsonFile(path: string, value: unknown): Promise<void> {
   await Deno.writeTextFile(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+async function writeJsonFileAtomically(
+  path: string,
+  value: unknown,
+): Promise<void> {
+  await ensureDir(path.split("/").slice(0, -1).join("/") || ".");
+  const temporaryPath = `${path}.${crypto.randomUUID()}.tmp`;
+  try {
+    await Deno.writeTextFile(
+      temporaryPath,
+      `${JSON.stringify(value, null, 2)}\n`,
+    );
+    await Deno.rename(temporaryPath, path);
+  } catch (err) {
+    await removeFileIfPresent(temporaryPath);
+    throw err;
+  }
+}
+
 function statePath(g: GlobalArgs): string {
   return `${g.artifactRoot}/state.json`;
 }
 
 function prRecordPath(g: GlobalArgs, pr: number): string {
   return `${g.artifactRoot}/prs/${pr}/current.json`;
+}
+
+function prFilesCompletePath(
+  g: GlobalArgs,
+  prNumber: number,
+  headSha: string,
+): string {
+  return `${g.artifactRoot}/prs/${prNumber}/revisions/${headSha}/files.complete.json`;
 }
 
 function issueRecordPath(g: GlobalArgs, issue: number): string {
@@ -1267,7 +1301,17 @@ async function syncPrDetails(
     url: pr.html_url,
   };
   const isNewHead = Boolean(pr.head?.sha && pr.head.sha !== previous?.headSha);
-  const filesResult = isNewHead
+  const filesCompletePath = pr.head?.sha
+    ? prFilesCompletePath(g, pr.number, pr.head.sha)
+    : undefined;
+  const needsFileSync = Boolean(
+    pr.head?.sha &&
+      (isNewHead || !filesCompletePath || !await exists(filesCompletePath)),
+  );
+  if (isNewHead && filesCompletePath) {
+    await removeFileIfPresent(filesCompletePath);
+  }
+  const filesResult = needsFileSync
     ? await ghPages<GhFile>(
       g,
       `/repos/${g.owner}/${g.repo}/pulls/${pr.number}/files`,
@@ -1285,10 +1329,12 @@ async function syncPrDetails(
       deadlineMs,
     )
     : undefined;
-  const filesPath = isNewHead
+  const filesPath = needsFileSync
     ? `${g.artifactRoot}/prs/${pr.number}/revisions/${pr.head?.sha}/files.json`
     : undefined;
-  if (filesPath) await writeJsonFile(filesPath, filesResult.items);
+  if (filesPath && filesResult.complete) {
+    await writeJsonFileAtomically(filesPath, filesResult.items);
+  }
   if (isNewHead && pr.head?.sha) {
     const changedFiles = await changedFilesBetween(
       g.gitObjectPath,
@@ -1345,6 +1391,13 @@ async function syncPrDetails(
         },
       ),
     );
+  }
+  if (needsFileSync && filesResult.complete && filesCompletePath) {
+    await writeJsonFile(filesCompletePath, {
+      headSha: pr.head?.sha,
+      itemCount: filesResult.items.length,
+      completedAt: syncedAt,
+    });
   }
   const reviewsResult = await ghPages<GhReview>(
     g,

@@ -328,3 +328,161 @@ Deno.test("record_pr_analysis rejects stale heads and records current head", asy
   assertEquals(writes[0].data.baseSha, "base-sha");
   assertEquals(writes[0].data.evidenceRefs, []);
 });
+
+Deno.test("sync retries incomplete PR files for an unchanged head", async () => {
+  const { root, writes, context } = await tempContext();
+  const upstream = `${root}/upstream.git`;
+  const headSha = await createMirroredPrRef(root, upstream, 1);
+  const init = await new Deno.Command("git", {
+    args: ["init", "--bare", context.globalArgs.gitObjectPath],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (init.code !== 0) {
+    throw new Error(new TextDecoder().decode(init.stderr));
+  }
+  Object.assign(context.globalArgs, { gitRemoteUrl: upstream });
+
+  const originalFetch = globalThis.fetch;
+  let filesFirstPageRequests = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+        ? input.href
+        : input.url,
+    );
+    const json = (value: unknown, init?: ResponseInit) =>
+      new Response(JSON.stringify(value), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        ...init,
+      });
+    if (url.pathname === "/repos/owner/repo") {
+      return json({ default_branch: "main" });
+    }
+    if (url.pathname === "/repos/owner/repo/pulls") {
+      return json([{
+        number: 1,
+        updated_at: "2099-07-20T00:00:00Z",
+      }]);
+    }
+    if (url.pathname === "/repos/owner/repo/pulls/1") {
+      return json({
+        number: 1,
+        title: "Retry files",
+        state: "open",
+        draft: false,
+        user: { login: "contributor" },
+        labels: [],
+        base: { ref: "main", sha: headSha },
+        head: { ref: "feature", sha: headSha },
+        created_at: "2026-07-19T00:00:00Z",
+        updated_at: "2099-07-20T00:00:00Z",
+      });
+    }
+    if (url.pathname === "/repos/owner/repo/pulls/1/files") {
+      if (url.searchParams.get("page") === "2") {
+        return new Response("transient", { status: 502 });
+      }
+      filesFirstPageRequests++;
+      const headers = new Headers({ "content-type": "application/json" });
+      if (filesFirstPageRequests === 1 || filesFirstPageRequests === 3) {
+        headers.set(
+          "link",
+          '<https://api.github.com/repos/owner/repo/pulls/1/files?page=2>; rel="next"',
+        );
+      }
+      return json([{
+        filename: "src/main.ts",
+        status: "modified",
+        additions: 2,
+        deletions: 1,
+        changes: 3,
+        sha: headSha,
+      }], { headers });
+    }
+    if (
+      url.pathname === "/repos/owner/repo/pulls/1/reviews" ||
+      url.pathname === "/repos/owner/repo/pulls/1/comments" ||
+      url.pathname === "/repos/owner/repo/issues/1/comments" ||
+      url.pathname === "/repos/owner/repo/issues/1/timeline"
+    ) {
+      return json([]);
+    }
+    if (url.pathname === `/repos/owner/repo/commits/${headSha}/check-runs`) {
+      return json({ check_runs: [] });
+    }
+    if (url.pathname === "/repos/owner/repo/pulls/1/commits") {
+      return json([{
+        sha: headSha,
+        parents: [],
+        commit: { message: "initial", author: {}, committer: {} },
+      }]);
+    }
+    if (url.pathname === "/repos/owner/repo/issues") return json([]);
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const revisionRoot =
+      `${context.globalArgs.artifactRoot}/prs/1/revisions/${headSha}`;
+    const first = await model.methods.sync.execute({}, context);
+    assertEquals(first.complete, false);
+    await assertRejects(
+      () =>
+        Deno.stat(
+          `${context.globalArgs.artifactRoot}/prs/1/revisions/${headSha}/files.complete.json`,
+        ),
+      Deno.errors.NotFound,
+    );
+    await assertRejects(
+      () => Deno.stat(`${revisionRoot}/files.json`),
+      Deno.errors.NotFound,
+    );
+
+    const second = await model.methods.sync.execute({}, context);
+    assertEquals(second.complete, true);
+    assertEquals(filesFirstPageRequests, 2);
+    assertEquals(
+      (await Deno.stat(
+        `${context.globalArgs.artifactRoot}/prs/1/revisions/${headSha}/files.complete.json`,
+      )).isFile,
+      true,
+    );
+    const completeFiles = await Deno.readTextFile(`${revisionRoot}/files.json`);
+
+    await Deno.remove(`${context.globalArgs.artifactRoot}/prs/1/current.json`);
+    const forcedRefresh = await model.methods.sync.execute({}, context);
+    assertEquals(forcedRefresh.complete, false);
+    await assertRejects(
+      () =>
+        Deno.stat(
+          `${context.globalArgs.artifactRoot}/prs/1/revisions/${headSha}/files.complete.json`,
+        ),
+      Deno.errors.NotFound,
+    );
+    assertEquals(
+      await Deno.readTextFile(`${revisionRoot}/files.json`),
+      completeFiles,
+    );
+
+    const forcedRetry = await model.methods.sync.execute({}, context);
+    assertEquals(forcedRetry.complete, true);
+    assertEquals(filesFirstPageRequests, 4);
+    const fileStatuses = writes.filter((write) =>
+      write.specName === "collectionStatus" &&
+      write.data.component === "prSnapshot" &&
+      write.data.subjectNumber === 1
+    );
+    assertEquals(fileStatuses.map((write) => write.data.complete), [
+      false,
+      true,
+      false,
+      true,
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
