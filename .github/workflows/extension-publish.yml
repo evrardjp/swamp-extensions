@@ -46,7 +46,7 @@ jobs:
       has-extensions: ${{ steps.detect.outputs.has-extensions }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -96,7 +96,7 @@ jobs:
         extension: ${{ fromJSON(needs.changed-extensions.outputs.extensions) }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Deno
         uses: denoland/setup-deno@v2
