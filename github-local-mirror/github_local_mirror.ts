@@ -1443,11 +1443,12 @@ async function syncPrDetails(
   const latestReviewByUser = new Map<string, string>();
   for (const review of reviewsResult.items) {
     const state = review.state?.toLowerCase();
-    if (
-      review.user?.login &&
-      (state === "approved" || state === "changes_requested")
-    ) {
-      latestReviewByUser.set(review.user.login, state);
+    const login = review.user?.login;
+    if (!login) continue;
+    if (state === "dismissed") {
+      latestReviewByUser.delete(login);
+    } else if (state === "approved" || state === "changes_requested") {
+      latestReviewByUser.set(login, state);
     }
   }
   const latestReviewStates = [...latestReviewByUser.values()];
