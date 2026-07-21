@@ -572,6 +572,16 @@ Deno.test("commit timeline only includes commits from the current head", async (
           committedAt: "2026-07-03T00:00:00Z",
         },
       },
+      {
+        name: "legacy-commit",
+        spec: "prCommit",
+        value: {
+          prNumber: 1,
+          sha: OLD_SHA,
+          message: "Legacy commit",
+          committedAt: "2026-07-02T00:00:00Z",
+        },
+      },
     ],
     "pr",
     1,
@@ -580,6 +590,31 @@ Deno.test("commit timeline only includes commits from the current head", async (
 
   assertStringIncludes(result.markdown, "Current commit");
   assertEquals(result.markdown.includes("Dropped commit"), false);
+  assertEquals(result.markdown.includes("Legacy commit"), false);
+  assertEquals((result.json.commits as unknown[]).length, 1);
+});
+
+Deno.test("commit timeline falls back to legacy headless commits", async () => {
+  const result = await report.execute(context(
+    [
+      prFixture(),
+      {
+        name: "legacy-commit",
+        spec: "prCommit",
+        value: {
+          prNumber: 1,
+          sha: OLD_SHA,
+          message: "Legacy commit",
+          committedAt: "2026-07-03T00:00:00Z",
+        },
+      },
+    ],
+    "pr",
+    1,
+    { timelineCodeGranularity: "commit" },
+  ));
+
+  assertStringIncludes(result.markdown, "Legacy commit");
   assertEquals((result.json.commits as unknown[]).length, 1);
 });
 

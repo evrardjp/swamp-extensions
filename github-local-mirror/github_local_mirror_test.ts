@@ -352,6 +352,7 @@ Deno.test("sync retries incomplete PR files for an unchanged head", async () => 
   let filesFirstPageRequests = 0;
   let prListRequests = 0;
   let prListPageTwoRequests = 0;
+  let dismissReview = false;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = new URL(
       typeof input === "string"
@@ -427,7 +428,7 @@ Deno.test("sync retries incomplete PR files for an unchanged head", async () => 
       }], { headers });
     }
     if (url.pathname === "/repos/owner/repo/pulls/1/reviews") {
-      return json([{
+      const reviews = [{
         id: 1,
         user: { login: "reviewer" },
         state: "CHANGES_REQUESTED",
@@ -435,9 +436,10 @@ Deno.test("sync retries incomplete PR files for an unchanged head", async () => 
       }, {
         id: 2,
         user: { login: "reviewer" },
-        state: "COMMENTED",
+        state: dismissReview ? "DISMISSED" : "COMMENTED",
         submitted_at: "2026-07-20T01:00:00Z",
-      }]);
+      }];
+      return json(reviews);
     }
     if (
       url.pathname === "/repos/owner/repo/pulls/1/comments" ||
@@ -524,6 +526,15 @@ Deno.test("sync retries incomplete PR files for an unchanged head", async () => 
     const latestCommit = writes.filter((write) => write.specName === "prCommit")
       .at(-1);
     assertEquals(latestCommit?.data.headSha, headSha);
+
+    dismissReview = true;
+    const afterDismissal = await model.methods.sync.execute({}, context);
+    assertEquals(afterDismissal.complete, true);
+    const dismissedPr = writes.filter((write) =>
+      write.specName === "prSnapshot"
+    )
+      .at(-1);
+    assertEquals(dismissedPr?.data.reviewDecision, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }

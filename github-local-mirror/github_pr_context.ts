@@ -640,14 +640,28 @@ export const report = {
       const prNumber = numberField(revision, "prNumber");
       return prNumber && cluster.has(subjectKey("pr", prNumber));
     });
-    const commits = values("prCommit").filter((commit) => {
+    const allCommits = values("prCommit");
+    const prsWithCurrentScopedCommits = new Set<number>();
+    for (const commit of allCommits) {
       const prNumber = numberField(commit, "prNumber");
       const currentHead = prNumber
         ? headByPr.get(prNumber)?.headSha ??
           allPrs.find((pr) => numberField(pr, "number") === prNumber)?.headSha
         : undefined;
-      return prNumber && cluster.has(subjectKey("pr", prNumber)) &&
-        Boolean(currentHead) && commit.headSha === currentHead;
+      if (prNumber && currentHead && commit.headSha === currentHead) {
+        prsWithCurrentScopedCommits.add(prNumber);
+      }
+    }
+    const commits = allCommits.filter((commit) => {
+      const prNumber = numberField(commit, "prNumber");
+      if (!prNumber || !cluster.has(subjectKey("pr", prNumber))) return false;
+      const currentHead = headByPr.get(prNumber)?.headSha ??
+        allPrs.find((pr) => numberField(pr, "number") === prNumber)?.headSha;
+      if (!currentHead) return true;
+      if (prsWithCurrentScopedCommits.has(prNumber)) {
+        return commit.headSha === currentHead;
+      }
+      return !commit.headSha;
     });
     const files = values("prFileSnapshot").filter((file) => {
       const prNumber = numberField(file, "prNumber");
