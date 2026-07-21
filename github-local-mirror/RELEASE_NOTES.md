@@ -8,4 +8,6 @@
 
 **Changed:** GitHub pagination is bounded and incomplete timeline, check, commit, or snapshot collection is recorded explicitly. Incomplete syncs no longer advance the successful cursor.
 
+**Fixed:** Incomplete PR file pagination is retried for the same head until the complete changed-file set has been stored.
+
 **Upgrade note:** Run `sync` after upgrading to populate the new context, relationship, commit, and collection-status resources. Existing snapshots remain compatible, but readiness remains `Unknown` until completeness records exist.
