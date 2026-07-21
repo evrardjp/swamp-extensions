@@ -1,13 +1,11 @@
-## 2026.07.20.1
+## 2026.07.21.1
 
-**Added:** `@evrardjp/github-pr-context` provides a deterministic issue-centered PR/issue timeline with complete comments and event data, per-push or per-commit changed-file tables, local Git inspection commands, worktree state, and tri-state review readiness facts.
+**Fixed:** Context reports can be retrieved after `prepare_review_context` without resupplying method arguments, because the selected PR or issue is now retained in Swamp.
 
-**Added:** PR and issue bodies, subject references, PR commits, richer review events, and collection-completeness records are retained in Swamp. External references remain unresolved and expose their URL when known.
+**Fixed:** Comment-only reviews no longer clear an active changes-requested state, and missing check-run data now leaves CI readiness `Unknown` instead of reporting that no fixes are needed.
 
-**Added:** `prepare_review_context` selects a mirrored PR or issue, while `record_pr_analysis` stores code-path walkthrough and review-attention evidence tied to an exact PR head. The bundled `github-pr-review` skill asks before generating missing LLM evidence.
+**Fixed:** Commit timelines exclude commits dropped by a force-push, initial PR revisions use the Git merge base, and incremental PR listing stops once records are older than the sync window.
 
-**Changed:** GitHub pagination is bounded and incomplete timeline, check, commit, or snapshot collection is recorded explicitly. Incomplete syncs no longer advance the successful cursor.
+**Fixed:** Local repository references are matched case-insensitively and generated analysis commands safely quote model names.
 
-**Fixed:** Incomplete PR file pagination is retried for the same head until the complete changed-file set has been stored.
-
-**Upgrade note:** Run `sync` after upgrading to populate the new context, relationship, commit, and collection-status resources. Existing snapshots remain compatible, but readiness remains `Unknown` until completeness records exist.
+**Upgrade note:** Run `sync` after upgrading so PR commits are recorded against their current head. Older commit records without a head remain stored but are intentionally excluded from current commit timelines.

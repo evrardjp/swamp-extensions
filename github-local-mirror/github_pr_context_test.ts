@@ -124,6 +124,70 @@ Deno.test("PR context computes ready, not ready, and unknown readiness", async (
     (unknown.json.readiness as Record<string, unknown>).result,
     "Unknown",
   );
+
+  const noChecks = await report.execute(context([
+    prFixture(),
+    ...completeStatuses,
+  ]));
+  assertEquals(
+    ((noChecks.json.readiness as Record<string, unknown>).signals as Record<
+      string,
+      unknown
+    >)["Needs CI fixes"],
+    "unknown",
+  );
+});
+
+Deno.test("stored review selection supports later report retrieval", async () => {
+  const reportContext = context([
+    prFixture(),
+    {
+      name: "review-selection-current",
+      spec: "reviewSelection",
+      value: {
+        repo: "owner/repo",
+        subjectType: "pr",
+        subjectNumber: 1,
+        headSha: HEAD_SHA,
+        selectedAt: "2026-07-21T00:00:00Z",
+      },
+    },
+  ]);
+  delete (reportContext as { methodArgs?: Record<string, unknown> }).methodArgs;
+
+  const result = await report.execute(reportContext);
+
+  assertEquals(result.json.primary, { type: "pr", number: 1 });
+});
+
+Deno.test("partial report arguments do not mix with stored selection", async () => {
+  const fixtures: Fixture[] = [
+    prFixture(),
+    {
+      name: "review-selection-current",
+      spec: "reviewSelection",
+      value: {
+        repo: "owner/repo",
+        subjectType: "issue",
+        subjectNumber: 8,
+        selectedAt: "2026-07-21T00:00:00Z",
+      },
+    },
+  ];
+  const typeOnly = context(fixtures);
+  (typeOnly as { methodArgs: Record<string, unknown> }).methodArgs = {
+    subjectType: "pr",
+  };
+  const numberOnly = context(fixtures);
+  (numberOnly as { methodArgs: Record<string, unknown> }).methodArgs = {
+    number: 1,
+  };
+
+  assertEquals((await report.execute(typeOnly)).json.error, "invalid-subject");
+  assertEquals(
+    (await report.execute(numberOnly)).json.error,
+    "invalid-subject",
+  );
 });
 
 Deno.test("PR context expands the issue-centered local cluster", async () => {
@@ -167,6 +231,32 @@ Deno.test("PR context expands the issue-centered local cluster", async () => {
 
   assertEquals(result.json.cluster, ["issue:2", "pr:1", "pr:3"]);
   assertStringIncludes(result.markdown, "Sibling PR");
+});
+
+Deno.test("local repository references are case-insensitive", async () => {
+  const result = await report.execute(context([
+    prFixture(),
+    {
+      name: "issue-2",
+      spec: "issueSnapshot",
+      value: { repo: "owner/repo", number: 2, title: "Case-linked issue" },
+    },
+    {
+      name: "case-ref",
+      spec: "subjectReference",
+      value: {
+        sourceType: "pr",
+        sourceNumber: 1,
+        targetRepo: "Owner/Repo",
+        targetType: "issue",
+        targetNumber: 2,
+        external: false,
+      },
+    },
+  ]));
+
+  assertEquals(result.json.cluster, ["issue:2", "pr:1"]);
+  assertStringIncludes(result.markdown, "Case-linked issue");
 });
 
 Deno.test("primary PR alone determines headline readiness", async () => {
@@ -386,6 +476,113 @@ Deno.test("observed push timeline includes changed files and diff command", asyn
   assertStringIncludes(result.markdown, `diff '${OLD_SHA}..${HEAD_SHA}'`);
 });
 
+Deno.test("first observed push command uses a merge-base diff", async () => {
+  const result = await report.execute(context([
+    prFixture(),
+    {
+      name: "revision-first",
+      spec: "prRevision",
+      value: {
+        prNumber: 1,
+        baseSha: BASE_SHA,
+        headSha: HEAD_SHA,
+        observedAt: "2026-07-03T00:00:00Z",
+        changedFiles: [],
+      },
+    },
+  ]));
+
+  assertStringIncludes(result.markdown, `diff '${BASE_SHA}...${HEAD_SHA}'`);
+});
+
+Deno.test("comment-only reviews do not clear requested changes", async () => {
+  const result = await report.execute(context([
+    prFixture(),
+    ...completeStatuses,
+    {
+      name: "check-1",
+      spec: "checkRunSnapshot",
+      value: {
+        prNumber: 1,
+        headSha: HEAD_SHA,
+        status: "completed",
+        conclusion: "success",
+      },
+    },
+    {
+      name: "review-requested",
+      spec: "activityEvent",
+      value: {
+        subjectType: "pr",
+        subjectNumber: 1,
+        eventType: "review_submitted",
+        githubId: "1",
+        actor: "reviewer",
+        state: "CHANGES_REQUESTED",
+        createdAt: "2026-07-03T00:00:00Z",
+      },
+    },
+    {
+      name: "review-commented",
+      spec: "activityEvent",
+      value: {
+        subjectType: "pr",
+        subjectNumber: 1,
+        eventType: "review_submitted",
+        githubId: "2",
+        actor: "reviewer",
+        state: "COMMENTED",
+        createdAt: "2026-07-03T01:00:00Z",
+      },
+    },
+  ]));
+
+  assertEquals(
+    ((result.json.readiness as Record<string, unknown>).signals as Record<
+      string,
+      unknown
+    >)["Changes requested by reviewer"],
+    "yes",
+  );
+});
+
+Deno.test("commit timeline only includes commits from the current head", async () => {
+  const result = await report.execute(context(
+    [
+      prFixture(),
+      {
+        name: "current-commit",
+        spec: "prCommit",
+        value: {
+          prNumber: 1,
+          headSha: HEAD_SHA,
+          sha: HEAD_SHA,
+          message: "Current commit",
+          committedAt: "2026-07-03T01:00:00Z",
+        },
+      },
+      {
+        name: "dropped-commit",
+        spec: "prCommit",
+        value: {
+          prNumber: 1,
+          headSha: OLD_SHA,
+          sha: OLD_SHA,
+          message: "Dropped commit",
+          committedAt: "2026-07-03T00:00:00Z",
+        },
+      },
+    ],
+    "pr",
+    1,
+    { timelineCodeGranularity: "commit" },
+  ));
+
+  assertStringIncludes(result.markdown, "Current commit");
+  assertEquals(result.markdown.includes("Dropped commit"), false);
+  assertEquals((result.json.commits as unknown[]).length, 1);
+});
+
 Deno.test("report-supplied git commands shell-quote untrusted paths", async () => {
   const path = "src/$(touch owned)'file.ts";
   const result = await report.execute(context([
@@ -428,6 +625,18 @@ Deno.test("PR context shows a command when matching LLM evidence is absent", asy
     "Code-Path walkthrough not analysed through LLM yet",
   );
   assertStringIncludes(result.markdown, "record_pr_analysis");
+});
+
+Deno.test("analysis command shell-quotes the model name", async () => {
+  const reportContext = context([prFixture()]);
+  reportContext.definition.name = "mirror$(touch owned)'name";
+
+  const result = await report.execute(reportContext);
+
+  assertStringIncludes(
+    result.markdown,
+    `swamp model method run 'mirror$(touch owned)'\"'\"'name'`,
+  );
 });
 
 Deno.test("PR context renders LLM evidence matching the current head", async () => {

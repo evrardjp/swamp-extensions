@@ -41,6 +41,7 @@ const EXPECTED_SPECS = new Set([
   "collectionStatus",
   "worktreeAnalysis",
   "prAnalysisEvidence",
+  "reviewSelection",
   "mirrorState",
   "syncRunSummary",
 ]);
@@ -190,7 +191,8 @@ function readinessForPr(
     "startup_failure",
     "stale",
   ]);
-  const ci: TriState = checksComplete !== true || !snapshotKnown
+  const ci: TriState = checksComplete !== true || !snapshotKnown ||
+      currentChecks.length === 0
     ? "unknown"
     : currentChecks.some((check) =>
         badConclusions.has(stringField(check, "conclusion").toLowerCase())
@@ -230,7 +232,8 @@ function readinessForPr(
       }
       continue;
     }
-    if (!stringField(event, "state")) continue;
+    const state = stringField(event, "state").toLowerCase();
+    if (state !== "approved" && state !== "changes_requested") continue;
     latestReviews.set(actor, event);
     if (reviewId) reviewActors.set(reviewId, actor);
   }
@@ -281,7 +284,8 @@ function referenceEndpoint(
 
 function isLocalReference(reference: Value, localRepo: string): boolean {
   return reference.external !== true &&
-    (!reference.targetRepo || reference.targetRepo === localRepo);
+    (!reference.targetRepo ||
+      String(reference.targetRepo).toLowerCase() === localRepo.toLowerCase());
 }
 
 function buildCluster(
@@ -409,7 +413,11 @@ function timelineItems(
           ? gitCommand(
             gitObjectPath,
             previous || base
-              ? `diff ${shellQuote(`${previous || base}..${head}`)}`
+              ? `diff ${
+                shellQuote(
+                  `${previous || base}${previous ? ".." : "..."}${head}`,
+                )
+              }`
               : `show ${shellQuote(head)}`,
           )
           : undefined,
@@ -480,18 +488,8 @@ export const report = {
     if (normalizedType(context.modelType) !== "@evrardjp/github-local-mirror") {
       return { markdown: "", json: {} };
     }
-    const subjectType = context.methodArgs?.subjectType;
-    const number = Number(context.methodArgs?.number);
-    if (
-      (subjectType !== "pr" && subjectType !== "issue") ||
-      !Number.isInteger(number) || number <= 0
-    ) {
-      return {
-        markdown:
-          "# GitHub PR Context\n\n`methodArgs.subjectType` (`pr` or `issue`) and a positive `methodArgs.number` are required.\n",
-        json: { error: "invalid-subject" },
-      };
-    }
+    const requestedSubjectType = context.methodArgs?.subjectType;
+    const requestedNumber = Number(context.methodArgs?.number);
     const modelId = context.modelId ?? context.definition?.id;
     if (!modelId || !context.dataRepository) {
       return {
@@ -545,6 +543,34 @@ export const report = {
       }
     }
     const values = (spec: string) => bySpec.get(spec) ?? [];
+    const selection = values("reviewSelection")[0];
+    const hasRequestedType = requestedSubjectType === "pr" ||
+      requestedSubjectType === "issue";
+    const hasRequestedNumber = Number.isInteger(requestedNumber) &&
+      requestedNumber > 0;
+    const hasAnyRequestedSubject = context.methodArgs != null &&
+      ("subjectType" in context.methodArgs || "number" in context.methodArgs);
+    const hasCompleteRequestedSubject = hasRequestedType && hasRequestedNumber;
+    const subjectType = hasCompleteRequestedSubject
+      ? requestedSubjectType
+      : hasAnyRequestedSubject
+      ? undefined
+      : selection?.subjectType;
+    const number = hasCompleteRequestedSubject
+      ? requestedNumber
+      : hasAnyRequestedSubject
+      ? Number.NaN
+      : Number(selection?.subjectNumber);
+    if (
+      (subjectType !== "pr" && subjectType !== "issue") ||
+      !Number.isInteger(number) || number <= 0
+    ) {
+      return {
+        markdown:
+          "# GitHub PR Context\n\nRun `prepare_review_context` with a PR or issue before retrieving this report.\n",
+        json: { error: "invalid-subject" },
+      };
+    }
     const repo = repoName(context) ||
       stringField(values("mirrorState")[0] ?? {}, "repo");
     const primary: Subject = { type: subjectType, number };
@@ -588,7 +614,10 @@ export const report = {
     }).map((reference) => {
       if (reference.targetType !== "unknown") return reference;
       const targetNumber = numberField(reference, "targetNumber");
-      if (!targetNumber || reference.targetRepo !== repo) return reference;
+      if (
+        !targetNumber ||
+        String(reference.targetRepo).toLowerCase() !== repo.toLowerCase()
+      ) return reference;
       const issueExists = snapshots.has(subjectKey("issue", targetNumber));
       const prExists = snapshots.has(subjectKey("pr", targetNumber));
       if (issueExists === prExists) return reference;
@@ -613,7 +642,12 @@ export const report = {
     });
     const commits = values("prCommit").filter((commit) => {
       const prNumber = numberField(commit, "prNumber");
-      return prNumber && cluster.has(subjectKey("pr", prNumber));
+      const currentHead = prNumber
+        ? headByPr.get(prNumber)?.headSha ??
+          allPrs.find((pr) => numberField(pr, "number") === prNumber)?.headSha
+        : undefined;
+      return prNumber && cluster.has(subjectKey("pr", prNumber)) &&
+        Boolean(currentHead) && commit.headSha === currentHead;
     });
     const files = values("prFileSnapshot").filter((file) => {
       const prNumber = numberField(file, "prNumber");
@@ -724,7 +758,8 @@ export const report = {
       : [];
     const externalReferences = references.filter((reference) =>
       reference.external === true ||
-      (reference.targetRepo && reference.targetRepo !== repo)
+      (reference.targetRepo &&
+        String(reference.targetRepo).toLowerCase() !== repo.toLowerCase())
     ).filter((reference) => {
       const source = referenceEndpoint(reference, "source");
       return source && cluster.has(subjectKey(source.type, source.number));
@@ -909,7 +944,7 @@ export const report = {
         "",
         "```sh",
         `swamp model method run ${
-          JSON.stringify(modelName)
+          shellQuote(modelName)
         } record_pr_analysis --input-file <approved-yaml-path>`,
         "```",
         "",
