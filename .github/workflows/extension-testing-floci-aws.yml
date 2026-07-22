@@ -1,0 +1,47 @@
+name: Extension Testing / floci-aws
+
+on:
+  pull_request:
+    paths:
+      - "floci-aws/**"
+      - ".github/workflows/extension-testing.yml"
+      - ".github/workflows/extension-testing-floci-aws.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+run-name: Test floci-aws
+
+jobs:
+  e2e:
+    name: Early Floci protocol E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.8.3
+      - uses: systeminit/setup-swamp@v0.1.1
+        with:
+          api-key: ${{ secrets.SWAMP_API_KEY }}
+      - name: Run Floci protocol suite
+        working-directory: floci-aws
+        run: deno task e2e
+      - name: Upload compatibility evidence draft
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: floci-aws-compatibility-evidence
+          path: floci-aws/artifacts/*.md
+          if-no-files-found: ignore
+
+  test:
+    uses: ./.github/workflows/extension-testing.yml
+    with:
+      extension: floci-aws
+    secrets:
+      SWAMP_API_KEY: ${{ secrets.SWAMP_API_KEY }}

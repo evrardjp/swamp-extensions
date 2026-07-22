@@ -49,6 +49,14 @@ swamp-extensions/
     README.md
     LICENSE.txt
     models/
+  floci-aws/
+    manifest.yaml
+    README.md
+    LICENSE.txt
+    floci_health.ts
+    s3_bucket.ts
+    s3_object.ts
+    workflows/
   selfcert/
     manifest.yaml
     README.md
@@ -127,6 +135,12 @@ VM pool data and emits ordered execution waves for Swamp workflows.
 Self-signed TLS certificate generator. Creates RSA-4096 certificates locally and
 stores certificate/private-key PEM data in a Swamp vault for downstream service
 configuration.
+
+### `@evrardjp/floci-aws`
+
+Floci AWS compatibility models and protocol tests. Phase 1 exercises health,
+S3 bucket/object lifecycle, conditional requests, restart persistence, and the
+official `@swamp/s3-datastore` using the real Swamp CLI.
 
 ## Relationship between the two
 

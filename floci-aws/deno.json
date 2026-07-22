@@ -1,0 +1,20 @@
+{
+  "lock": false,
+  "tasks": {
+    "fmt": "deno fmt --check *.ts tests",
+    "doc": "deno doc *.ts",
+    "check": "deno check *.ts tests/*.ts",
+    "lint": "deno lint *.ts tests",
+    "test": "deno test --allow-env --allow-read *_test.ts",
+    "protocol": "deno test --allow-env --allow-read --allow-write --allow-run --allow-net tests/protocol_test.ts",
+    "e2e": "deno task protocol",
+    "swampfmt": "swamp extension fmt manifest.yaml --check",
+    "swampquality": "swamp extension quality manifest.yaml",
+    "swamppushdryrun": "swamp extension push manifest.yaml --dry-run --yes"
+  },
+  "lint": {
+    "rules": {
+      "exclude": ["no-import-prefix"]
+    }
+  }
+}
