@@ -22,6 +22,7 @@ jobs:
           - arch-cloud-init
           - capability-orchestrator
           - cloud-init-nocloud
+          - floci-aws
           - github-project-activity
           - libvirt-vm-pool
           - openbao-configurator

@@ -1,0 +1,120 @@
+id: 2d512a55-b81b-4e60-822f-8ef9a6fa56f5
+name: "@evrardjp/floci-aws-smoke"
+description: Exercise the Phase 1 S3 lifecycle exclusively through Swamp model methods
+tags:
+  provider: aws
+  emulator: floci
+inputs:
+  type: object
+  properties:
+    endpoint:
+      type: string
+      default: http://127.0.0.1:4566
+    region:
+      type: string
+      default: us-east-1
+    bucket:
+      type: string
+    key:
+      type: string
+      default: smoke.txt
+    body:
+      type: string
+      default: hello-from-swamp
+  required:
+    - bucket
+jobs:
+  - name: s3-lifecycle
+    steps:
+      - name: create-bucket
+        task:
+          type: model_method
+          modelType: "@evrardjp/floci-aws/s3-bucket"
+          modelName: floci-smoke-bucket
+          methodName: create
+          globalArgs:
+            endpoint: "${{ inputs.endpoint }}"
+            region: "${{ inputs.region }}"
+            bucket: "${{ inputs.bucket }}"
+          inputs:
+            bucket: "${{ inputs.bucket }}"
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+      - name: head-bucket
+        task:
+          type: model_method
+          modelIdOrName: floci-smoke-bucket
+          methodName: head
+        dependsOn:
+          - step: create-bucket
+            condition: { type: succeeded }
+        weight: 0
+        allowFailure: false
+      - name: put-object
+        task:
+          type: model_method
+          modelType: "@evrardjp/floci-aws/s3-object"
+          modelName: floci-smoke-object
+          methodName: put
+          globalArgs:
+            endpoint: "${{ inputs.endpoint }}"
+            region: "${{ inputs.region }}"
+            bucket: "${{ inputs.bucket }}"
+            key: "${{ inputs.key }}"
+          inputs:
+            bucket: "${{ inputs.bucket }}"
+            key: "${{ inputs.key }}"
+            body: "${{ inputs.body }}"
+            contentType: text/plain
+            ifNoneMatch: "*"
+        dependsOn:
+          - step: head-bucket
+            condition: { type: succeeded }
+        weight: 0
+        allowFailure: false
+      - name: head-object
+        task:
+          type: model_method
+          modelIdOrName: floci-smoke-object
+          methodName: head
+        dependsOn:
+          - step: put-object
+            condition: { type: succeeded }
+        weight: 0
+        allowFailure: false
+      - name: get-object
+        task:
+          type: model_method
+          modelIdOrName: floci-smoke-object
+          methodName: get
+          inputs:
+            ifMatch: '${{ data.latest("floci-smoke-object", "state").attributes.etag }}'
+        dependsOn:
+          - step: head-object
+            condition: { type: succeeded }
+        weight: 0
+        allowFailure: false
+      - name: delete-object
+        task:
+          type: model_method
+          modelIdOrName: floci-smoke-object
+          methodName: delete
+        dependsOn:
+          - step: get-object
+            condition: { type: succeeded }
+        weight: 0
+        allowFailure: false
+      - name: delete-bucket
+        task:
+          type: model_method
+          modelIdOrName: floci-smoke-bucket
+          methodName: delete
+        dependsOn:
+          - step: delete-object
+            condition: { type: succeeded }
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+version: 1

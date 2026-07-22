@@ -1,0 +1,30 @@
+manifestVersion: 1
+name: "@evrardjp/floci-aws"
+version: "2026.07.21.1"
+description: >-
+  Floci AWS protocol compatibility models and reproducible S3 lifecycle tests
+  for Swamp.
+repository: "https://github.com/evrardjp/swamp-extensions/tree/main/floci-aws"
+paths:
+  base: manifest
+models:
+  - floci_health.ts
+  - s3_bucket.ts
+  - s3_object.ts
+workflows:
+  - workflows/workflow-2d512a55-b81b-4e60-822f-8ef9a6fa56f5.yaml
+vaults: []
+drivers: []
+datastores: []
+reports: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+  - ROADMAP.md
+  - issue-drafts/swamp-extension-aws-sdk-bundling.md
+labels:
+  - aws
+  - floci
+  - s3
+  - testing
+dependencies: []
