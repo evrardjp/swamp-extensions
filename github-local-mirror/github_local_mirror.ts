@@ -1939,22 +1939,11 @@ async function syncMirror(args: { budgetSeconds?: number }, ctx: Context) {
         error: prsResult.error ?? "incomplete PR collection",
       });
     }
-    handles.push(
-      await writeCollectionStatus(
-        normalizedContext,
-        "prSnapshot",
-        prsResult.complete,
-        prsResult.items.length,
-        nowIso(),
-        "repo",
-        undefined,
-        prsResult.error,
-      ),
-    );
     const selectedPrs = since
       ? prsResult.items.filter((p) => (p.updated_at ?? "") >= since)
       : prsResult.items;
     let maxPrUpdated = state.cursor.lastPrUpdatedAt;
+    let prBudgetError: string | undefined;
     for (const pr of selectedPrs) {
       if (
         args.budgetSeconds &&
@@ -2012,47 +2001,34 @@ async function syncMirror(args: { budgetSeconds?: number }, ctx: Context) {
       ) {
         budgetExhausted = true;
         const error = "sync budget exhausted before all PRs were processed";
+        prBudgetError = error;
         errors.push({
           component: "prSnapshot",
           error,
         });
-        handles.push(
-          await writeCollectionStatus(
-            normalizedContext,
-            "prSnapshot",
-            false,
-            prCount,
-            nowIso(),
-            "repo",
-            undefined,
-            error,
-          ),
-        );
         break;
       }
     }
-    if (
-      budgetExhausted &&
-      !errors.some((error) =>
-        error.component === "prSnapshot" &&
-        error.error.includes("budget exhausted")
-      )
-    ) {
+    if (budgetExhausted && !prBudgetError) {
       const error = "sync budget exhausted before all PRs were processed";
+      prBudgetError = error;
       errors.push({ component: "prSnapshot", error });
-      handles.push(
-        await writeCollectionStatus(
-          normalizedContext,
-          "prSnapshot",
-          false,
-          prCount,
-          nowIso(),
-          "repo",
-          undefined,
-          error,
-        ),
-      );
     }
+    const prCollectionError = [prsResult.error, prBudgetError]
+      .filter((error): error is string => Boolean(error)).join("; ") ||
+      undefined;
+    handles.push(
+      await writeCollectionStatus(
+        normalizedContext,
+        "prSnapshot",
+        prsResult.complete && !prBudgetError,
+        prBudgetError ? prCount : prsResult.items.length,
+        nowIso(),
+        "repo",
+        undefined,
+        prCollectionError,
+      ),
+    );
     const issuesResult = budgetExhausted
       ? {
         items: [] as GhIssue[],
@@ -2076,20 +2052,9 @@ async function syncMirror(args: { budgetSeconds?: number }, ctx: Context) {
         error: issuesResult.error ?? "incomplete issue collection",
       });
     }
-    handles.push(
-      await writeCollectionStatus(
-        normalizedContext,
-        "activityEvent",
-        issuesResult.complete,
-        issuesResult.items.length,
-        nowIso(),
-        "repo",
-        undefined,
-        issuesResult.error,
-      ),
-    );
     const issues = issuesResult.items.filter((i) => !i.pull_request);
     let maxIssueUpdated = state.cursor.lastIssueUpdatedAt;
+    let issueBudgetError: string | undefined;
     for (const issue of issues) {
       if (
         args.budgetSeconds &&
@@ -2103,7 +2068,6 @@ async function syncMirror(args: { budgetSeconds?: number }, ctx: Context) {
         issue.updated_at &&
         (!maxIssueUpdated || issue.updated_at > maxIssueUpdated)
       ) {
-        budgetExhausted = true;
         maxIssueUpdated = issue.updated_at;
       }
       try {
@@ -2140,48 +2104,39 @@ async function syncMirror(args: { budgetSeconds?: number }, ctx: Context) {
         args.budgetSeconds &&
         Date.now() - Date.parse(startedAt) > args.budgetSeconds * 1000
       ) {
+        budgetExhausted = true;
         const error = "sync budget exhausted before all issues were processed";
+        issueBudgetError = error;
         errors.push({
           component: "activityEvent",
           error,
         });
-        handles.push(
-          await writeCollectionStatus(
-            normalizedContext,
-            "activityEvent",
-            false,
-            issueCount,
-            nowIso(),
-            "repo",
-            undefined,
-            error,
-          ),
-        );
         break;
       }
     }
     if (
       budgetExhausted && issues.length > issueCount &&
-      !errors.some((error) =>
-        error.component === "activityEvent" &&
-        error.error.includes("budget exhausted before all issues")
-      )
+      !issueBudgetError
     ) {
       const error = "sync budget exhausted before all issues were processed";
+      issueBudgetError = error;
       errors.push({ component: "activityEvent", error });
-      handles.push(
-        await writeCollectionStatus(
-          normalizedContext,
-          "activityEvent",
-          false,
-          issueCount,
-          nowIso(),
-          "repo",
-          undefined,
-          error,
-        ),
-      );
     }
+    const issueCollectionError = [issuesResult.error, issueBudgetError]
+      .filter((error): error is string => Boolean(error)).join("; ") ||
+      undefined;
+    handles.push(
+      await writeCollectionStatus(
+        normalizedContext,
+        "activityEvent",
+        issuesResult.complete && !issueBudgetError,
+        issueBudgetError ? issueCount : issuesResult.items.length,
+        nowIso(),
+        "repo",
+        undefined,
+        issueCollectionError,
+      ),
+    );
     githubFinishedAt = nowIso();
     const finishedAt = nowIso();
     const complete = errors.length === 0;
@@ -2539,7 +2494,7 @@ async function recordPrAnalysis(args: unknown, ctx: Context) {
 /** Swamp-backed local GitHub mirror model. */
 export const model = {
   type: "@evrardjp/github-local-mirror",
-  version: "2026.07.21.1",
+  version: "2026.07.22.1",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -2558,6 +2513,12 @@ export const model = {
       toVersion: "2026.07.21.1",
       description:
         "Correct PR review state, revision, pagination, and report selection behavior",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.07.22.1",
+      description:
+        "Emit one repository collection status when a bounded sync exhausts its budget",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

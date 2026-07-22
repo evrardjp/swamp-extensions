@@ -76,6 +76,10 @@ timeline, and checks.
 
 ```bash
 swamp model method run external-secrets-external-secrets-mirror sync
+
+# Bound one refresh while retaining incomplete collection status on expiry.
+swamp model method run external-secrets-external-secrets-mirror sync \
+  --input budgetSeconds=240
 ```
 
 During sync the model:

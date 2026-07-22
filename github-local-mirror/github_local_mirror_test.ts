@@ -334,6 +334,171 @@ Deno.test("record_pr_analysis rejects stale heads and records current head", asy
   assertEquals(writes[0].data.evidenceRefs, []);
 });
 
+Deno.test("sync writes unique collection statuses when its budget expires", async () => {
+  const { root, writes, context } = await tempContext();
+  const upstream = `${root}/upstream.git`;
+  const headSha = await createMirroredPrRef(root, upstream, 1);
+  const init = await new Deno.Command("git", {
+    args: ["init", "--bare", context.globalArgs.gitObjectPath],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (init.code !== 0) {
+    throw new Error(new TextDecoder().decode(init.stderr));
+  }
+  Object.assign(context.globalArgs, { gitRemoteUrl: upstream });
+
+  const originalFetch = globalThis.fetch;
+  const originalDateNow = Date.now;
+  let fakeNow = originalDateNow();
+  Date.now = () => fakeNow;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+        ? input.href
+        : input.url,
+    );
+    const json = (value: unknown) =>
+      new Response(JSON.stringify(value), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    if (url.pathname === "/repos/owner/repo") {
+      return json({ default_branch: "main" });
+    }
+    if (url.pathname === "/repos/owner/repo/pulls") {
+      return json([{ number: 1, updated_at: "2099-07-20T00:00:00Z" }]);
+    }
+    if (url.pathname === "/repos/owner/repo/pulls/1") {
+      fakeNow += 2_000;
+      return json({
+        number: 1,
+        title: "Budget expiry",
+        state: "open",
+        draft: false,
+        user: { login: "contributor" },
+        labels: [],
+        base: { ref: "main", sha: headSha },
+        head: { ref: "feature", sha: headSha },
+        created_at: "2026-07-19T00:00:00Z",
+        updated_at: "2099-07-20T00:00:00Z",
+      });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const result = await model.methods.sync.execute(
+      { budgetSeconds: 1 },
+      context,
+    );
+    assertEquals(result.complete, false);
+
+    const collectionStatuses = writes.filter((write) =>
+      write.specName === "collectionStatus"
+    );
+    const names = collectionStatuses.map((write) => write.name);
+    assertEquals(names.length, new Set(names).size);
+
+    const repoPrStatus = collectionStatuses.filter((write) =>
+      write.name === "collection-repo-prsnapshot"
+    );
+    assertEquals(repoPrStatus.length, 1);
+    assertEquals(repoPrStatus[0].data.complete, false);
+    assertStringIncludes(
+      String(repoPrStatus[0].data.error),
+      "budget exhausted",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalDateNow;
+  }
+});
+
+Deno.test("sync writes one issue collection status when its budget expires", async () => {
+  const { root, writes, context } = await tempContext();
+  const upstream = `${root}/upstream.git`;
+  for (const path of [upstream, context.globalArgs.gitObjectPath]) {
+    const init = await new Deno.Command("git", {
+      args: ["init", "--bare", path],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    if (init.code !== 0) {
+      throw new Error(new TextDecoder().decode(init.stderr));
+    }
+  }
+  Object.assign(context.globalArgs, { gitRemoteUrl: upstream });
+
+  const originalFetch = globalThis.fetch;
+  const originalDateNow = Date.now;
+  let fakeNow = originalDateNow();
+  Date.now = () => fakeNow;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+        ? input.href
+        : input.url,
+    );
+    const json = (value: unknown) =>
+      new Response(JSON.stringify(value), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    if (url.pathname === "/repos/owner/repo") {
+      return json({ default_branch: "main" });
+    }
+    if (url.pathname === "/repos/owner/repo/pulls") return json([]);
+    if (url.pathname === "/repos/owner/repo/issues") {
+      return json([{
+        number: 1,
+        title: "Budget expiry",
+        state: "open",
+        user: { login: "contributor" },
+        labels: [],
+        created_at: "2026-07-19T00:00:00Z",
+        updated_at: "2099-07-20T00:00:00Z",
+      }]);
+    }
+    if (url.pathname === "/repos/owner/repo/issues/1/comments") {
+      fakeNow += 2_000;
+      return json([]);
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const result = await model.methods.sync.execute(
+      { budgetSeconds: 1 },
+      context,
+    );
+    assertEquals(result.complete, false);
+
+    const collectionStatuses = writes.filter((write) =>
+      write.specName === "collectionStatus"
+    );
+    const names = collectionStatuses.map((write) => write.name);
+    assertEquals(names.length, new Set(names).size);
+
+    const repoIssueStatus = collectionStatuses.filter((write) =>
+      write.name === "collection-repo-activityevent"
+    );
+    assertEquals(repoIssueStatus.length, 1);
+    assertEquals(repoIssueStatus[0].data.complete, false);
+    assertStringIncludes(
+      String(repoIssueStatus[0].data.error),
+      "budget exhausted",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalDateNow;
+  }
+});
+
 Deno.test("sync retries incomplete PR files for an unchanged head", async () => {
   const { root, writes, context } = await tempContext();
   const upstream = `${root}/upstream.git`;
