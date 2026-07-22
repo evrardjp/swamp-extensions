@@ -1,10 +1,11 @@
-import { assertEquals, assertMatch } from "jsr:@std/assert@1";
+import { assertEquals, assertMatch, assertRejects } from "jsr:@std/assert@1";
 import { createModelTestContext } from "jsr:@systeminit/swamp-testing@0.20260518.13";
 import {
   DeletePrefixArgsSchema,
   model as objectModel,
   ObjectConditionsSchema,
   PutObjectArgsSchema,
+  S3ObjectKeySchema,
 } from "./s3_object.ts";
 
 function globals(overrides: Record<string, unknown> = {}) {
@@ -41,6 +42,10 @@ Deno.test("schemas reject conflicting conditions and unsafe deletion bounds", ()
       .success,
     false,
   );
+  assertEquals(
+    S3ObjectKeySchema.safeParse("folder/../victim.txt").success,
+    false,
+  );
 });
 
 Deno.test("object put forwards If-None-Match and does not persist body", async () => {
@@ -64,15 +69,15 @@ Deno.test("object put forwards If-None-Match and does not persist body", async (
   assertEquals(typeof data.bodySha256, "string");
 });
 
-Deno.test("object get forwards If-Match and persists only body digest", async () => {
+Deno.test("object get hashes raw bytes without UTF-8 decoding", async () => {
   const { context, getWrittenResources } = createModelTestContext({
     globalArgs: globals(),
   });
   withFetch(context, (_url, init) => {
     assertEquals(init?.method, "GET");
     assertEquals(new Headers(init?.headers).get("if-match"), '"etag-1"');
-    return new Response("hello", {
-      headers: { etag: '"etag-1"', "content-type": "text/plain" },
+    return new Response(new Uint8Array([0xff, 0xfe]), {
+      headers: { etag: '"etag-1"', "content-type": "application/octet-stream" },
     });
   });
   await objectModel.methods.get.execute(
@@ -80,7 +85,16 @@ Deno.test("object get forwards If-Match and persists only body digest", async ()
     context as never,
   );
   const data = getWrittenResources()[0].data;
-  assertEquals(data.size, 5);
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new Uint8Array([0xff, 0xfe]),
+  );
+  const expectedHash = Array.from(
+    new Uint8Array(digest),
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
+  assertEquals(data.size, 2);
+  assertEquals(data.bodySha256, expectedHash);
   assertEquals("body" in data, false);
 });
 
@@ -148,6 +162,30 @@ Deno.test("object list parses bounded S3 XML and reports truncation", async () =
   assertMatch(JSON.stringify(data), /a&b\.txt/);
 });
 
+Deno.test("object list uses distinct deterministic names for prefixes", async () => {
+  const { context, getWrittenResources } = createModelTestContext({
+    globalArgs: globals(),
+  });
+  withFetch(
+    context,
+    () =>
+      new Response(
+        "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
+      ),
+  );
+  await objectModel.methods.list.execute(
+    { prefix: "a/", maxKeys: 1 },
+    context as never,
+  );
+  await objectModel.methods.list.execute(
+    { prefix: "b/", maxKeys: 1 },
+    context as never,
+  );
+  const [first, second] = getWrittenResources();
+  assertEquals(first.name.startsWith("list-"), true);
+  assertEquals(first.name === second.name, false);
+});
+
 Deno.test("object deletePrefix fans out until the prefix is empty", async () => {
   const { context, getWrittenResources } = createModelTestContext({
     globalArgs: globals(),
@@ -206,4 +244,57 @@ Deno.test("object deletePrefix reports truncation at its deletion bound", async 
   assertEquals(listings, 2);
   assertEquals(getWrittenResources()[0].data.deleted, 1);
   assertEquals(getWrittenResources()[0].data.truncated, true);
+});
+
+Deno.test("object deletePrefix continues across short truncated pages", async () => {
+  const { context, getWrittenResources } = createModelTestContext({
+    globalArgs: globals(),
+  });
+  let listings = 0;
+  withFetch(context, (_url, init) => {
+    if (init?.method === "GET") {
+      listings++;
+      return new Response(
+        `<ListBucketResult><IsTruncated>${
+          listings === 1
+        }</IsTruncated><Contents><Key>phase1/test/${listings}</Key></Contents></ListBucketResult>`,
+      );
+    }
+    return new Response(null, { status: 204 });
+  });
+
+  await objectModel.methods.deletePrefix.execute(
+    { prefix: "phase1/test", maxObjects: 10 },
+    context as never,
+  );
+
+  assertEquals(listings, 2);
+  assertEquals(getWrittenResources()[0].data.deleted, 2);
+  assertEquals(getWrittenResources()[0].data.truncated, false);
+});
+
+Deno.test("object deletePrefix rejects unsafe keys returned by S3", async () => {
+  const { context, getWrittenResources } = createModelTestContext({
+    globalArgs: globals(),
+  });
+  withFetch(
+    context,
+    () =>
+      Promise.resolve(
+        new Response(
+          "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>folder/../victim.txt</Key></Contents></ListBucketResult>",
+        ),
+      ),
+  );
+
+  await assertRejects(
+    () =>
+      objectModel.methods.deletePrefix.execute(
+        { prefix: "folder/", maxObjects: 10 },
+        context as never,
+      ),
+    Error,
+    "period-only path segments",
+  );
+  assertEquals(getWrittenResources(), []);
 });
