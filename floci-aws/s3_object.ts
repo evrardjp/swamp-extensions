@@ -9,9 +9,14 @@ import {
 } from "./common.ts";
 
 /** Connection, bucket, and key arguments for the object model. */
+export const S3ObjectKeySchema = z.string().min(1).max(1024).refine(
+  (key) =>
+    key.split("/").every((segment) => segment !== "." && segment !== ".."),
+  "key must not contain period-only path segments",
+);
 export const S3ObjectGlobalArgsSchema = FlociConnectionSchema.extend({
   bucket: z.string().min(3).max(63),
-  key: z.string().min(1).max(1024),
+  key: S3ObjectKeySchema,
 });
 const ConditionsSchema = z.object({
   ifMatch: z.string().min(1).optional(),
@@ -81,15 +86,22 @@ function conditionHeaders(args: {
   return headers;
 }
 
-async function sha256(value: string): Promise<string> {
+async function sha256(value: string | ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(value),
+    typeof value === "string" ? new TextEncoder().encode(value) : value,
   );
   return Array.from(
     new Uint8Array(digest),
     (byte) => byte.toString(16).padStart(2, "0"),
   ).join("");
+}
+
+async function prefixInstanceName(
+  label: string,
+  prefix: string,
+): Promise<string> {
+  return `${label}-${(await sha256(prefix)).slice(0, 16)}`;
 }
 
 async function persist(
@@ -208,11 +220,11 @@ export const model = {
           context.globalArgs.bucket,
           { key: context.globalArgs.key, headers: conditionHeaders(args) },
         );
-        const body = await response.text();
+        const body = await response.arrayBuffer();
         return await persist(context, "get", {
           exists: true,
           etag: response.headers.get("etag"),
-          size: new TextEncoder().encode(body).byteLength,
+          size: body.byteLength,
           contentType: response.headers.get("content-type"),
           bodySha256: await sha256(body),
         });
@@ -247,13 +259,17 @@ export const model = {
             lastModified: xmlValue(match[1], "LastModified"),
           }),
         );
-        const handle = await context.writeResource("objects", "list", {
-          bucket: context.globalArgs.bucket,
-          prefix,
-          objects,
-          truncated: xmlValue(xml, "IsTruncated") === "true",
-          observedAt: isoNow(),
-        });
+        const handle = await context.writeResource(
+          "objects",
+          await prefixInstanceName("list", prefix),
+          {
+            bucket: context.globalArgs.bucket,
+            prefix,
+            objects,
+            truncated: xmlValue(xml, "IsTruncated") === "true",
+            observedAt: isoNow(),
+          },
+        );
         return { dataHandles: [handle] };
       },
     },
@@ -294,8 +310,12 @@ export const model = {
           const keys = Array.from(
             xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g),
             (match) => xmlValue(match[1], "Key") ?? "",
-          ).filter(Boolean);
-          if (keys.length === 0) break;
+          ).filter(Boolean).map((key) => S3ObjectKeySchema.parse(key));
+          const listingTruncated = xmlValue(xml, "IsTruncated") === "true";
+          if (keys.length === 0) {
+            truncated = listingTruncated;
+            break;
+          }
 
           for (let index = 0; index < keys.length; index += 20) {
             await Promise.all(
@@ -305,7 +325,7 @@ export const model = {
             );
           }
           deleted += keys.length;
-          if (keys.length < maxKeys) break;
+          if (!listingTruncated) break;
         }
 
         if (deleted === args.maxObjects) {
@@ -327,7 +347,7 @@ export const model = {
 
         const handle = await context.writeResource(
           "deletion",
-          "prefix-delete",
+          await prefixInstanceName("prefix-delete", args.prefix),
           {
             bucket: context.globalArgs.bucket,
             prefix: args.prefix,
