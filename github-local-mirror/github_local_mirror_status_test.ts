@@ -67,3 +67,125 @@ Deno.test("mirror status report rejects unsupported model types", async () => {
     "This report only supports @evrardjp/github-local-mirror models.",
   );
 });
+
+Deno.test("mirror status reports merged cleanup candidates and latest failures", async () => {
+  const entries = [
+    {
+      name: "worktree-42",
+      version: 1,
+      tags: { specName: "worktreeSnapshot" },
+    },
+    {
+      name: "worktree-42",
+      version: 1,
+      tags: { specName: "worktreeAnalysis" },
+    },
+    {
+      name: "worktree-43",
+      version: 2,
+      tags: { specName: "worktreeSnapshot" },
+    },
+    {
+      name: "worktree-43",
+      version: 1,
+      tags: { specName: "worktreeAnalysis" },
+    },
+    {
+      name: "worktree-42",
+      version: 2,
+      tags: { specName: "worktreeAnalysis" },
+    },
+    { name: "pr-42", version: 1, tags: { specName: "prSnapshot" } },
+    {
+      name: "cleanup-2026-07-22T10:00:00.000Z",
+      version: 1,
+      tags: { specName: "worktreeCleanupRun" },
+    },
+  ];
+  const contents = new Map<string, Record<string, unknown>>([
+    [
+      "worktree-42:1:worktreeSnapshot",
+      {
+        id: "worktree-42",
+        prNumber: 42,
+        status: "active",
+        path: "/worktrees/pr-42",
+      },
+    ],
+    [
+      "worktree-42:1:worktreeAnalysis",
+      {
+        worktreeId: "worktree-42",
+        prNumber: 42,
+        isDirty: true,
+        isPrHeadStale: false,
+        aheadCommitCount: 0,
+        missing: false,
+        recommendedAction: "commit-or-stash-local-changes",
+      },
+    ],
+    [
+      "worktree-42:2:worktreeAnalysis",
+      {
+        worktreeId: "worktree-42",
+        prNumber: 42,
+        isDirty: false,
+        isPrHeadStale: false,
+        aheadCommitCount: 0,
+        missing: false,
+        recommendedAction: "none",
+      },
+    ],
+    [
+      "worktree-43:2:worktreeSnapshot",
+      { id: "worktree-43", prNumber: 43, status: "removed" },
+    ],
+    [
+      "worktree-43:1:worktreeAnalysis",
+      {
+        worktreeId: "worktree-43",
+        prNumber: 43,
+        isDirty: true,
+        isPrHeadStale: false,
+        aheadCommitCount: 0,
+        missing: false,
+        recommendedAction: "commit-or-stash-local-changes",
+      },
+    ],
+    ["pr-42:1:prSnapshot", { number: 42, state: "closed", merged: true }],
+    [
+      "cleanup-2026-07-22T10:00:00.000Z:1:worktreeCleanupRun",
+      {
+        removedCount: 0,
+        results: [{
+          prNumber: 42,
+          outcome: "failed",
+          error: "worktree contains modified files",
+        }],
+      },
+    ],
+  ]);
+  const result = await report.execute({
+    modelType: "@evrardjp/github-local-mirror",
+    modelId: "mirror-id",
+    dataRepository: {
+      findAllForModel: () => Promise.resolve(entries),
+      getContent: (_type, _id, name, version) => {
+        const specName = entries.find((entry) =>
+          entry.name === name && entry.version === version
+        )?.tags.specName;
+        const content = contents.get(`${name}:${version}:${specName}`);
+        return Promise.resolve(
+          content ? new TextEncoder().encode(JSON.stringify(content)) : null,
+        );
+      },
+    },
+  });
+
+  assertStringIncludes(result.markdown, "Active: 1");
+  assertStringIncludes(result.markdown, "Merged cleanup candidates: 1");
+  assertStringIncludes(result.markdown, "Latest cleanup failures: 1");
+  assertStringIncludes(result.markdown, "worktree contains modified files");
+  assertStringIncludes(result.markdown, "Dirty: 0");
+  assertStringIncludes(result.markdown, "| worktreeAnalysis | 2 |");
+});

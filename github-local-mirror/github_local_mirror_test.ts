@@ -194,6 +194,251 @@ Deno.test("prepare_worktree uses mirrored PR data and records push hints", async
   assertEquals(stat.isDirectory, true);
 });
 
+Deno.test("close_merged_worktrees continues after dirty worktrees and retains branches", async () => {
+  const { root, writes, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    42,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/42`, {
+    recursive: true,
+  });
+  const prRecordPath = `${context.globalArgs.artifactRoot}/prs/42/current.json`;
+  await Deno.writeTextFile(
+    prRecordPath,
+    JSON.stringify({
+      number: 42,
+      state: "open",
+      merged: false,
+      headSha,
+      observedAt: "2026-07-22T00:00:00.000Z",
+    }),
+  );
+  const dirty = await model.methods.prepare_worktree.execute({
+    prNumber: 42,
+    identity: "dirty",
+  }, context);
+  const clean = await model.methods.prepare_worktree.execute({
+    prNumber: 42,
+    identity: "clean",
+  }, context);
+  await Deno.writeTextFile(`${dirty.path}/untracked.txt`, "keep me\n");
+  const run = async (cwd: string, args: string[]) => {
+    const out = await new Deno.Command("git", {
+      cwd,
+      args,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    if (out.code !== 0) {
+      throw new Error(new TextDecoder().decode(out.stderr));
+    }
+    return new TextDecoder().decode(out.stdout).trim();
+  };
+  await run(clean.path, ["config", "user.email", "test@example.com"]);
+  await run(clean.path, ["config", "user.name", "Test"]);
+  await run(clean.path, ["config", "commit.gpgsign", "false"]);
+  await Deno.writeTextFile(`${clean.path}/README.md`, "local commit\n");
+  await run(clean.path, ["add", "README.md"]);
+  await run(clean.path, ["commit", "-m", "local review commit"]);
+  const localCommit = await run(clean.path, ["rev-parse", "HEAD"]);
+  await Deno.writeTextFile(
+    prRecordPath,
+    JSON.stringify({
+      number: 42,
+      state: "closed",
+      merged: true,
+      headSha,
+      observedAt: "2026-07-22T01:00:00.000Z",
+    }),
+  );
+  writes.length = 0;
+
+  const result = await model.methods.close_merged_worktrees.execute(
+    {},
+    context,
+  );
+
+  assertEquals(result.complete, false);
+  assertEquals(result.candidateCount, 2);
+  assertEquals(result.removedCount, 1);
+  assertEquals(result.failedCount, 1);
+  assertEquals(result.results[0].outcome, "failed");
+  assertEquals(result.results[1].outcome, "removed");
+  assertEquals(result.results[1].stateRecorded, true);
+  assertEquals((await Deno.stat(dirty.path)).isDirectory, true);
+  await assertRejects(() => Deno.stat(clean.path), Deno.errors.NotFound);
+  assertEquals(
+    await run(root, [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "rev-parse",
+      clean.branch,
+    ]),
+    localCommit,
+  );
+  const registry = JSON.parse(
+    await Deno.readTextFile(
+      `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+    ),
+  );
+  assertEquals(registry[0].status, "active");
+  assertEquals(registry[1].status, "removed");
+  assertEquals(writes.at(-1)?.specName, "worktreeCleanupRun");
+
+  writes.length = 0;
+  await model.methods.analyze_worktrees.execute({}, context);
+  assertEquals(writes.length, 1);
+  assertEquals(writes[0].data.worktreeId, registry[0].id);
+});
+
+Deno.test("close_merged_worktrees skips pull requests that were not merged", async () => {
+  const { root, writes, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    42,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/42`, {
+    recursive: true,
+  });
+  await Deno.writeTextFile(
+    `${context.globalArgs.artifactRoot}/prs/42/current.json`,
+    JSON.stringify({
+      number: 42,
+      state: "closed",
+      merged: false,
+      headSha,
+      observedAt: "2026-07-22T00:00:00.000Z",
+    }),
+  );
+  const worktree = await model.methods.prepare_worktree.execute({
+    prNumber: 42,
+  }, context);
+  writes.length = 0;
+
+  const result = await model.methods.close_merged_worktrees.execute(
+    {},
+    context,
+  );
+
+  assertEquals(result.complete, true);
+  assertEquals(result.candidateCount, 0);
+  assertEquals(result.skippedCount, 1);
+  assertEquals(result.results[0].reason, "pr-not-merged");
+  assertEquals((await Deno.stat(worktree.path)).isDirectory, true);
+});
+
+Deno.test("close_merged_worktrees preserves ignored files", async () => {
+  const { root, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    42,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/42`, {
+    recursive: true,
+  });
+  await Deno.writeTextFile(
+    `${context.globalArgs.artifactRoot}/prs/42/current.json`,
+    JSON.stringify({
+      number: 42,
+      state: "closed",
+      merged: true,
+      headSha,
+      observedAt: "2026-07-22T00:00:00.000Z",
+    }),
+  );
+  const worktree = await model.methods.prepare_worktree.execute({
+    prNumber: 42,
+  }, context);
+  await Deno.writeTextFile(
+    `${context.globalArgs.gitObjectPath}/info/exclude`,
+    "ignored.local\n",
+  );
+  await Deno.writeTextFile(`${worktree.path}/ignored.local`, "keep me\n");
+
+  const result = await model.methods.close_merged_worktrees.execute(
+    {},
+    context,
+  );
+
+  assertEquals(result.complete, false);
+  assertEquals(result.removedCount, 0);
+  assertEquals(result.failedCount, 1);
+  assertStringIncludes(result.results[0].error ?? "", "ignored.local");
+  assertEquals(
+    (await Deno.stat(`${worktree.path}/ignored.local`)).isFile,
+    true,
+  );
+});
+
+Deno.test("close_merged_worktrees recovers when snapshot recording fails", async () => {
+  const { root, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    42,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/42`, {
+    recursive: true,
+  });
+  await Deno.writeTextFile(
+    `${context.globalArgs.artifactRoot}/prs/42/current.json`,
+    JSON.stringify({
+      number: 42,
+      state: "closed",
+      merged: true,
+      headSha,
+      observedAt: "2026-07-22T00:00:00.000Z",
+    }),
+  );
+  const worktree = await model.methods.prepare_worktree.execute({
+    prNumber: 42,
+  }, context);
+  const writeResource = context.writeResource;
+  let rejectSnapshot = true;
+  context.writeResource = (specName, name, data) => {
+    if (specName === "worktreeSnapshot" && rejectSnapshot) {
+      rejectSnapshot = false;
+      return Promise.reject(new Error("snapshot store unavailable"));
+    }
+    return writeResource(specName, name, data);
+  };
+
+  const interrupted = await model.methods.close_merged_worktrees.execute(
+    {},
+    context,
+  );
+
+  assertEquals(interrupted.complete, false);
+  assertEquals(interrupted.results[0].outcome, "removed");
+  assertEquals(interrupted.results[0].stateRecorded, false);
+  await assertRejects(() => Deno.stat(worktree.path), Deno.errors.NotFound);
+  let registry = JSON.parse(
+    await Deno.readTextFile(
+      `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+    ),
+  );
+  assertEquals(registry[0].status, "active");
+
+  const recovered = await model.methods.close_merged_worktrees.execute(
+    {},
+    context,
+  );
+
+  assertEquals(recovered.complete, true);
+  assertEquals(recovered.results[0].reason, "worktree-already-missing");
+  assertEquals(recovered.results[0].stateRecorded, true);
+  registry = JSON.parse(
+    await Deno.readTextFile(
+      `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+    ),
+  );
+  assertEquals(registry[0].status, "removed");
+});
+
 Deno.test("model declares upgrade to current version", () => {
   assertEquals(model.upgrades.at(-1)?.toVersion, model.version);
 });

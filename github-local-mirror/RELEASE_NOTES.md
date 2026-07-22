@@ -1,27 +1,12 @@
-## 2026.07.22.1
+## 2026.07.22.2
 
-**Fixed:** Bounded syncs now emit each repository-level collection status once
-when `budgetSeconds` expires, avoiding duplicate data instance names while still
-recording incomplete PR and issue collection state.
+**Added:** The `close_merged_worktrees` method removes non-dirty worktrees after
+their pull requests are merged while retaining their review branches and local
+commits.
 
-## 2026.07.21.1
+**Changed:** The local mirror status report now shows merged cleanup candidates,
+successful removals, and cleanup failures. One dirty worktree no longer prevents
+other eligible worktrees from being processed.
 
-**Fixed:** Context reports can be retrieved after `prepare_review_context`
-without resupplying method arguments, because the selected PR or issue is now
-retained in Swamp.
-
-**Fixed:** Comment-only reviews no longer clear an active changes-requested
-state, dismissed reviews now clear it, and missing check-run data now leaves CI
-readiness `Unknown` instead of reporting that no fixes are needed.
-
-**Fixed:** Commit timelines exclude commits dropped by a force-push, initial PR
-revisions use the Git merge base, and incremental PR listing stops once records
-are older than the sync window.
-
-**Fixed:** Local repository references are matched case-insensitively and
-generated analysis commands safely quote model names.
-
-**Upgrade note:** Run `sync` after upgrading so PR commits are recorded against
-their current head. Until an older PR is resynced, its legacy commit records
-remain visible; once current-head records exist, stale and legacy records are
-excluded from its timeline.
+**Upgrade note:** Add `close_merged_worktrees` between `sync` and
+`analyze_worktrees` in scheduled mirror workflows to enable automatic cleanup.

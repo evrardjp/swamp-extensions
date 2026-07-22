@@ -194,6 +194,7 @@ type WorktreeRecord = {
   baseHeadSha: string;
   createdAt: string;
   status: "active" | "missing" | "removed";
+  removedAt?: string;
 };
 
 const MirrorStateSchema = z.object({
@@ -416,6 +417,7 @@ const WorktreeSnapshotSchema = z.object({
   baseHeadSha: z.string(),
   createdAt: IsoDateTime,
   status: z.string(),
+  removedAt: IsoDateTime.optional(),
 }).passthrough();
 
 const WorktreeAnalysisSchema = z.object({
@@ -435,6 +437,29 @@ const WorktreeAnalysisSchema = z.object({
   errors: z.array(z.string()).default([]),
   recommendedAction: z.string(),
   analyzedAt: IsoDateTime,
+}).passthrough();
+
+const WorktreeCleanupRunSchema = z.object({
+  repo: z.string(),
+  startedAt: IsoDateTime,
+  finishedAt: IsoDateTime,
+  activeCount: z.number().int().nonnegative(),
+  candidateCount: z.number().int().nonnegative(),
+  removedCount: z.number().int().nonnegative(),
+  failedCount: z.number().int().nonnegative(),
+  skippedCount: z.number().int().nonnegative(),
+  complete: z.boolean(),
+  results: z.array(z.object({
+    worktreeId: z.string(),
+    prNumber: z.number().int().positive(),
+    path: z.string(),
+    branch: z.string(),
+    outcome: z.enum(["removed", "failed", "skipped"]),
+    reason: z.string().optional(),
+    error: z.string().optional(),
+    branchRetained: z.boolean(),
+    stateRecorded: z.boolean(),
+  })),
 }).passthrough();
 
 const SyncRunSummarySchema = z.object({
@@ -2219,7 +2244,7 @@ async function writeWorktrees(
   g: GlobalArgs,
   records: WorktreeRecord[],
 ): Promise<void> {
-  await writeJsonFile(worktreeIndexPath(g), records);
+  await writeJsonFileAtomically(worktreeIndexPath(g), records);
 }
 
 function identitySuffix(identity?: string): string {
@@ -2299,9 +2324,38 @@ async function gitInWorktree(path: string, args: string[]): Promise<RunResult> {
   };
 }
 
+async function verifyGitWorktreeRemoved(
+  g: GlobalArgs,
+  path: string,
+  branch: string,
+): Promise<void> {
+  const listed = await runGit(g.gitObjectPath, [
+    "worktree",
+    "list",
+    "--porcelain",
+    "-z",
+  ]);
+  if (listed.code !== 0) {
+    throw new Error(
+      listed.stderr.trim() || `git worktree list exited ${listed.code}`,
+    );
+  }
+  const fields = listed.stdout.split("\0");
+  if (
+    fields.includes(`worktree ${path}`) ||
+    fields.includes(`branch refs/heads/${branch}`)
+  ) {
+    throw new Error(
+      `missing worktree remains registered with Git: ${path}; inspect it before pruning Git metadata`,
+    );
+  }
+}
+
 async function analyzeWorktrees(_args: Record<string, never>, ctx: Context) {
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
-  const records = await readWorktrees(g);
+  const records = (await readWorktrees(g)).filter((record) =>
+    record.status === "active"
+  );
   const handles: unknown[] = [];
   const analyzedAt = nowIso();
   for (const record of records) {
@@ -2378,10 +2432,207 @@ async function analyzeWorktrees(_args: Record<string, never>, ctx: Context) {
   return { dataHandles: handles };
 }
 
+async function closeMergedWorktrees(
+  _args: Record<string, never>,
+  ctx: Context,
+) {
+  const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  const startedAt = nowIso();
+  const records = await readWorktrees(g);
+  const activeRecords = records.filter((record) => record.status === "active");
+  const handles: unknown[] = [];
+  const results: Array<{
+    worktreeId: string;
+    prNumber: number;
+    path: string;
+    branch: string;
+    outcome: "removed" | "failed" | "skipped";
+    reason?: string;
+    error?: string;
+    branchRetained: boolean;
+    stateRecorded: boolean;
+  }> = [];
+  let candidateCount = 0;
+  let removedCount = 0;
+  let failedCount = 0;
+
+  for (const record of activeRecords) {
+    let pr: PrRecord | null;
+    try {
+      pr = await readJsonFile<PrRecord | null>(
+        prRecordPath(g, record.prNumber),
+        null,
+      );
+    } catch (err) {
+      failedCount++;
+      results.push({
+        worktreeId: record.id,
+        prNumber: record.prNumber,
+        path: record.path,
+        branch: record.branch,
+        outcome: "failed",
+        reason: "pr-state-unavailable",
+        error: errorMessage(err).slice(0, 2000),
+        branchRetained: true,
+        stateRecorded: true,
+      });
+      continue;
+    }
+    if (!pr) {
+      failedCount++;
+      results.push({
+        worktreeId: record.id,
+        prNumber: record.prNumber,
+        path: record.path,
+        branch: record.branch,
+        outcome: "failed",
+        reason: "pr-state-unavailable",
+        error:
+          `PR ${record.prNumber} is not present in the local mirror; run sync first`,
+        branchRetained: true,
+        stateRecorded: true,
+      });
+      continue;
+    }
+    if (pr.state !== "closed" || pr.merged !== true) {
+      results.push({
+        worktreeId: record.id,
+        prNumber: record.prNumber,
+        path: record.path,
+        branch: record.branch,
+        outcome: "skipped",
+        reason: "pr-not-merged",
+        branchRetained: true,
+        stateRecorded: true,
+      });
+      continue;
+    }
+
+    candidateCount++;
+    let missing = false;
+    try {
+      missing = !await exists(record.path);
+      if (missing) {
+        await verifyGitWorktreeRemoved(g, record.path, record.branch);
+      } else {
+        const status = await gitInWorktree(record.path, [
+          "status",
+          "--porcelain",
+          "--ignored",
+        ]);
+        if (status.code !== 0) {
+          throw new Error(
+            status.stderr.trim() || `git status exited ${status.code}`,
+          );
+        }
+        const ignoredPaths = status.stdout.split("\n").filter((line) =>
+          line.startsWith("!! ")
+        );
+        if (ignoredPaths.length > 0) {
+          throw new Error(
+            `worktree contains ignored files: ${
+              ignoredPaths.slice(0, 10).map((line) => line.slice(3)).join(", ")
+            }`,
+          );
+        }
+        const removal = await runGit(g.gitObjectPath, [
+          "worktree",
+          "remove",
+          record.path,
+        ]);
+        if (removal.code !== 0) {
+          throw new Error(
+            removal.stderr.trim() ||
+              `git worktree remove exited ${removal.code}`,
+          );
+        }
+      }
+    } catch (err) {
+      failedCount++;
+      results.push({
+        worktreeId: record.id,
+        prNumber: record.prNumber,
+        path: record.path,
+        branch: record.branch,
+        outcome: "failed",
+        reason: "git-worktree-remove-failed",
+        error: errorMessage(err).slice(0, 2000),
+        branchRetained: true,
+        stateRecorded: true,
+      });
+      continue;
+    }
+
+    const removedAt = nowIso();
+    const index = records.findIndex((candidate) => candidate.id === record.id);
+    const removedRecord: WorktreeRecord = {
+      ...record,
+      status: "removed",
+      removedAt,
+    };
+    removedCount++;
+    let stateRecorded = true;
+    let persistenceError: string | undefined;
+    try {
+      handles.push(
+        await ctx.writeResource(
+          "worktreeSnapshot",
+          record.id,
+          removedRecord,
+        ),
+      );
+      records[index] = removedRecord;
+      await writeWorktrees(g, records);
+    } catch (err) {
+      stateRecorded = false;
+      persistenceError = `worktree removed but state recording failed: ${
+        errorMessage(err).slice(0, 1900)
+      }`;
+    }
+    results.push({
+      worktreeId: record.id,
+      prNumber: record.prNumber,
+      path: record.path,
+      branch: record.branch,
+      outcome: "removed",
+      reason: missing ? "worktree-already-missing" : "pr-merged",
+      error: persistenceError,
+      branchRetained: true,
+      stateRecorded,
+    });
+  }
+
+  const finishedAt = nowIso();
+  const summary = {
+    repo: repoFullName(g),
+    startedAt,
+    finishedAt,
+    activeCount: activeRecords.length,
+    candidateCount,
+    removedCount,
+    failedCount,
+    skippedCount: results.filter((result) => result.outcome === "skipped")
+      .length,
+    complete: failedCount === 0 &&
+      results.every((result) => result.stateRecorded),
+    results,
+  };
+  handles.push(
+    await ctx.writeResource(
+      "worktreeCleanupRun",
+      `cleanup-${finishedAt}`,
+      summary,
+    ),
+  );
+  return { dataHandles: handles, ...summary };
+}
+
 async function status(_args: Record<string, never>, ctx: Context) {
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
   const state = await readState(g);
-  const worktrees = await readWorktrees(g);
+  const worktrees = (await readWorktrees(g)).filter((record) =>
+    record.status === "active"
+  );
   const handle = await ctx.writeResource(
     "mirrorStatus",
     "mirror-status-current",
@@ -2494,7 +2745,7 @@ async function recordPrAnalysis(args: unknown, ctx: Context) {
 /** Swamp-backed local GitHub mirror model. */
 export const model = {
   type: "@evrardjp/github-local-mirror",
-  version: "2026.07.22.1",
+  version: "2026.07.22.2",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -2519,6 +2770,12 @@ export const model = {
       toVersion: "2026.07.22.1",
       description:
         "Emit one repository collection status when a bounded sync exhausts its budget",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.07.22.2",
+      description:
+        "Add observable cleanup for worktrees belonging to merged pull requests",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -2623,6 +2880,12 @@ export const model = {
       lifetime: "infinite",
       garbageCollection: 500,
     },
+    worktreeCleanupRun: {
+      description: "Results from one merged pull request worktree cleanup run",
+      schema: WorktreeCleanupRunSchema,
+      lifetime: "infinite",
+      garbageCollection: 500,
+    },
     syncRunSummary: {
       description: "One sync run summary",
       schema: SyncRunSummarySchema,
@@ -2670,6 +2933,12 @@ export const model = {
         "Analyze registered worktrees for stale PR heads, dirty state, missing paths, and local commits",
       arguments: z.object({}),
       execute: analyzeWorktrees,
+    },
+    close_merged_worktrees: {
+      description:
+        "Remove non-dirty worktrees for merged pull requests while retaining their review branches",
+      arguments: z.object({}),
+      execute: closeMergedWorktrees,
     },
     status: {
       description: "Write and return the current local mirror status summary",
