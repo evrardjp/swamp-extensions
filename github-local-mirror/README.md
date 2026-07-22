@@ -134,6 +134,24 @@ Analyze registered worktrees and write `worktreeAnalysis` data:
 swamp model method run external-secrets-external-secrets-mirror analyze_worktrees
 ```
 
+### `close_merged_worktrees`
+
+Remove registered worktrees after their mirrored pull requests have been merged:
+
+```bash
+swamp model method run external-secrets-external-secrets-mirror \
+  close_merged_worktrees
+```
+
+The method calls `git worktree remove` without `--force`. Git therefore refuses
+to remove worktrees with modified or untracked files, and the method separately
+blocks removal when ignored files are present. A failure is recorded in the
+cleanup result without preventing other eligible worktrees from being processed.
+Review branches are retained, including branches with local commits. Pull
+requests closed without merging are not eligible for cleanup. If removal
+succeeds but recording its state is interrupted, the next cleanup reconciles
+the missing Git worktree and retries the state update.
+
 ### `status`
 
 Write and return current local mirror status:
@@ -221,7 +239,7 @@ swamp report get @evrardjp/github-local-mirror-status \
 Use one scheduled workflow per repo mirror:
 
 ```text
-sync -> analyze_worktrees
+sync -> close_merged_worktrees -> analyze_worktrees
 ```
 
 Set a small workflow `queueTimeout` so scheduled ticks exit quickly if a longer

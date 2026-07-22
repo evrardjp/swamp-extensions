@@ -78,6 +78,18 @@ function latestEntriesByPrefix(
   return [...latest.values()].sort((a, b) => b.name.localeCompare(a.name));
 }
 
+function latestEntriesBySpecAndName(entries: DataEntry[]): DataEntry[] {
+  const latest = new Map<string, DataEntry>();
+  for (const entry of entries) {
+    const key = `${tagsOf(entry).specName ?? "unknown"}:${entry.name}`;
+    const current = latest.get(key);
+    if (!current || (entry.version ?? 0) > (current.version ?? 0)) {
+      latest.set(key, entry);
+    }
+  }
+  return [...latest.values()];
+}
+
 /** Human status report for @evrardjp/github-local-mirror. */
 export const report = {
   name: "@evrardjp/github-local-mirror-status",
@@ -102,6 +114,7 @@ export const report = {
       context.modelType,
       modelId,
     );
+    const currentEntries = latestEntriesBySpecAndName(entries);
     const statusEntry = latestByName(entries, "mirror-status-current") ??
       latestByName(entries, "current");
     const status = statusEntry
@@ -115,20 +128,75 @@ export const report = {
     }
     const latestSync = syncRuns[0];
     const dataCounts = new Map<string, number>();
-    for (const entry of entries) {
+    for (const entry of currentEntries) {
       const specName = tagsOf(entry).specName;
       if (!specName) continue;
       dataCounts.set(specName, (dataCounts.get(specName) ?? 0) + 1);
     }
     const analyses: Record<string, unknown>[] = [];
-    for (const entry of entries.filter((e) => e.name.startsWith("worktree-"))) {
+    for (
+      const entry of currentEntries.filter((entry) =>
+        tagsOf(entry).specName === "worktreeAnalysis"
+      )
+    ) {
       const data = await readJson<Record<string, unknown>>(context, entry);
       if (data && "recommendedAction" in data) analyses.push(data);
     }
-    const stale = analyses.filter((a) => a.isPrHeadStale === true);
-    const dirty = analyses.filter((a) => a.isDirty === true);
-    const ahead = analyses.filter((a) => Number(a.aheadCommitCount ?? 0) > 0);
-    const missing = analyses.filter((a) => a.missing === true);
+    const worktrees: Record<string, unknown>[] = [];
+    for (
+      const entry of currentEntries.filter((entry) =>
+        tagsOf(entry).specName === "worktreeSnapshot"
+      )
+    ) {
+      const data = await readJson<Record<string, unknown>>(context, entry);
+      if (data) worktrees.push(data);
+    }
+    const prs = new Map<number, Record<string, unknown>>();
+    for (
+      const entry of currentEntries.filter((entry) =>
+        tagsOf(entry).specName === "prSnapshot"
+      )
+    ) {
+      const data = await readJson<Record<string, unknown>>(context, entry);
+      const prNumber = Number(data?.number);
+      if (data && Number.isInteger(prNumber)) prs.set(prNumber, data);
+    }
+    const cleanupEntry = latestEntriesByPrefix(
+      currentEntries.filter((entry) =>
+        tagsOf(entry).specName === "worktreeCleanupRun"
+      ),
+      "cleanup-",
+    )[0];
+    const latestCleanup = cleanupEntry
+      ? await readJson<Record<string, unknown>>(context, cleanupEntry)
+      : null;
+    const activeWorktrees = worktrees.filter((worktree) =>
+      worktree.status === "active"
+    );
+    const cleanupCandidates = activeWorktrees.filter((worktree) => {
+      const pr = prs.get(Number(worktree.prNumber));
+      return pr?.state === "closed" && pr.merged === true;
+    });
+    const cleanupResults = Array.isArray(latestCleanup?.results)
+      ? latestCleanup.results.filter((result) =>
+        result && typeof result === "object" && !Array.isArray(result)
+      ) as Record<string, unknown>[]
+      : [];
+    const cleanupFailures = cleanupResults.filter((result) =>
+      result.outcome === "failed" || typeof result.error === "string"
+    );
+    const activeWorktreeIds = new Set(
+      activeWorktrees.map((worktree) => String(worktree.id)),
+    );
+    const activeAnalyses = analyses.filter((analysis) =>
+      activeWorktreeIds.has(String(analysis.worktreeId))
+    );
+    const stale = activeAnalyses.filter((a) => a.isPrHeadStale === true);
+    const dirty = activeAnalyses.filter((a) => a.isDirty === true);
+    const ahead = activeAnalyses.filter((a) =>
+      Number(a.aheadCommitCount ?? 0) > 0
+    );
+    const missing = activeAnalyses.filter((a) => a.missing === true);
     const lines: string[] = [];
     lines.push("# GitHub Local Mirror Status");
     lines.push("");
@@ -233,19 +301,31 @@ export const report = {
     lines.push("");
     lines.push("## Worktrees");
     lines.push("");
-    lines.push(`- Registered: ${analyses.length}`);
+    lines.push(`- Active: ${activeWorktrees.length}`);
+    lines.push(`- Merged cleanup candidates: ${cleanupCandidates.length}`);
+    lines.push(
+      `- Removed in latest cleanup: ${md(latestCleanup?.removedCount ?? 0)}`,
+    );
+    lines.push(`- Latest cleanup failures: ${cleanupFailures.length}`);
     lines.push(`- Stale PR head: ${stale.length}`);
     lines.push(`- Dirty: ${dirty.length}`);
     lines.push(`- Ahead commits: ${ahead.length}`);
     lines.push(`- Missing paths: ${missing.length}`);
-    if (analyses.length) {
+    for (const failure of cleanupFailures) {
+      lines.push(
+        `- Cleanup error (PR #${md(failure.prNumber)}): ${
+          md(failure.error ?? "unknown error")
+        }`,
+      );
+    }
+    if (activeAnalyses.length) {
       lines.push("");
       lines.push(
         "| PR | Identity | Path | Stale | Dirty | Ahead | Recommendation |",
       );
       lines.push("| --- | --- | --- | --- | --- | ---: | --- |");
       for (
-        const a of analyses.sort((a, b) =>
+        const a of activeAnalyses.sort((a, b) =>
           Number(a.prNumber ?? 0) - Number(b.prNumber ?? 0)
         )
       ) {
@@ -269,7 +349,10 @@ export const report = {
         syncRuns,
         dataCounts: Object.fromEntries([...dataCounts.entries()].sort()),
         worktrees: {
-          registered: analyses.length,
+          active: activeWorktrees.length,
+          cleanupCandidates: cleanupCandidates.length,
+          removedInLatestCleanup: Number(latestCleanup?.removedCount ?? 0),
+          cleanupFailures: cleanupFailures.length,
           stale: stale.length,
           dirty: dirty.length,
           ahead: ahead.length,
