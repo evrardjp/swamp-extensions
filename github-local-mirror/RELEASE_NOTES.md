@@ -1,3 +1,9 @@
+## 2026.07.22.1
+
+**Fixed:** Bounded syncs now emit each repository-level collection status once
+when `budgetSeconds` expires, avoiding duplicate data instance names while still
+recording incomplete PR and issue collection state.
+
 ## 2026.07.21.1
 
 **Fixed:** Context reports can be retrieved after `prepare_review_context`
