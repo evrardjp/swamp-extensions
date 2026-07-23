@@ -973,7 +973,10 @@ async function fetchGit(
       const [ref, sha] = line.split(" ");
       if (!ref || !sha) continue;
       const branch = ref.slice(remoteBranchPrefix.length);
-      if (branch && branch !== "HEAD" && !branch.startsWith("review/")) {
+      if (
+        branch && branch !== "HEAD" && branch !== "review" &&
+        !branch.startsWith("review/")
+      ) {
         remoteBranches.set(branch, { ref, sha });
       }
     }

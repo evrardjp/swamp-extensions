@@ -1054,6 +1054,7 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
   ]);
   await run(source, ["branch", "-D", "obsolete"]);
   await run(source, ["branch", "-m", "trunk"]);
+  await run(source, ["branch", "review"]);
   await Deno.writeTextFile(`${source}/README.md`, "current\n");
   await run(source, ["commit", "-am", "current"]);
   const currentSha = await run(source, ["rev-parse", "HEAD"]);
@@ -1139,6 +1140,17 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
           "show-ref",
           "--verify",
           "refs/heads/obsolete",
+        ]),
+      Error,
+    );
+    await assertRejects(
+      () =>
+        run(root, [
+          "--git-dir",
+          context.globalArgs.gitObjectPath,
+          "show-ref",
+          "--verify",
+          "refs/heads/review",
         ]),
       Error,
     );
