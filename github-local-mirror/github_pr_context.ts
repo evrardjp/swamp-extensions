@@ -39,6 +39,7 @@ const EXPECTED_SPECS = new Set([
   "prFileSnapshot",
   "checkRunSnapshot",
   "collectionStatus",
+  "worktreeSnapshot",
   "worktreeAnalysis",
   "prAnalysisEvidence",
   "reviewSelection",
@@ -505,9 +506,10 @@ export const report = {
     );
     const latestEntries = new Map<string, DataEntry>();
     for (const entry of allEntries) {
-      const current = latestEntries.get(entry.name);
+      const key = `${tagsOf(entry).specName ?? "unknown"}:${entry.name}`;
+      const current = latestEntries.get(key);
       if (!current || (entry.version ?? 0) > (current.version ?? 0)) {
-        latestEntries.set(entry.name, entry);
+        latestEntries.set(key, entry);
       }
     }
     const bySpec = new Map<string, StoredValue[]>();
@@ -675,9 +677,16 @@ export const report = {
       const prNumber = numberField(check, "prNumber");
       return prNumber && cluster.has(subjectKey("pr", prNumber));
     });
+    const activeWorktreeIds = new Set(
+      values("worktreeSnapshot")
+        .filter((worktree) => worktree.status === "active")
+        .map((worktree) => stringField(worktree, "id"))
+        .filter(Boolean),
+    );
     const worktrees = values("worktreeAnalysis").filter((worktree) => {
       const prNumber = numberField(worktree, "prNumber");
-      return prNumber && cluster.has(subjectKey("pr", prNumber));
+      return prNumber && cluster.has(subjectKey("pr", prNumber)) &&
+        activeWorktreeIds.has(stringField(worktree, "worktreeId"));
     });
     const statuses = values("collectionStatus").filter((status) => {
       const statusSubject = subjectOf(status);

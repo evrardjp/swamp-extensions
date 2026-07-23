@@ -734,3 +734,40 @@ Deno.test("fetched PR head state overrides a stale GitHub snapshot head", async 
   assertEquals(result.json.currentHead, HEAD_SHA);
   assertStringIncludes(result.markdown, "Current fetched head walkthrough.");
 });
+
+Deno.test("PR context excludes analysis for removed worktrees", async () => {
+  const result = await report.execute(context([
+    prFixture(),
+    {
+      name: "worktree-1",
+      version: 1,
+      spec: "worktreeAnalysis",
+      value: {
+        worktreeId: "worktree-1",
+        prNumber: 1,
+        path: "/worktrees/removed-pr-1",
+        isDirty: true,
+        isPrHeadStale: false,
+        aheadCommitCount: 1,
+        recommendedAction: "push-or-record-local-commits",
+      },
+    },
+    {
+      name: "worktree-1",
+      version: 2,
+      spec: "worktreeSnapshot",
+      value: {
+        id: "worktree-1",
+        prNumber: 1,
+        path: "/worktrees/removed-pr-1",
+        status: "removed",
+      },
+    },
+  ]));
+
+  assertEquals(
+    (result.json.worktreeAnalyses as Record<string, unknown>[]).length,
+    0,
+  );
+  assertEquals(result.markdown.includes("/worktrees/removed-pr-1"), false);
+});

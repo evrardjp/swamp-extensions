@@ -374,6 +374,60 @@ Deno.test("close_merged_worktrees preserves ignored files", async () => {
   );
 });
 
+Deno.test("close_merged_worktrees preserves unreferenced detached commits", async () => {
+  const { root, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    42,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/42`, {
+    recursive: true,
+  });
+  await Deno.writeTextFile(
+    `${context.globalArgs.artifactRoot}/prs/42/current.json`,
+    JSON.stringify({
+      number: 42,
+      state: "closed",
+      merged: true,
+      headSha,
+      observedAt: "2026-07-22T00:00:00.000Z",
+    }),
+  );
+  const worktree = await model.methods.prepare_worktree.execute({
+    prNumber: 42,
+  }, context);
+  const run = async (args: string[]) => {
+    const out = await new Deno.Command("git", {
+      cwd: worktree.path,
+      args,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    if (out.code !== 0) throw new Error(new TextDecoder().decode(out.stderr));
+  };
+  await run(["config", "user.email", "test@example.com"]);
+  await run(["config", "user.name", "Test"]);
+  await run(["config", "commit.gpgsign", "false"]);
+  await run(["checkout", "--detach"]);
+  await Deno.writeTextFile(`${worktree.path}/README.md`, "detached commit\n");
+  await run(["add", "README.md"]);
+  await run(["commit", "-m", "detached review commit"]);
+
+  const result = await model.methods.close_merged_worktrees.execute(
+    {},
+    context,
+  );
+
+  assertEquals(result.complete, false);
+  assertEquals(result.removedCount, 0);
+  assertStringIncludes(
+    result.results[0].error ?? "",
+    "detached HEAD contains commits",
+  );
+  assertEquals((await Deno.stat(worktree.path)).isDirectory, true);
+});
+
 Deno.test("close_merged_worktrees recovers when snapshot recording fails", async () => {
   const { root, context } = await tempContext();
   const headSha = await createMirroredPrRef(
