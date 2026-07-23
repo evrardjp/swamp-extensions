@@ -40,7 +40,8 @@ The model will configure/fetch remotes during `sync`. It does **not** use
 workflows. Upstream branches are tracked under
 `refs/remotes/<gitRemote>/*` and reconciled into canonical `refs/heads/*`, while
 PR refs and local `refs/heads/review/*` worktree branches remain in their
-separate namespaces.
+separate namespaces. The exact canonical branch `refs/heads/review` is reserved
+so future local worktrees can always be created beneath it.
 
 ## Create a model
 
