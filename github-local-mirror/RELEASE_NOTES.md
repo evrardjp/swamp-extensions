@@ -1,12 +1,12 @@
-## 2026.07.22.2
+## 2026.07.23.1
 
-**Added:** The `close_merged_worktrees` method removes non-dirty worktrees after
-their pull requests are merged while retaining their review branches and local
-commits.
+**Fixed:** Sync now updates canonical branches such as `refs/heads/main` in the
+managed bare repository instead of leaving them stale while fetching only into
+hard-coded `refs/remotes/origin/*` references.
 
-**Changed:** The local mirror status report now shows merged cleanup candidates,
-successful removals, and cleanup failures. One dirty worktree no longer prevents
-other eligible worktrees from being processed.
+**Changed:** The configured `gitRemote` now determines the remote-tracking
+namespace. Upstream branches are also available through canonical branch names,
+while local `review/*` worktree branches remain independent.
 
-**Upgrade note:** Add `close_merged_worktrees` between `sync` and
-`analyze_worktrees` in scheduled mirror workflows to enable automatic cleanup.
+**Upgrade note:** After pulling this version, run `sync` once to refresh stale
+canonical branch references in existing bare mirrors.

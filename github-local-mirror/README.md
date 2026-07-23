@@ -37,7 +37,10 @@ git init --bare ~/git/external-secrets/external-secrets.git
 
 The model will configure/fetch remotes during `sync`. It does **not** use
 `git clone --mirror`; fetch refspecs are explicit and safer for local review
-workflows.
+workflows. Upstream branches are tracked under
+`refs/remotes/<gitRemote>/*` and reconciled into canonical `refs/heads/*`, while
+PR refs and local `refs/heads/review/*` worktree branches remain in their
+separate namespaces.
 
 ## Create a model
 
@@ -54,6 +57,7 @@ swamp model create @evrardjp/github-local-mirror \
 
 Optional globals:
 
+- `gitRemote`: remote name used for upstream fetches (default: `origin`).
 - `gitRemoteUrl`: override `https://github.com/<owner>/<repo>.git`.
 - `knownRemotes`: named push/fork remotes to keep configured in the common git
   repo.

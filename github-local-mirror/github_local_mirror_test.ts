@@ -1003,3 +1003,113 @@ Deno.test("sync retries incomplete PR files for an unchanged head", async () => 
     globalThis.fetch = originalFetch;
   }
 });
+
+Deno.test("sync updates canonical branches with a custom remote and preserves review branches", async () => {
+  const { root, context } = await tempContext();
+  const source = `${root}/source`;
+  const upstream = `${root}/upstream.git`;
+  const run = async (cwd: string, args: string[]) => {
+    const out = await new Deno.Command("git", {
+      cwd,
+      args,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    if (out.code !== 0) {
+      throw new Error(new TextDecoder().decode(out.stderr));
+    }
+    return new TextDecoder().decode(out.stdout).trim();
+  };
+  await Deno.mkdir(source);
+  await run(source, ["init", "--initial-branch=main"]);
+  await run(source, ["config", "user.email", "test@example.com"]);
+  await run(source, ["config", "user.name", "Test"]);
+  await run(source, ["config", "commit.gpgsign", "false"]);
+  await Deno.writeTextFile(`${source}/README.md`, "stale\n");
+  await run(source, ["add", "README.md"]);
+  await run(source, ["commit", "-m", "stale"]);
+  const staleSha = await run(source, ["rev-parse", "HEAD"]);
+  await run(root, [
+    "clone",
+    "--bare",
+    source,
+    context.globalArgs.gitObjectPath,
+  ]);
+  await run(root, [
+    "--git-dir",
+    context.globalArgs.gitObjectPath,
+    "update-ref",
+    "refs/heads/review/pr-1-local",
+    staleSha,
+  ]);
+  await Deno.writeTextFile(`${source}/README.md`, "current\n");
+  await run(source, ["commit", "-am", "current"]);
+  const currentSha = await run(source, ["rev-parse", "HEAD"]);
+  await run(root, ["clone", "--bare", source, upstream]);
+  Object.assign(context.globalArgs, {
+    gitRemote: "upstream",
+    gitRemoteUrl: upstream,
+  });
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+        ? input.href
+        : input.url,
+    );
+    const json = (value: unknown) =>
+      new Response(JSON.stringify(value), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    if (url.pathname === "/repos/owner/repo") {
+      return json({ default_branch: "main" });
+    }
+    if (
+      url.pathname === "/repos/owner/repo/pulls" ||
+      url.pathname === "/repos/owner/repo/issues"
+    ) {
+      return json([]);
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const result = await model.methods.sync.execute({}, context);
+
+    assertEquals(result.complete, true);
+    assertEquals(
+      await run(root, [
+        "--git-dir",
+        context.globalArgs.gitObjectPath,
+        "rev-parse",
+        "refs/heads/main",
+      ]),
+      currentSha,
+    );
+    assertEquals(
+      await run(root, [
+        "--git-dir",
+        context.globalArgs.gitObjectPath,
+        "rev-parse",
+        "refs/heads/review/pr-1-local",
+      ]),
+      staleSha,
+    );
+    assertEquals(
+      await run(root, [
+        "--git-dir",
+        context.globalArgs.gitObjectPath,
+        "remote",
+        "get-url",
+        "upstream",
+      ]),
+      upstream,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

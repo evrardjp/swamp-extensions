@@ -925,15 +925,50 @@ async function fetchGit(
   deadlineMs?: number,
 ): Promise<void> {
   await ensureGitRepo(g, deadlineMs);
+  const remoteBranchPrefix = `refs/remotes/${g.gitRemote}/`;
   await runGitOk(g.gitObjectPath, [
     "fetch",
     "--prune",
     g.gitRemote,
-    "+refs/heads/*:refs/remotes/origin/*",
+    `+refs/heads/*:${remoteBranchPrefix}*`,
     "+refs/tags/*:refs/tags/*",
     "+refs/pull/*/head:refs/remotes/pull/*/head",
     "+refs/pull/*/merge:refs/remotes/pull/*/merge",
   ], deadlineMs);
+  // Canonical upstream branches mirror remote state; review/* is reserved for
+  // local worktrees and must survive remote pruning.
+  const remoteBranches = new Map<string, string>();
+  const remoteRefs = await runGitOk(g.gitObjectPath, [
+    "for-each-ref",
+    "--format=%(refname) %(objectname)",
+    remoteBranchPrefix,
+  ], deadlineMs);
+  for (const line of remoteRefs.split("\n")) {
+    const [ref, sha] = line.split(" ");
+    if (!ref || !sha) continue;
+    const branch = ref.slice(remoteBranchPrefix.length);
+    if (branch && branch !== "HEAD" && !branch.startsWith("review/")) {
+      remoteBranches.set(branch, sha);
+    }
+  }
+  const localRefs = await runGitOk(g.gitObjectPath, [
+    "for-each-ref",
+    "--format=%(refname)",
+    "refs/heads/",
+  ], deadlineMs);
+  for (const ref of localRefs.trim().split("\n").filter(Boolean)) {
+    const branch = ref.slice("refs/heads/".length);
+    if (!branch.startsWith("review/") && !remoteBranches.has(branch)) {
+      await runGitOk(g.gitObjectPath, ["update-ref", "-d", ref], deadlineMs);
+    }
+  }
+  for (const [branch, sha] of remoteBranches) {
+    await runGitOk(
+      g.gitObjectPath,
+      ["update-ref", `refs/heads/${branch}`, sha],
+      deadlineMs,
+    );
+  }
 }
 
 async function listMirroredPrHeads(
@@ -2770,7 +2805,7 @@ async function recordPrAnalysis(args: unknown, ctx: Context) {
 /** Swamp-backed local GitHub mirror model. */
 export const model = {
   type: "@evrardjp/github-local-mirror",
-  version: "2026.07.22.2",
+  version: "2026.07.23.1",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -2801,6 +2836,12 @@ export const model = {
       toVersion: "2026.07.22.2",
       description:
         "Add observable cleanup for worktrees belonging to merged pull requests",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.07.23.1",
+      description:
+        "Keep canonical branches current when synchronizing the managed bare repository",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
