@@ -57,7 +57,8 @@ swamp model create @evrardjp/github-local-mirror \
 
 Optional globals:
 
-- `gitRemote`: remote name used for upstream fetches (default: `origin`).
+- `gitRemote`: remote name used for upstream fetches (default: `origin`). The
+  `pull` namespace is reserved for mirrored PR refs.
 - `gitRemoteUrl`: override `https://github.com/<owner>/<repo>.git`.
 - `knownRemotes`: named push/fork remotes to keep configured in the common git
   repo.

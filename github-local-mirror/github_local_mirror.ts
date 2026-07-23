@@ -15,7 +15,10 @@ const GlobalArgsSchema = z.object({
   artifactRoot: z.string().min(1).describe(
     "Directory where sync stores durable mirror artifacts and cursors",
   ),
-  gitRemote: z.string().min(1).default("origin"),
+  gitRemote: z.string().min(1).refine(
+    (name) => name !== "pull" && !name.startsWith("pull/"),
+    'gitRemote must not use the reserved "pull" namespace',
+  ).default("origin"),
   gitRemoteUrl: z.string().min(1).optional(),
   sshRemoteBase: z.string().min(1).default("git@github.com:"),
   syncOverlapMinutes: z.number().int().nonnegative().default(5),
@@ -678,12 +681,14 @@ async function runGit(
   gitObjectPath: string,
   args: string[],
   deadlineMs?: number,
+  input?: string,
 ): Promise<RunResult> {
   if (deadlineMs && Date.now() >= deadlineMs) {
     throw new Error("sync budget exhausted before running git");
   }
   const child = new Deno.Command("git", {
     args: ["--git-dir", gitObjectPath, ...args],
+    stdin: input === undefined ? "null" : "piped",
     stdout: "piped",
     stderr: "piped",
   }).spawn();
@@ -696,7 +701,14 @@ async function runGit(
       }
     }, Math.max(1, deadlineMs - Date.now()))
     : undefined;
-  const out = await child.output().finally(() => {
+  const out = await (async () => {
+    if (input !== undefined) {
+      const writer = child.stdin.getWriter();
+      await writer.write(new TextEncoder().encode(input));
+      await writer.close();
+    }
+    return await child.output();
+  })().finally(() => {
     if (timer !== undefined) clearTimeout(timer);
   });
   return {
@@ -710,8 +722,9 @@ async function runGitOk(
   gitObjectPath: string,
   args: string[],
   deadlineMs?: number,
+  input?: string,
 ): Promise<string> {
-  const res = await runGit(gitObjectPath, args, deadlineMs);
+  const res = await runGit(gitObjectPath, args, deadlineMs, input);
   if (res.code !== 0) {
     throw new Error(`git ${args.join(" ")} failed: ${res.stderr.trim()}`);
   }
@@ -924,50 +937,116 @@ async function fetchGit(
   g: ParsedGlobalArgs,
   deadlineMs?: number,
 ): Promise<void> {
-  await ensureGitRepo(g, deadlineMs);
-  const remoteBranchPrefix = `refs/remotes/${g.gitRemote}/`;
-  await runGitOk(g.gitObjectPath, [
-    "fetch",
-    "--prune",
-    g.gitRemote,
-    `+refs/heads/*:${remoteBranchPrefix}*`,
-    "+refs/tags/*:refs/tags/*",
-    "+refs/pull/*/head:refs/remotes/pull/*/head",
-    "+refs/pull/*/merge:refs/remotes/pull/*/merge",
-  ], deadlineMs);
-  // Canonical upstream branches mirror remote state; review/* is reserved for
-  // local worktrees and must survive remote pruning.
-  const remoteBranches = new Map<string, string>();
-  const remoteRefs = await runGitOk(g.gitObjectPath, [
-    "for-each-ref",
-    "--format=%(refname) %(objectname)",
-    remoteBranchPrefix,
-  ], deadlineMs);
-  for (const line of remoteRefs.split("\n")) {
-    const [ref, sha] = line.split(" ");
-    if (!ref || !sha) continue;
-    const branch = ref.slice(remoteBranchPrefix.length);
-    if (branch && branch !== "HEAD" && !branch.startsWith("review/")) {
-      remoteBranches.set(branch, sha);
-    }
+  if (!await exists(g.gitObjectPath)) {
+    throw new Error(
+      `gitObjectPath ${g.gitObjectPath} does not exist; create it with git init --bare or provide an existing bare repo`,
+    );
   }
-  const localRefs = await runGitOk(g.gitObjectPath, [
-    "for-each-ref",
-    "--format=%(refname)",
-    "refs/heads/",
-  ], deadlineMs);
-  for (const ref of localRefs.trim().split("\n").filter(Boolean)) {
-    const branch = ref.slice("refs/heads/".length);
-    if (!branch.startsWith("review/") && !remoteBranches.has(branch)) {
-      await runGitOk(g.gitObjectPath, ["update-ref", "-d", ref], deadlineMs);
+  const lockFile = await Deno.open(`${g.gitObjectPath}/swamp-sync.lock`, {
+    create: true,
+    read: true,
+    write: true,
+  });
+  await lockFile.lock(true);
+  try {
+    await ensureGitRepo(g, deadlineMs);
+    const remoteBranchPrefix = `refs/remotes/${g.gitRemote}/`;
+    await runGitOk(g.gitObjectPath, [
+      "fetch",
+      "--prune",
+      g.gitRemote,
+      `+refs/heads/*:${remoteBranchPrefix}*`,
+      "+refs/tags/*:refs/tags/*",
+      "+refs/pull/*/head:refs/remotes/pull/*/head",
+      "+refs/pull/*/merge:refs/remotes/pull/*/merge",
+    ], deadlineMs);
+    const remoteBranches = new Map<
+      string,
+      { ref: string; sha: string }
+    >();
+    const remoteRefs = await runGitOk(g.gitObjectPath, [
+      "for-each-ref",
+      "--format=%(refname) %(objectname)",
+      remoteBranchPrefix,
+    ], deadlineMs);
+    for (const line of remoteRefs.split("\n")) {
+      const [ref, sha] = line.split(" ");
+      if (!ref || !sha) continue;
+      const branch = ref.slice(remoteBranchPrefix.length);
+      if (branch && branch !== "HEAD" && !branch.startsWith("review/")) {
+        remoteBranches.set(branch, { ref, sha });
+      }
     }
-  }
-  for (const [branch, sha] of remoteBranches) {
-    await runGitOk(
+    const localBranches = new Map<string, { ref: string; sha: string }>();
+    const localRefs = await runGitOk(g.gitObjectPath, [
+      "for-each-ref",
+      "--format=%(refname) %(objectname)",
+      "refs/heads/",
+    ], deadlineMs);
+    for (const line of localRefs.split("\n")) {
+      const [ref, sha] = line.split(" ");
+      if (!ref || !sha) continue;
+      localBranches.set(ref.slice("refs/heads/".length), { ref, sha });
+    }
+    const remoteHead = await runGitOk(
       g.gitObjectPath,
-      ["update-ref", `refs/heads/${branch}`, sha],
+      ["ls-remote", "--symref", g.gitRemote, "HEAD"],
       deadlineMs,
     );
+    const defaultBranchMatch = remoteHead.match(
+      /^ref: refs\/heads\/(.+)\tHEAD$/m,
+    );
+    const defaultBranch = defaultBranchMatch &&
+        remoteBranches.has(defaultBranchMatch[1])
+      ? defaultBranchMatch[1]
+      : undefined;
+    const currentHead = (await runGit(
+      g.gitObjectPath,
+      ["symbolic-ref", "--quiet", "HEAD"],
+      deadlineMs,
+    )).stdout.trim();
+    const zeroOid = "0".repeat(40);
+    const verificationCommands = [...remoteBranches.values()].map((
+      { ref, sha },
+    ) => `verify ${ref} ${sha}`);
+    const updateCommands = [...remoteBranches].map(([branch, { sha }]) => {
+      const oldSha = localBranches.get(branch)?.sha ?? zeroOid;
+      return `update refs/heads/${branch} ${sha} ${oldSha}`;
+    });
+    if (updateCommands.length > 0) {
+      await runGitOk(
+        g.gitObjectPath,
+        ["update-ref", "--stdin"],
+        deadlineMs,
+        `${[...verificationCommands, ...updateCommands].join("\n")}\n`,
+      );
+    }
+    if (defaultBranch) {
+      await runGitOk(
+        g.gitObjectPath,
+        ["symbolic-ref", "HEAD", `refs/heads/${defaultBranch}`],
+        deadlineMs,
+      );
+    }
+    // review/* is reserved for local worktrees and must survive remote pruning.
+    const deleteCommands = [...localBranches]
+      .filter(([branch]) =>
+        !branch.startsWith("review/") &&
+        !remoteBranches.has(branch) &&
+        (defaultBranch !== undefined || currentHead !== `refs/heads/${branch}`)
+      )
+      .map(([, { ref, sha }]) => `delete ${ref} ${sha}`);
+    if (deleteCommands.length > 0) {
+      await runGitOk(
+        g.gitObjectPath,
+        ["update-ref", "--stdin"],
+        deadlineMs,
+        `${[...verificationCommands, ...deleteCommands].join("\n")}\n`,
+      );
+    }
+  } finally {
+    await lockFile.unlock();
+    lockFile.close();
   }
 }
 
