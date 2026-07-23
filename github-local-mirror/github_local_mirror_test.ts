@@ -519,12 +519,12 @@ Deno.test("global arguments apply review context defaults", () => {
   );
   assertEquals(
     model.globalArguments.safeParse({ ...parsed, gitRemote: "pull" }).success,
-    false,
+    true,
   );
   assertEquals(
     model.globalArguments.safeParse({ ...parsed, gitRemote: "pull/custom" })
       .success,
-    false,
+    true,
   );
 });
 
@@ -722,6 +722,35 @@ Deno.test("sync writes unique collection statuses when its budget expires", asyn
   } finally {
     globalThis.fetch = originalFetch;
     Date.now = originalDateNow;
+  }
+});
+
+Deno.test("sync budget expires while waiting for the git lock", async () => {
+  const { context } = await tempContext();
+  const init = await new Deno.Command("git", {
+    args: ["init", "--bare", context.globalArgs.gitObjectPath],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (init.code !== 0) {
+    throw new Error(new TextDecoder().decode(init.stderr));
+  }
+  const lockFile = await Deno.open(
+    `${context.globalArgs.gitObjectPath}/swamp-sync.lock`,
+    { create: true, read: true, write: true },
+  );
+  await lockFile.lock(true);
+  const startedAt = performance.now();
+  try {
+    await assertRejects(
+      () => model.methods.sync.execute({ budgetSeconds: 1 }, context),
+      Error,
+      "sync budget exhausted while waiting for git lock",
+    );
+    assertEquals(performance.now() - startedAt < 2_000, true);
+  } finally {
+    await lockFile.unlock();
+    lockFile.close();
   }
 });
 
@@ -1039,6 +1068,7 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
   await run(source, ["commit", "-m", "stale"]);
   const staleSha = await run(source, ["rev-parse", "HEAD"]);
   await run(source, ["branch", "obsolete"]);
+  await run(source, ["branch", "feature/x"]);
   await run(root, [
     "clone",
     "--bare",
@@ -1049,18 +1079,20 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
     "--git-dir",
     context.globalArgs.gitObjectPath,
     "update-ref",
-    "refs/heads/review/pr-1-local",
+    `refs/heads/review/pr-1-patchhead-${staleSha.slice(0, 12)}`,
     staleSha,
   ]);
   await run(source, ["branch", "-D", "obsolete"]);
+  await run(source, ["branch", "-D", "feature/x"]);
+  await run(source, ["branch", "feature"]);
   await run(source, ["branch", "-m", "trunk"]);
-  await run(source, ["branch", "review"]);
+  await run(source, ["branch", "review/upstream"]);
   await Deno.writeTextFile(`${source}/README.md`, "current\n");
   await run(source, ["commit", "-am", "current"]);
   const currentSha = await run(source, ["rev-parse", "HEAD"]);
   await run(root, ["clone", "--bare", source, upstream]);
   Object.assign(context.globalArgs, {
-    gitRemote: "upstream",
+    gitRemote: "pull",
     gitRemoteUrl: upstream,
   });
 
@@ -1143,6 +1175,15 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
         ]),
       Error,
     );
+    assertEquals(
+      await run(root, [
+        "--git-dir",
+        context.globalArgs.gitObjectPath,
+        "rev-parse",
+        "refs/heads/feature",
+      ]),
+      staleSha,
+    );
     await assertRejects(
       () =>
         run(root, [
@@ -1150,7 +1191,7 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
           context.globalArgs.gitObjectPath,
           "show-ref",
           "--verify",
-          "refs/heads/review",
+          "refs/heads/feature/x",
         ]),
       Error,
     );
@@ -1159,7 +1200,16 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
         "--git-dir",
         context.globalArgs.gitObjectPath,
         "rev-parse",
-        "refs/heads/review/pr-1-local",
+        "refs/heads/review/upstream",
+      ]),
+      staleSha,
+    );
+    assertEquals(
+      await run(root, [
+        "--git-dir",
+        context.globalArgs.gitObjectPath,
+        "rev-parse",
+        `refs/heads/review/pr-1-patchhead-${staleSha.slice(0, 12)}`,
       ]),
       staleSha,
     );
@@ -1169,7 +1219,7 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
         context.globalArgs.gitObjectPath,
         "remote",
         "get-url",
-        "upstream",
+        "pull",
       ]),
       upstream,
     );

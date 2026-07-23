@@ -6,7 +6,7 @@ hard-coded `refs/remotes/origin/*` references.
 
 **Changed:** The configured `gitRemote` now determines the remote-tracking
 namespace. Upstream branches are also available through canonical branch names,
-while local `review/*` worktree branches remain independent.
+while local worktree branches remain independent.
 
 **Upgrade note:** After pulling this version, run `sync` once to refresh stale
 canonical branch references in existing bare mirrors. If a custom `gitRemote`
