@@ -2535,6 +2535,31 @@ async function closeMergedWorktrees(
             }`,
           );
         }
+        const symbolicHead = await gitInWorktree(record.path, [
+          "symbolic-ref",
+          "--quiet",
+          "--short",
+          "HEAD",
+        ]);
+        if (symbolicHead.code !== 0) {
+          const retained = await gitInWorktree(record.path, [
+            "merge-base",
+            "--is-ancestor",
+            "HEAD",
+            record.branch,
+          ]);
+          if (retained.code === 1) {
+            throw new Error(
+              `detached HEAD contains commits not retained by ${record.branch}`,
+            );
+          }
+          if (retained.code !== 0) {
+            throw new Error(
+              retained.stderr.trim() ||
+                `git merge-base --is-ancestor exited ${retained.code}`,
+            );
+          }
+        }
         const removal = await runGit(g.gitObjectPath, [
           "worktree",
           "remove",

@@ -150,7 +150,9 @@ cleanup result without preventing other eligible worktrees from being processed.
 Review branches are retained, including branches with local commits. Pull
 requests closed without merging are not eligible for cleanup. If removal
 succeeds but recording its state is interrupted, the next cleanup reconciles
-the missing Git worktree and retries the state update.
+the missing Git worktree and retries the state update. Detached HEAD commits
+must already be reachable from the retained review branch; otherwise cleanup is
+blocked until they are saved to a branch.
 
 ### `status`
 
