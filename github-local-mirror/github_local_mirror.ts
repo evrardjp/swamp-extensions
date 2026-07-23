@@ -15,10 +15,7 @@ const GlobalArgsSchema = z.object({
   artifactRoot: z.string().min(1).describe(
     "Directory where sync stores durable mirror artifacts and cursors",
   ),
-  gitRemote: z.string().min(1).refine(
-    (name) => name !== "pull" && !name.startsWith("pull/"),
-    'gitRemote must not use the reserved "pull" namespace',
-  ).default("origin"),
+  gitRemote: z.string().min(1).default("origin"),
   gitRemoteUrl: z.string().min(1).optional(),
   sshRemoteBase: z.string().min(1).default("git@github.com:"),
   syncOverlapMinutes: z.number().int().nonnegative().default(5),
@@ -539,6 +536,15 @@ function remoteNameForOwner(owner: string): string {
   return safeName("fork", [owner]);
 }
 
+function isManagedWorktreeBranch(branch: string): boolean {
+  return /^review\/pr-\d+-patchhead-[0-9a-f]{12}(?:-.+)?$/i.test(branch);
+}
+
+function refsConflict(left: string, right: string): boolean {
+  return left === right || left.startsWith(`${right}/`) ||
+    right.startsWith(`${left}/`);
+}
+
 function githubApiHeaders(g: GlobalArgs): HeadersInit {
   const headers: Record<string, string> = {
     "accept": "application/vnd.github+json",
@@ -947,10 +953,25 @@ async function fetchGit(
     read: true,
     write: true,
   });
-  await lockFile.lock(true);
   try {
+    if (deadlineMs) {
+      while (!await lockFile.tryLock(true)) {
+        const remaining = deadlineMs - Date.now();
+        if (remaining <= 0) {
+          throw new Error("sync budget exhausted while waiting for git lock");
+        }
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(50, remaining))
+        );
+      }
+    } else {
+      await lockFile.lock(true);
+    }
     await ensureGitRepo(g, deadlineMs);
-    const remoteBranchPrefix = `refs/remotes/${g.gitRemote}/`;
+    const remoteBranchPrefix = g.gitRemote === "pull" ||
+        g.gitRemote.startsWith("pull/")
+      ? `refs/swamp/remotes/${g.gitRemote}/`
+      : `refs/remotes/${g.gitRemote}/`;
     await runGitOk(g.gitObjectPath, [
       "fetch",
       "--prune",
@@ -960,7 +981,7 @@ async function fetchGit(
       "+refs/pull/*/head:refs/remotes/pull/*/head",
       "+refs/pull/*/merge:refs/remotes/pull/*/merge",
     ], deadlineMs);
-    const remoteBranches = new Map<
+    const fetchedRemoteBranches = new Map<
       string,
       { ref: string; sha: string }
     >();
@@ -973,11 +994,8 @@ async function fetchGit(
       const [ref, sha] = line.split(" ");
       if (!ref || !sha) continue;
       const branch = ref.slice(remoteBranchPrefix.length);
-      if (
-        branch && branch !== "HEAD" && branch !== "review" &&
-        !branch.startsWith("review/")
-      ) {
-        remoteBranches.set(branch, { ref, sha });
+      if (branch && branch !== "HEAD") {
+        fetchedRemoteBranches.set(branch, { ref, sha });
       }
     }
     const localBranches = new Map<string, { ref: string; sha: string }>();
@@ -991,6 +1009,16 @@ async function fetchGit(
       if (!ref || !sha) continue;
       localBranches.set(ref.slice("refs/heads/".length), { ref, sha });
     }
+    const managedWorktreeBranches = [...localBranches.keys()].filter(
+      isManagedWorktreeBranch,
+    );
+    const remoteBranches = new Map(
+      [...fetchedRemoteBranches].filter(([branch]) =>
+        !managedWorktreeBranches.some((managed) =>
+          refsConflict(branch, managed)
+        )
+      ),
+    );
     const remoteHead = await runGitOk(
       g.gitObjectPath,
       ["ls-remote", "--symref", g.gitRemote, "HEAD"],
@@ -1012,6 +1040,29 @@ async function fetchGit(
     const verificationCommands = [...remoteBranches.values()].map((
       { ref, sha },
     ) => `verify ${ref} ${sha}`);
+    const staleBranches = [...localBranches].filter(([branch]) =>
+      !isManagedWorktreeBranch(branch) &&
+      !remoteBranches.has(branch) &&
+      (defaultBranch !== undefined || currentHead !== `refs/heads/${branch}`)
+    );
+    const pathConflictDeletes = staleBranches.filter(([branch]) =>
+      [...remoteBranches.keys()].some((remote) => refsConflict(branch, remote))
+    );
+    if (pathConflictDeletes.length > 0) {
+      await runGitOk(
+        g.gitObjectPath,
+        ["update-ref", "--stdin"],
+        deadlineMs,
+        `${
+          [
+            ...verificationCommands,
+            ...pathConflictDeletes.map(([, { ref, sha }]) =>
+              `delete ${ref} ${sha}`
+            ),
+          ].join("\n")
+        }\n`,
+      );
+    }
     const updateCommands = [...remoteBranches].map(([branch, { sha }]) => {
       const oldSha = localBranches.get(branch)?.sha ?? zeroOid;
       return `update refs/heads/${branch} ${sha} ${oldSha}`;
@@ -1031,13 +1082,11 @@ async function fetchGit(
         deadlineMs,
       );
     }
-    // review/* is reserved for local worktrees and must survive remote pruning.
-    const deleteCommands = [...localBranches]
-      .filter(([branch]) =>
-        !branch.startsWith("review/") &&
-        !remoteBranches.has(branch) &&
-        (defaultBranch !== undefined || currentHead !== `refs/heads/${branch}`)
-      )
+    const pathConflictRefs = new Set(
+      pathConflictDeletes.map(([, { ref }]) => ref),
+    );
+    const deleteCommands = staleBranches
+      .filter(([, { ref }]) => !pathConflictRefs.has(ref))
       .map(([, { ref, sha }]) => `delete ${ref} ${sha}`);
     if (deleteCommands.length > 0) {
       await runGitOk(
@@ -1048,7 +1097,7 @@ async function fetchGit(
       );
     }
   } finally {
-    await lockFile.unlock();
+    await lockFile.unlock().catch(() => {});
     lockFile.close();
   }
 }
