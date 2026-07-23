@@ -409,13 +409,45 @@ Deno.test("resource load failures downgrade readiness confidence", async () => {
     head(33),
     ...statuses(33),
     missingCheck,
+    pr(39, { reviewDecision: "APPROVED" }),
+    head(39),
+    ...statuses(39),
+    check(39),
   ]));
   assertEquals(bucket(result, 33), "Data Incomplete");
+  assertEquals(bucket(result, 39), "Merge/Final-Check Candidates");
   assertEquals(
     (result.json.freshness as Record<string, unknown>).loadErrors instanceof
       Array,
     true,
   );
+});
+
+Deno.test("snapshot HEAD is required for readiness", async () => {
+  const result = await report.execute(context([
+    pr(42, { headSha: undefined, reviewDecision: "APPROVED" }),
+    head(42),
+    ...statuses(42),
+    check(42),
+  ]));
+  assertEquals(bucket(result, 42), "Data Incomplete");
+  const view =
+    (result.json.openPullRequests as Array<Record<string, unknown>>)[0];
+  assertEquals(view.snapshotHead, null);
+});
+
+Deno.test("drill-down recommendation follows classification precedence", async () => {
+  const result = await report.execute(context([
+    pr(43),
+    head(43),
+    ...statuses(43),
+    check(43),
+    pr(44, { reviewDecision: "APPROVED" }),
+    head(44),
+    ...statuses(44),
+    check(44),
+  ]));
+  assertStringIncludes(result.markdown, "If you want to see PR #44, run:");
 });
 
 Deno.test("same-name current-head check failures remain blocking", async () => {

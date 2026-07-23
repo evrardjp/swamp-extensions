@@ -167,6 +167,21 @@ function uniqueStrings(values: string[]): string[] {
   ];
 }
 
+function entryPrNumber(spec: string, name: string): number | null {
+  const patterns: Record<string, RegExp> = {
+    prSnapshot: /^pr-(\d+)$/,
+    prHeadState: /^(?:pr-head|head)-(\d+)$/,
+    checkRunSnapshot: /^check-(\d+)-/,
+    activityEvent: /^event-(?:pr-)?(\d+)-/,
+    prRevision: /^pr-revision-(\d+)-/,
+    prFileSnapshot: /^pr-file-(\d+)-/,
+    collectionStatus: /^collection-pr-(\d+)-/,
+  };
+  const match = patterns[spec]?.exec(name);
+  const number = Number(match?.[1]);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
 function dateMs(value: unknown): number | null {
   if (typeof value !== "string" || !value) return null;
   const result = Date.parse(value);
@@ -529,14 +544,12 @@ export const report = {
           specName: spec,
           dataName: entry.name,
           version: entry.version,
+          prNumber: entryPrNumber(spec, entry.name),
           error: error instanceof Error ? error.message : String(error),
         });
       }
     }
     const values = (spec: string) => bySpec.get(spec) ?? [];
-    const readinessLoadErrors = loadErrors.filter((error) =>
-      !["mirrorState", "syncRunSummary"].includes(String(error.specName))
-    );
     const statuses = values("collectionStatus");
     const repoPrStatuses = statuses.filter((status) =>
       status.subjectType === "repo" &&
@@ -567,6 +580,10 @@ export const report = {
           collectionState(statuses, number, component),
         ]),
       );
+      const prLoadErrors = loadErrors.filter((error) =>
+        Number(error.prNumber) === number &&
+        !["mirrorState", "syncRunSummary"].includes(String(error.specName))
+      );
       const dataErrors = statuses.filter((status) =>
         status.subjectType === "pr" &&
         numberField(status, "subjectNumber") === number &&
@@ -575,9 +592,9 @@ export const report = {
         stringField(status, "error") ||
         `${stringField(status, "component")} incomplete`
       );
-      if (readinessLoadErrors.length) {
+      if (prLoadErrors.length) {
         dataErrors.push(
-          `${readinessLoadErrors.length} stored readiness resource(s) could not be loaded`,
+          `${prLoadErrors.length} stored readiness resource(s) could not be loaded`,
         );
       }
       if (repoPrCollectionComplete !== true) {
@@ -588,14 +605,17 @@ export const report = {
       if (!currentHead) {
         dataErrors.push("Authoritative current HEAD is unavailable");
       }
+      if (!snapshotHead) {
+        dataErrors.push("PR snapshot HEAD is unavailable");
+      }
       if (currentHead && snapshotHead && currentHead !== snapshotHead) {
         dataErrors.push("Snapshot HEAD differs from the fetched local PR HEAD");
       }
       const dataComplete = REQUIRED_COLLECTIONS.every((component) =>
         prStatuses[component] === true
       ) && repoPrCollectionComplete === true &&
-        readinessLoadErrors.length === 0 && Boolean(currentHead) &&
-        (!snapshotHead || snapshotHead === currentHead);
+        prLoadErrors.length === 0 && Boolean(currentHead) &&
+        Boolean(snapshotHead) && snapshotHead === currentHead;
       const events = values("activityEvent").filter((event) =>
         event.subjectType === "pr" &&
         numberField(event, "subjectNumber") === number
@@ -901,7 +921,8 @@ export const report = {
       ),
       "",
     );
-    const firstPr = BUCKETS.flatMap((bucket) => bucketContents[bucket])[0];
+    const firstPr =
+      CLASSIFICATION_PRECEDENCE.flatMap((bucket) => bucketContents[bucket])[0];
     if (firstPr) {
       const modelName = context.definition?.name ?? modelId;
       const command = `swamp model method run ${
