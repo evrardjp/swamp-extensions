@@ -517,6 +517,15 @@ Deno.test("global arguments apply review context defaults", () => {
     model.globalArguments.safeParse({ ...parsed, maxApiPages: 0 }).success,
     false,
   );
+  assertEquals(
+    model.globalArguments.safeParse({ ...parsed, gitRemote: "pull" }).success,
+    false,
+  );
+  assertEquals(
+    model.globalArguments.safeParse({ ...parsed, gitRemote: "pull/custom" })
+      .success,
+    false,
+  );
 });
 
 Deno.test("prepare_review_context refreshes local state and validates subjects", async () => {
@@ -1004,7 +1013,7 @@ Deno.test("sync retries incomplete PR files for an unchanged head", async () => 
   }
 });
 
-Deno.test("sync updates canonical branches with a custom remote and preserves review branches", async () => {
+Deno.test("sync reconciles canonical branches and HEAD while preserving review branches", async () => {
   const { root, context } = await tempContext();
   const source = `${root}/source`;
   const upstream = `${root}/upstream.git`;
@@ -1029,6 +1038,7 @@ Deno.test("sync updates canonical branches with a custom remote and preserves re
   await run(source, ["add", "README.md"]);
   await run(source, ["commit", "-m", "stale"]);
   const staleSha = await run(source, ["rev-parse", "HEAD"]);
+  await run(source, ["branch", "obsolete"]);
   await run(root, [
     "clone",
     "--bare",
@@ -1042,6 +1052,8 @@ Deno.test("sync updates canonical branches with a custom remote and preserves re
     "refs/heads/review/pr-1-local",
     staleSha,
   ]);
+  await run(source, ["branch", "-D", "obsolete"]);
+  await run(source, ["branch", "-m", "trunk"]);
   await Deno.writeTextFile(`${source}/README.md`, "current\n");
   await run(source, ["commit", "-am", "current"]);
   const currentSha = await run(source, ["rev-parse", "HEAD"]);
@@ -1086,9 +1098,49 @@ Deno.test("sync updates canonical branches with a custom remote and preserves re
         "--git-dir",
         context.globalArgs.gitObjectPath,
         "rev-parse",
-        "refs/heads/main",
+        "refs/heads/trunk",
       ]),
       currentSha,
+    );
+    assertEquals(
+      await run(root, [
+        "--git-dir",
+        context.globalArgs.gitObjectPath,
+        "symbolic-ref",
+        "HEAD",
+      ]),
+      "refs/heads/trunk",
+    );
+    assertEquals(
+      await run(root, [
+        "--git-dir",
+        context.globalArgs.gitObjectPath,
+        "rev-parse",
+        "HEAD",
+      ]),
+      currentSha,
+    );
+    await assertRejects(
+      () =>
+        run(root, [
+          "--git-dir",
+          context.globalArgs.gitObjectPath,
+          "show-ref",
+          "--verify",
+          "refs/heads/main",
+        ]),
+      Error,
+    );
+    await assertRejects(
+      () =>
+        run(root, [
+          "--git-dir",
+          context.globalArgs.gitObjectPath,
+          "show-ref",
+          "--verify",
+          "refs/heads/obsolete",
+        ]),
+      Error,
     );
     assertEquals(
       await run(root, [
