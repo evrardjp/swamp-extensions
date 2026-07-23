@@ -29,6 +29,8 @@ const GlobalArgsSchema = z.object({
     "needs-information",
     "needs-clarification",
   ]),
+  reviewerHandles: z.array(z.string().min(1)).default([]),
+  reviewFocusStaleDays: z.number().int().positive().default(14),
   maxApiPages: z.number().int().positive().max(1000).default(100),
 });
 
@@ -2941,7 +2943,7 @@ async function recordPrAnalysis(args: unknown, ctx: Context) {
 /** Swamp-backed local GitHub mirror model. */
 export const model = {
   type: "@evrardjp/github-local-mirror",
-  version: "2026.07.23.1",
+  version: "2026.07.23.2",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -2978,6 +2980,12 @@ export const model = {
       toVersion: "2026.07.23.1",
       description:
         "Keep canonical branches current when synchronizing the managed bare repository",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.07.23.2",
+      description:
+        "Add reviewer identities and stale threshold configuration for the repository review focus report",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

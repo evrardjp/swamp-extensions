@@ -1,15 +1,14 @@
-## 2026.07.23.1
+## 2026.07.23.2
 
-**Fixed:** Sync now updates canonical branches such as `refs/heads/main` in the
-managed bare repository instead of leaving them stale while fetching only into
-hard-coded `refs/remotes/origin/*` references.
+**Added:** The `@evrardjp/github-repo-review-focus` report classifies every
+mirrored open pull request into a deterministic reviewer action queue and
+includes reviewer load, label concentration, large changes, path overlap, and
+stale backlog summaries in Markdown and JSON.
 
-**Changed:** The configured `gitRemote` now determines the remote-tracking
-namespace. Upstream branches are also available through canonical branch names,
-while local worktree branches remain independent.
+**Changed:** Model definitions can configure `reviewerHandles` and
+`reviewFocusStaleDays`. Report rendering uses stored mirror data only and marks
+missing current-HEAD or collection data as incomplete instead of ready.
 
-**Upgrade note:** After pulling this version, run `sync` once to refresh stale
-canonical branch references in existing bare mirrors. If a custom `gitRemote`
-was previously used and `origin` is not a separate remote you need to retain,
-remove its legacy stale refs with
-`git --git-dir <path> for-each-ref --format='delete %(refname)' refs/remotes/origin | git --git-dir <path> update-ref --stdin`.
+**Upgrade note:** Existing models remain valid with no configured reviewer
+handles and a 14-day stale threshold. Configure `reviewerHandles` to enable the
+personal Re-review and Requested From You queues.
