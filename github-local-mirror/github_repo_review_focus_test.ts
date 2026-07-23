@@ -418,7 +418,7 @@ Deno.test("resource load failures downgrade readiness confidence", async () => {
   );
 });
 
-Deno.test("equal-time check tie-breaking is independent of repository order", async () => {
+Deno.test("same-name current-head check failures remain blocking", async () => {
   const failing = check(34, "failure");
   failing.name = "a-check";
   const passing = check(34, "success");
@@ -430,8 +430,48 @@ Deno.test("equal-time check tie-breaking is independent of repository order", as
   ];
   const forward = await report.execute(context([...common, failing, passing]));
   const reverse = await report.execute(context([...common, passing, failing]));
-  assertEquals(bucket(forward, 34), "Merge/Final-Check Candidates");
-  assertEquals(bucket(reverse, 34), "Merge/Final-Check Candidates");
+  assertEquals(bucket(forward, 34), "CI Blocked");
+  assertEquals(bucket(reverse, 34), "CI Blocked");
+});
+
+Deno.test("author reply after a current-head review triggers re-review", async () => {
+  const result = await report.execute(context([
+    pr(38),
+    head(38),
+    ...statuses(38),
+    check(38),
+    event(38, "maintainer", "CHANGES_REQUESTED", OLD, HEAD),
+    {
+      name: "author-reply-38",
+      spec: "activityEvent",
+      value: {
+        subjectType: "pr",
+        subjectNumber: 38,
+        eventType: "comment",
+        actor: "author-38",
+        createdAt: RECENT,
+      },
+    },
+  ]));
+  assertEquals(bucket(result, 38), "Re-review Now");
+});
+
+Deno.test("stale PRs sort by longest inactivity before PR number", async () => {
+  const result = await report.execute(context([
+    pr(40, { createdAt: "2001-01-01T00:00:00Z" }),
+    head(40),
+    ...statuses(40),
+    check(40),
+    pr(41, { createdAt: "2000-01-01T00:00:00Z" }),
+    head(41),
+    ...statuses(41),
+    check(41),
+  ]));
+  const stale = (result.json.buckets as Record<
+    string,
+    Array<Record<string, unknown>>
+  >)["Stale/Defer"];
+  assertEquals(stale.map((candidate) => candidate.number), [41, 40]);
 });
 
 Deno.test("incomplete repository PR collection downgrades known PRs", async () => {

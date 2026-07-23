@@ -252,13 +252,9 @@ function activeChangesRequestedReview(reviews: Review[]): Review | null {
 
 function authorUpdatedAfter(
   review: Review | null,
-  currentHead: string | null,
   latestAuthorUpdateAt: string | null,
 ): boolean {
   if (!review) return false;
-  if (review.commitSha && currentHead && review.commitSha === currentHead) {
-    return false;
-  }
   return (dateMs(latestAuthorUpdateAt) ?? -Infinity) >
     (dateMs(review.createdAt) ?? Infinity);
 }
@@ -288,27 +284,9 @@ function reviewRequestDate(
 
 function ciState(checks: StoredValue[], complete: boolean | null): CiState {
   if (complete !== true || !checks.length) return "unknown";
-  const latestByName = new Map<string, StoredValue>();
-  for (const check of checks) {
-    const name = stringField(check, "name").toLowerCase() || check._dataName;
-    const current = latestByName.get(name);
-    const checkDate = dateMs(check.completedAt) ?? dateMs(check.startedAt) ??
-      dateMs(check.syncedAt) ?? check._dataVersion;
-    const currentDate = current
-      ? dateMs(current.completedAt) ?? dateMs(current.startedAt) ??
-        dateMs(current.syncedAt) ?? current._dataVersion
-      : -Infinity;
-    if (
-      !current || checkDate > currentDate ||
-      (checkDate === currentDate &&
-        (check._dataVersion > current._dataVersion ||
-          (check._dataVersion === current._dataVersion &&
-            check._dataName.localeCompare(current._dataName) > 0)))
-    ) latestByName.set(name, check);
-  }
   let pending = false;
   let unknown = false;
-  for (const check of latestByName.values()) {
+  for (const check of checks) {
     const status = stringField(check, "status").toLowerCase();
     const conclusion = stringField(check, "conclusion").toLowerCase();
     if (FAILING_CONCLUSIONS.has(conclusion)) return "failing";
@@ -650,12 +628,10 @@ export const report = {
       ]);
       const authorUpdatedAfterReview = authorUpdatedAfter(
         latestConfiguredReview,
-        currentHead,
         latestAuthorUpdateAt,
       );
       const authorUpdatedAfterChangesRequest = authorUpdatedAfter(
         latestChangesRequestedReview,
-        currentHead,
         latestAuthorUpdateAt,
       );
       const currentChecks = values("checkRunSnapshot").filter((check) =>
@@ -736,7 +712,8 @@ export const report = {
         Number(left.requestedConfiguredReviewers.length > 0);
       return personal ||
         labelPriority(left.labels) - labelPriority(right.labels) ||
-        (right.reviewerWaitDays ?? -1) - (left.reviewerWaitDays ?? -1) ||
+        (right.reviewerWaitDays ?? right.inactivityDays ?? -1) -
+          (left.reviewerWaitDays ?? left.inactivityDays ?? -1) ||
         left.number - right.number;
     });
     const bucketContents = Object.fromEntries(BUCKETS.map((bucket) => [
