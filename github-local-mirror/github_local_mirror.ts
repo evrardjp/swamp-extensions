@@ -967,11 +967,17 @@ async function fetchGit(
     } else {
       await lockFile.lock(true);
     }
-    await ensureGitRepo(g, deadlineMs);
     const remoteBranchPrefix = g.gitRemote === "pull" ||
         g.gitRemote.startsWith("pull/")
       ? `refs/swamp/remotes/${g.gitRemote}/`
       : `refs/remotes/${g.gitRemote}/`;
+    await ensureGitRepo(g, deadlineMs);
+    await runGitOk(g.gitObjectPath, [
+      "config",
+      "--replace-all",
+      `remote.${g.gitRemote}.fetch`,
+      `+refs/heads/*:${remoteBranchPrefix}*`,
+    ], deadlineMs);
     await runGitOk(g.gitObjectPath, [
       "fetch",
       "--prune",
@@ -1009,14 +1015,13 @@ async function fetchGit(
       if (!ref || !sha) continue;
       localBranches.set(ref.slice("refs/heads/".length), { ref, sha });
     }
-    const managedWorktreeBranches = [...localBranches.keys()].filter(
-      isManagedWorktreeBranch,
+    const localReviewBranches = [...localBranches.keys()].filter(
+      (branch) => branch.startsWith("review/"),
     );
     const remoteBranches = new Map(
       [...fetchedRemoteBranches].filter(([branch]) =>
-        !managedWorktreeBranches.some((managed) =>
-          refsConflict(branch, managed)
-        )
+        branch !== "review" && !isManagedWorktreeBranch(branch) &&
+        !localReviewBranches.some((local) => refsConflict(branch, local))
       ),
     );
     const remoteHead = await runGitOk(
@@ -1041,7 +1046,7 @@ async function fetchGit(
       { ref, sha },
     ) => `verify ${ref} ${sha}`);
     const staleBranches = [...localBranches].filter(([branch]) =>
-      !isManagedWorktreeBranch(branch) &&
+      !branch.startsWith("review/") &&
       !remoteBranches.has(branch) &&
       (defaultBranch !== undefined || currentHead !== `refs/heads/${branch}`)
     );

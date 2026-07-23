@@ -1069,6 +1069,7 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
   const staleSha = await run(source, ["rev-parse", "HEAD"]);
   await run(source, ["branch", "obsolete"]);
   await run(source, ["branch", "feature/x"]);
+  await run(source, ["branch", "1/head"]);
   await run(root, [
     "clone",
     "--bare",
@@ -1082,11 +1083,18 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
     `refs/heads/review/pr-1-patchhead-${staleSha.slice(0, 12)}`,
     staleSha,
   ]);
+  await run(root, [
+    "--git-dir",
+    context.globalArgs.gitObjectPath,
+    "update-ref",
+    "refs/heads/review/manual-local",
+    staleSha,
+  ]);
   await run(source, ["branch", "-D", "obsolete"]);
   await run(source, ["branch", "-D", "feature/x"]);
   await run(source, ["branch", "feature"]);
   await run(source, ["branch", "-m", "trunk"]);
-  await run(source, ["branch", "review/upstream"]);
+  await run(source, ["branch", "review"]);
   await Deno.writeTextFile(`${source}/README.md`, "current\n");
   await run(source, ["commit", "-am", "current"]);
   const currentSha = await run(source, ["rev-parse", "HEAD"]);
@@ -1195,12 +1203,23 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
         ]),
       Error,
     );
+    await assertRejects(
+      () =>
+        run(root, [
+          "--git-dir",
+          context.globalArgs.gitObjectPath,
+          "show-ref",
+          "--verify",
+          "refs/heads/review",
+        ]),
+      Error,
+    );
     assertEquals(
       await run(root, [
         "--git-dir",
         context.globalArgs.gitObjectPath,
         "rev-parse",
-        "refs/heads/review/upstream",
+        `refs/heads/review/pr-1-patchhead-${staleSha.slice(0, 12)}`,
       ]),
       staleSha,
     );
@@ -1209,7 +1228,27 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
         "--git-dir",
         context.globalArgs.gitObjectPath,
         "rev-parse",
-        `refs/heads/review/pr-1-patchhead-${staleSha.slice(0, 12)}`,
+        "refs/heads/review/manual-local",
+      ]),
+      staleSha,
+    );
+    await assertRejects(
+      () =>
+        run(root, [
+          "--git-dir",
+          context.globalArgs.gitObjectPath,
+          "show-ref",
+          "--verify",
+          "refs/remotes/pull/1/head",
+        ]),
+      Error,
+    );
+    assertEquals(
+      await run(root, [
+        "--git-dir",
+        context.globalArgs.gitObjectPath,
+        "rev-parse",
+        "refs/swamp/remotes/pull/1/head",
       ]),
       staleSha,
     );
