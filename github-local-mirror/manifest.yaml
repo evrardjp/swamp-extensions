@@ -1,6 +1,6 @@
 manifestVersion: 1
 name: "@evrardjp/github-local-mirror"
-version: "2026.07.23.1"
+version: "2026.07.23.2"
 description: >-
   Swamp-backed local GitHub mirror: keeps a local git object cache plus
   queryable Swamp metadata for PRs, issues, comments, reviews, checks,
@@ -13,6 +13,7 @@ models:
 reports:
   - github_local_mirror_status.ts
   - github_pr_context.ts
+  - github_repo_review_focus.ts
 workflows: []
 vaults: []
 drivers: []

@@ -10,6 +10,14 @@ The model keeps two synchronized stores:
   timeline events, check runs, file touches, patch revision metadata, sync
   cursors, and worktree analysis.
 
+The data flow is GitHub and local Git -> stored Swamp mirror resources ->
+reports. Report rendering reads those stored resources and never contacts
+GitHub. Principal resources include `prSnapshot` for PR metadata,
+`prHeadState` for the fetched authoritative HEAD, `checkRunSnapshot` for CI,
+`activityEvent` for reviews and human activity, `prRevision` and
+`prFileSnapshot` for current changes, `collectionStatus` for confidence, and
+`mirrorState`/`syncRunSummary` for freshness.
+
 ## Model name convention
 
 Use:
@@ -68,6 +76,10 @@ Optional globals:
   one event per `commit` in PR context reports.
 - `needsClarificationLabels`: labels that deterministically mark a PR as
   needing clarification.
+- `reviewerHandles`: GitHub identities used by the repo-wide reviewer focus
+  report. Multiple identities are matched case-insensitively.
+- `reviewFocusStaleDays`: non-bot inactivity threshold for the reviewer focus
+  report (default: 14).
 - `maxApiPages`: bounded GitHub pagination limit. Reaching it records an
   incomplete collection instead of silently truncating a timeline.
 
@@ -169,8 +181,8 @@ swamp model method run external-secrets-external-secrets-mirror status
 
 ### `prepare_review_context`
 
-Select a mirrored PR or issue and generate its deterministic context report
-without contacting GitHub:
+Select the current subject for the deterministic context report and refresh its
+local worktree evidence without contacting GitHub:
 
 ```bash
 swamp model method run external-secrets-external-secrets-mirror \
@@ -187,6 +199,9 @@ The report joins a requested PR to its referenced local issues and every other
 local PR linked to those issues. Starting from an issue shows that issue and its
 linked PRs. External references are not fetched or expanded; their URL is shown
 when the mirror has one.
+
+`@evrardjp/github-pr-context` is subject-scoped and follows
+`reviewSelection`; it does not rank or prioritize the repository's open PRs.
 
 The timeline contains complete stored bodies, comments, reviews, events, and
 code events. It does not embed code diffs. Instead, every push or commit event
@@ -232,6 +247,44 @@ The method rejects evidence for a stale head. Until matching evidence exists,
 the deterministic report leaves both analysis sections visibly unfilled. The
 bundled `github-pr-review` skill performs this check, asks before generating
 analysis, records it through Swamp, and then shows the refreshed report.
+`record_pr_analysis` validates the exact current HEAD; its `generator` value is
+caller-provided provenance. This optional analysis evidence does not influence
+the deterministic repository-wide focus report.
+
+## Repository review focus report
+
+Configure reviewer identities when creating or upgrading the model:
+
+```yaml
+reviewerHandles:
+  - evrardj-roche
+  - evrardjp
+reviewFocusStaleDays: 14
+```
+
+Retrieve the repo-wide queue as Markdown or structured JSON:
+
+```bash
+swamp report get @evrardjp/github-repo-review-focus \
+  --model external-secrets-external-secrets-mirror \
+  --markdown
+
+swamp report get @evrardjp/github-repo-review-focus \
+  --model external-secrets-external-secrets-mirror \
+  --json
+```
+
+Every latest open `prSnapshot` appears in exactly one bucket. Classification
+precedence is Re-review, Requested, Draft, Data Incomplete, Waiting On Author,
+CI Blocked, Stale, Merge/Final-Check, then Unassigned. Personal obligations may
+retain blocker warnings; draft or incomplete data never becomes a readiness
+claim. Ordering is configured obligations first, security/bug labels, feature
+labels, chore labels, longest known wait, then PR number.
+
+Checks and changed paths are accepted only for the fetched current HEAD. Missing
+or incomplete collection status remains unknown, and recognized bot activity
+does not reset the inactivity clock. The first version is entirely
+deterministic: `prAnalysisEvidence` never affects classification or ordering.
 
 ## Status report
 

@@ -508,6 +508,8 @@ Deno.test("global arguments apply review context defaults", () => {
 
   assertEquals(parsed.timelineCodeGranularity, "observed-push");
   assertEquals(parsed.maxApiPages, 100);
+  assertEquals(parsed.reviewerHandles, []);
+  assertEquals(parsed.reviewFocusStaleDays, 14);
   assertEquals(parsed.needsClarificationLabels, [
     "needs-info",
     "needs-information",
@@ -525,6 +527,11 @@ Deno.test("global arguments apply review context defaults", () => {
     model.globalArguments.safeParse({ ...parsed, gitRemote: "pull/custom" })
       .success,
     true,
+  );
+  assertEquals(
+    model.globalArguments.safeParse({ ...parsed, reviewFocusStaleDays: 0 })
+      .success,
+    false,
   );
 });
 
