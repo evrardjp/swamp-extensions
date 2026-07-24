@@ -33,7 +33,7 @@ jobs:
         run: deno task e2e
       - name: Upload compatibility evidence draft
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: floci-aws-compatibility-evidence
           path: floci-aws/artifacts/*.md
