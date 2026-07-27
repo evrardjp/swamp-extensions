@@ -108,16 +108,34 @@ During sync the model:
 5. exports revision patches under `artifactRoot/prs/<pr>/revisions/<headSha>/`;
 6. updates local cursor state.
 
-### `prepare_worktree`
+### `create_worktree`
 
-Create an editable worktree for the latest mirrored PR head without calling
-GitHub. The PR must already be present in the mirror.
+Create and register either a development worktree from a local mirrored base ref
+or a review worktree from the latest mirrored PR head. Exactly one of `branch`
+or `prNumber` is required, and neither mode calls GitHub.
+
+Start development before a PR exists:
 
 ```bash
-swamp model method run external-secrets-external-secrets-mirror prepare_worktree \
+swamp model method run external-secrets-external-secrets-mirror create_worktree \
+  --input branch=feature/new-thing \
+  --input baseRef=refs/remotes/origin/main \
+  --input identity=jp
+```
+
+`baseRef` defaults to `refs/remotes/origin/main`. The method validates the Git
+branch and base commit locally, creates a collision-resistant path below
+`workspaceRoot`, and records the original base for ahead-commit analysis.
+
+Create a review worktree after the PR has been mirrored:
+
+```bash
+swamp model method run external-secrets-external-secrets-mirror create_worktree \
   --input prNumber=123 \
   --input identity=jp
 ```
+
+`prepare_worktree` remains an alias for this PR-based mode.
 
 The branch/path naming convention is:
 
@@ -144,14 +162,65 @@ Analyze registered worktrees and write `worktreeAnalysis` data:
 
 - missing/deleted worktree paths;
 - dirty worktrees;
-- local commits ahead of the original PR head;
-- stale worktrees whose PR head changed since creation.
+- local commits ahead of the original creation base;
+- current branch, HEAD, and configured upstream;
+- stale or superseded revisions for PR-linked worktrees;
+- one unambiguous PR attachment candidate for development worktrees.
 
 ```bash
 swamp model method run external-secrets-external-secrets-mirror analyze_worktrees
 ```
 
-### `close_merged_worktrees`
+### Attach, detach, and remove
+
+Associate an existing registered development worktree after its PR is mirrored:
+
+```bash
+swamp model method run external-secrets-external-secrets-mirror attach_worktree \
+  --input worktreeId=<returned-worktree-id> \
+  --input prNumber=123
+```
+
+Attachment preserves the worktree's original development base, path, branch,
+commits, and files. Detachment removes only the PR association and suppresses
+automatic reattachment; a later explicit attachment clears that suppression:
+
+```bash
+swamp model method run external-secrets-external-secrets-mirror detach_worktree \
+  --input worktreeId=<worktree-id>
+```
+
+Explicit removal checks for dirty files and commits ahead of the creation base.
+Use `force=true` only after deciding those local changes are disposable;
+`deleteBranch=true` is a separate opt-in because removing a checkout does not
+make its branch disposable.
+
+```bash
+swamp model method run external-secrets-external-secrets-mirror remove_worktree \
+  --input worktreeId=<worktree-id>
+```
+
+### `refresh_pr_worktrees`
+
+Reconcile registered worktrees with the latest local mirror state:
+
+```bash
+swamp model method run external-secrets-external-secrets-mirror \
+  refresh_pr_worktrees
+```
+
+The default scope is bounded to PR/identity lineages established by registered
+worktrees, plus PRs uniquely matched to development worktrees. Refresh can
+automatically attach a unique match, mark older revisions `superseded`, and
+materialize one current revision per tracked lineage. It never chooses among
+ambiguous matches. Re-running it without mirror changes creates nothing.
+
+Merged-PR worktrees are removed only when Git inspection succeeds, the checkout
+is clean, and local `HEAD` has no commits absent from the latest mirrored PR
+head. Otherwise the checkout is retained with a reason. Closed but unmerged PRs
+are not removed. Use `dryRun=true` to inspect planned actions.
+
+### `close_merged_worktrees` (compatibility)
 
 Remove registered worktrees after their mirrored pull requests have been merged:
 
@@ -299,7 +368,72 @@ swamp report get @evrardjp/github-local-mirror-status \
 Use one scheduled workflow per repo mirror:
 
 ```text
-sync -> close_merged_worktrees -> analyze_worktrees
+sync -> refresh_pr_worktrees -> analyze_worktrees
+```
+
+Create the workflow in the Swamp repository that owns the mirror model, not in
+this extension source tree:
+
+```bash
+swamp workflow create github-local-mirror-refresh --json
+swamp workflow edit github-local-mirror-refresh
+```
+
+Keep the generated `id` and replace the scaffolded inputs and jobs with the
+following shape. Set `modelName` to the existing mirror model when running the
+workflow.
+
+```yaml
+inputs:
+  type: object
+  properties:
+    modelName:
+      type: string
+  required:
+    - modelName
+jobs:
+  - name: refresh-mirror
+    steps:
+      - name: sync
+        task:
+          type: model_method
+          modelIdOrName: "${{ inputs.modelName }}"
+          methodName: sync
+          inputs:
+            requireComplete: true
+        dependsOn: []
+        weight: 0
+        allowFailure: false
+      - name: refresh-pr-worktrees
+        task:
+          type: model_method
+          modelIdOrName: "${{ inputs.modelName }}"
+          methodName: refresh_pr_worktrees
+        dependsOn:
+          - step: sync
+            condition: { type: succeeded }
+        weight: 0
+        allowFailure: false
+      - name: analyze-worktrees
+        task:
+          type: model_method
+          modelIdOrName: "${{ inputs.modelName }}"
+          methodName: analyze_worktrees
+        dependsOn:
+          - step: refresh-pr-worktrees
+            condition: { type: succeeded }
+        weight: 0
+        allowFailure: false
+    dependsOn: []
+    weight: 0
+```
+
+Run it with:
+
+```bash
+swamp workflow validate github-local-mirror-refresh --json
+swamp workflow run github-local-mirror-refresh \
+  --input modelName=external-secrets-external-secrets-mirror
 ```
 
 Set a small workflow `queueTimeout` so scheduled ticks exit quickly if a longer

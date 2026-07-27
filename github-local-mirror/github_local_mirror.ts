@@ -189,14 +189,28 @@ type PrRecord = {
 type WorktreeRecord = {
   id: string;
   repo: string;
-  prNumber: number;
   identity?: string;
   path: string;
   branch: string;
-  baseHeadSha: string;
+  createdReason: "development" | "review";
+  creationBaseSha: string;
+  creationBaseRef?: string;
+  prLink?: {
+    prNumber: number;
+    attachedAt: string;
+    headShaAtAttachment: string;
+    mode: "explicit" | "automatic" | "created-from-pr";
+  };
   createdAt: string;
-  status: "active" | "missing" | "removed";
+  filesystemState: "active" | "missing" | "removed";
+  revisionState?: "current" | "superseded";
+  autoAttachSuppressed?: boolean;
+  snapshotPending?: boolean;
   removedAt?: string;
+  // Legacy aliases remain optional so previously written snapshots still load.
+  prNumber?: number;
+  baseHeadSha?: string;
+  status?: "active" | "missing" | "removed";
 };
 
 const MirrorStateSchema = z.object({
@@ -412,26 +426,57 @@ const CheckRunSchema = z.object({
 const WorktreeSnapshotSchema = z.object({
   id: z.string(),
   repo: z.string(),
-  prNumber: z.number().int().positive(),
+  prNumber: z.number().int().positive().optional(),
   identity: z.string().optional(),
   path: z.string(),
   branch: z.string(),
-  baseHeadSha: z.string(),
+  baseHeadSha: z.string().optional(),
+  createdReason: z.enum(["development", "review"]).optional(),
+  creationBaseSha: z.string().optional(),
+  creationBaseRef: z.string().optional(),
+  prLink: z.object({
+    prNumber: z.number().int().positive(),
+    attachedAt: IsoDateTime,
+    headShaAtAttachment: z.string().optional(),
+    mode: z.enum(["explicit", "automatic", "created-from-pr"]).optional(),
+  }).optional(),
+  filesystemState: z.enum(["active", "missing", "removed"]).optional(),
+  revisionState: z.enum(["current", "superseded"]).optional(),
+  autoAttachSuppressed: z.boolean().optional(),
+  snapshotPending: z.boolean().optional(),
   createdAt: IsoDateTime,
-  status: z.string(),
+  status: z.string().optional(),
   removedAt: IsoDateTime.optional(),
 }).passthrough();
 
 const WorktreeAnalysisSchema = z.object({
   worktreeId: z.string(),
   repo: z.string(),
-  prNumber: z.number().int().positive(),
+  prNumber: z.number().int().positive().nullable().optional(),
   identity: z.string().optional(),
   path: z.string(),
   branch: z.string(),
   baseHeadSha: z.string(),
+  createdReason: z.enum(["development", "review"]).optional(),
+  creationBaseRef: z.string().optional(),
+  filesystemState: z.enum(["active", "missing", "removed"]).optional(),
+  revisionState: z.enum(["current", "superseded"]).optional(),
+  prLink: z.object({
+    prNumber: z.number().int().positive(),
+    attachedAt: IsoDateTime,
+    headShaAtAttachment: z.string(),
+    mode: z.enum(["explicit", "automatic", "created-from-pr"]),
+  }).optional(),
+  currentBranch: z.string().nullable().optional(),
+  currentHeadSha: z.string().optional(),
+  upstreamRemote: z.string().optional(),
+  upstreamRef: z.string().optional(),
+  upstreamRepository: z.string().optional(),
+  candidatePrNumber: z.number().int().positive().optional(),
+  candidateMatch: z.enum(["upstream", "head"]).optional(),
+  candidateAmbiguous: z.boolean().optional(),
   latestMirrorHeadSha: z.string().optional(),
-  isPrHeadStale: z.boolean(),
+  isPrHeadStale: z.boolean().nullable(),
   isDirty: z.boolean(),
   aheadCommitCount: z.number().int().nonnegative(),
   missing: z.boolean(),
@@ -439,6 +484,33 @@ const WorktreeAnalysisSchema = z.object({
   errors: z.array(z.string()).default([]),
   recommendedAction: z.string(),
   analyzedAt: IsoDateTime,
+}).passthrough();
+
+const WorktreeRefreshRunSchema = z.object({
+  repo: z.string(),
+  startedAt: IsoDateTime,
+  finishedAt: IsoDateTime,
+  identity: z.string().optional(),
+  dryRun: z.boolean(),
+  complete: z.boolean(),
+  actions: z.array(
+    z.object({
+      action: z.enum([
+        "attached",
+        "current",
+        "superseded",
+        "materialized",
+        "removed",
+        "retained",
+        "skipped",
+        "failed",
+      ]),
+      worktreeId: z.string().optional(),
+      prNumber: z.number().int().positive().optional(),
+      reason: z.string().optional(),
+      error: z.string().optional(),
+    }).passthrough(),
+  ),
 }).passthrough();
 
 const WorktreeCleanupRunSchema = z.object({
@@ -2049,7 +2121,10 @@ function cursorSince(
   return new Date(t - overlapMinutes * 60_000).toISOString();
 }
 
-async function syncMirror(args: { budgetSeconds?: number }, ctx: Context) {
+async function syncMirror(
+  args: { budgetSeconds?: number; requireComplete?: boolean },
+  ctx: Context,
+) {
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
   const normalizedContext = { ...ctx, globalArgs: g };
   const startedAt = nowIso();
@@ -2369,6 +2444,13 @@ async function syncMirror(args: { budgetSeconds?: number }, ctx: Context) {
         cursorIssueUpdatedAt: state.cursor.lastIssueUpdatedAt,
       }),
     );
+    if (args.requireComplete && !complete) {
+      throw new Error(
+        `sync did not complete: ${
+          errors.map((error) => error.error).join("; ") || "unknown error"
+        }`,
+      );
+    }
     return { dataHandles: handles, errors, complete };
   } catch (err) {
     state.syncInProgress = false;
@@ -2409,78 +2491,401 @@ async function readMirroredPrHead(
   return headSha;
 }
 
+async function readValidatedPrHead(
+  g: GlobalArgs,
+  prNumber: number,
+): Promise<{ pr: PrRecord; headSha: string }> {
+  const [pr, headSha] = await Promise.all([
+    readPrRecord(g, prNumber),
+    readMirroredPrHead(g, prNumber),
+  ]);
+  if (pr.headSha !== headSha) {
+    throw new Error(
+      `mirrored PR metadata head ${pr.headSha} does not match local ref head ${headSha}`,
+    );
+  }
+  return { pr, headSha };
+}
+
+function normalizeWorktree(record: Record<string, unknown>): WorktreeRecord {
+  const createdAt = String(record.createdAt);
+  const legacyPrNumber = typeof record.prNumber === "number"
+    ? record.prNumber
+    : undefined;
+  const rawPrLink = record.prLink && typeof record.prLink === "object"
+    ? record.prLink as Record<string, unknown>
+    : undefined;
+  const linkedPrNumber = typeof rawPrLink?.prNumber === "number"
+    ? rawPrLink.prNumber
+    : legacyPrNumber;
+  const createdReason = record.createdReason === "development"
+    ? "development"
+    : "review";
+  const creationBaseSha = String(
+    record.creationBaseSha ?? record.baseHeadSha ?? "",
+  );
+  const prLink: WorktreeRecord["prLink"] = linkedPrNumber
+    ? {
+      prNumber: linkedPrNumber,
+      attachedAt: typeof rawPrLink?.attachedAt === "string"
+        ? rawPrLink.attachedAt
+        : createdAt,
+      headShaAtAttachment: typeof rawPrLink?.headShaAtAttachment === "string"
+        ? rawPrLink.headShaAtAttachment
+        : creationBaseSha,
+      mode: rawPrLink?.mode === "explicit" ||
+          rawPrLink?.mode === "automatic" ||
+          rawPrLink?.mode === "created-from-pr"
+        ? rawPrLink.mode
+        : createdReason === "review"
+        ? "created-from-pr"
+        : "explicit",
+    }
+    : undefined;
+  const filesystemState =
+    (record.filesystemState ?? record.status ?? "active") as WorktreeRecord[
+      "filesystemState"
+    ];
+  return {
+    ...record,
+    id: String(record.id),
+    repo: String(record.repo),
+    identity: typeof record.identity === "string" ? record.identity : undefined,
+    path: String(record.path),
+    branch: String(record.branch),
+    createdReason,
+    creationBaseSha,
+    creationBaseRef: typeof record.creationBaseRef === "string"
+      ? record.creationBaseRef
+      : createdReason === "review" && linkedPrNumber
+      ? `refs/remotes/pull/${linkedPrNumber}/head`
+      : undefined,
+    prLink,
+    createdAt,
+    filesystemState,
+    revisionState: record.revisionState as WorktreeRecord["revisionState"],
+    autoAttachSuppressed: record.autoAttachSuppressed === true,
+    snapshotPending: record.snapshotPending === true,
+    removedAt: typeof record.removedAt === "string"
+      ? record.removedAt
+      : undefined,
+    prNumber: prLink?.prNumber,
+    baseHeadSha: creationBaseSha,
+    status: filesystemState,
+  };
+}
+
+function persistedWorktree(record: WorktreeRecord): WorktreeRecord {
+  return {
+    ...record,
+    prNumber: record.prLink?.prNumber,
+    baseHeadSha: record.creationBaseSha,
+    status: record.filesystemState,
+  };
+}
+
 async function readWorktrees(g: GlobalArgs): Promise<WorktreeRecord[]> {
-  return await readJsonFile<WorktreeRecord[]>(worktreeIndexPath(g), []);
+  const records = await readJsonFile<Array<Record<string, unknown>>>(
+    worktreeIndexPath(g),
+    [],
+  );
+  return records.map(normalizeWorktree);
 }
 
 async function writeWorktrees(
   g: GlobalArgs,
   records: WorktreeRecord[],
 ): Promise<void> {
-  await writeJsonFileAtomically(worktreeIndexPath(g), records);
+  await writeJsonFileAtomically(
+    worktreeIndexPath(g),
+    records.map(persistedWorktree),
+  );
 }
 
 function identitySuffix(identity?: string): string {
   return identity ? `-${safeName("", [identity])}` : "";
 }
 
+async function verifyRegisteredWorktree(
+  g: GlobalArgs,
+  path: string,
+  branch: string,
+): Promise<void> {
+  const listed = await runGitOk(g.gitObjectPath, [
+    "worktree",
+    "list",
+    "--porcelain",
+    "-z",
+  ]);
+  const expectedBranch = `branch refs/heads/${branch}`;
+  const registered = listed.split("\0\0").some((entry) => {
+    const fields = entry.split("\0");
+    return fields.includes(`worktree ${path}`) &&
+      fields.includes(expectedBranch);
+  });
+  if (!registered) {
+    throw new Error(
+      `path is not the expected registered Git worktree for ${branch}: ${path}`,
+    );
+  }
+}
+
+async function createWorktree(
+  args: {
+    prNumber?: number;
+    branch?: string;
+    baseRef?: string;
+    identity?: string;
+  },
+  ctx: Context,
+) {
+  if ((args.prNumber === undefined) === (args.branch === undefined)) {
+    throw new Error("exactly one of prNumber or branch is required");
+  }
+  if (args.prNumber !== undefined && args.baseRef !== undefined) {
+    throw new Error("baseRef is only valid with branch");
+  }
+  const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  const isReview = args.prNumber !== undefined;
+  let pr: PrRecord | undefined;
+  let headSha: string;
+  let suffix: string;
+  let branch: string;
+  let creationBaseRef: string;
+  if (isReview) {
+    const validated = await readValidatedPrHead(g, args.prNumber!);
+    pr = validated.pr;
+    headSha = validated.headSha;
+    suffix = `pr-${args.prNumber}-patchhead-${shortSha(headSha)}${
+      identitySuffix(args.identity)
+    }`;
+    branch = `review/${suffix}`;
+    creationBaseRef = `refs/remotes/pull/${args.prNumber}/head`;
+  } else {
+    branch = args.branch!;
+    const validBranch = await runGit(g.gitObjectPath, [
+      "check-ref-format",
+      "--branch",
+      branch,
+    ]);
+    if (validBranch.code !== 0) {
+      throw new Error(`invalid branch name: ${branch}`);
+    }
+    const baseRef = args.baseRef ?? "refs/remotes/origin/main";
+    creationBaseRef = baseRef;
+    const resolved = await runGit(g.gitObjectPath, [
+      "rev-parse",
+      "--verify",
+      `${baseRef}^{commit}`,
+    ]);
+    headSha = resolved.stdout.trim();
+    if (resolved.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(headSha)) {
+      throw new Error(`base ref is not a valid local commit: ${baseRef}`);
+    }
+    suffix = `dev-${safeName("", [branch])}-${await hashPrefix(
+      `${branch}\0${baseRef}`,
+    )}`;
+  }
+  await ensureDir(g.workspaceRoot);
+  const workspaceRoot = await Deno.realPath(g.workspaceRoot);
+  const path = `${workspaceRoot}/${suffix}`;
+  if (!path.startsWith(`${workspaceRoot}/`)) {
+    throw new Error("generated worktree path escapes workspaceRoot");
+  }
+  const proposedRecord: WorktreeRecord = {
+    id: safeName("worktree", [
+      repoFullName(g),
+      isReview ? args.prNumber : branch,
+      isReview ? shortSha(headSha) : await hashPrefix(`${branch}\0${headSha}`),
+      args.identity,
+    ]),
+    repo: repoFullName(g),
+    identity: args.identity,
+    path,
+    branch,
+    createdReason: isReview ? "review" : "development",
+    creationBaseSha: headSha,
+    creationBaseRef,
+    prLink: isReview
+      ? {
+        prNumber: args.prNumber!,
+        attachedAt: nowIso(),
+        headShaAtAttachment: headSha,
+        mode: "created-from-pr",
+      }
+      : undefined,
+    createdAt: nowIso(),
+    filesystemState: "active",
+    revisionState: isReview ? "current" : undefined,
+    snapshotPending: true,
+  };
+  const records = await readWorktrees(g);
+  const collisions = records.filter((record) =>
+    record.filesystemState === "active" &&
+    (record.path === path || record.branch === branch)
+  );
+  const existing = collisions.find((record) =>
+    record.path === path && record.branch === branch &&
+    record.identity === args.identity && record.createdReason ===
+      (isReview ? "review" : "development") &&
+    record.creationBaseSha === headSha &&
+    record.creationBaseRef === creationBaseRef &&
+    (isReview
+      ? record.prLink?.prNumber === args.prNumber &&
+        record.prLink?.headShaAtAttachment === headSha
+      : true)
+  );
+  if (collisions.length > 0 && !existing) {
+    throw new Error(`worktree branch or path conflicts with ${branch}`);
+  }
+  if (existing) {
+    if (!await exists(path)) {
+      throw new Error(`registered worktree path is missing: ${path}`);
+    }
+    await verifyRegisteredWorktree(g, path, branch);
+    if (isReview && await worktreeHead(path) !== headSha) {
+      throw new Error(
+        `existing review worktree HEAD does not match mirrored PR head ${headSha}`,
+      );
+    }
+    const branchHead = (await runGitOk(g.gitObjectPath, [
+      "rev-parse",
+      "--verify",
+      `refs/heads/${branch}`,
+    ])).trim();
+    if (isReview && branchHead !== headSha) {
+      throw new Error(
+        `existing review branch ${branch} does not match mirrored PR head ${headSha}`,
+      );
+    }
+    const published = { ...existing, snapshotPending: false };
+    const handle = await ctx.writeResource(
+      "worktreeSnapshot",
+      existing.id,
+      persistedWorktree(published),
+    );
+    if (existing.snapshotPending) {
+      const index = records.findIndex((record) => record.id === existing.id);
+      records[index] = published;
+      await writeWorktrees(g, records);
+    }
+    return {
+      dataHandles: [handle],
+      worktreeId: existing.id,
+      path,
+      branch,
+      baseHeadSha: headSha,
+      createdReason: existing.createdReason,
+      contributorRemote: pr?.remoteName,
+      contributorHeadRef: pr?.headRef,
+      maintainerCanModify: pr?.maintainerCanModify,
+      suggestedContributorPush: pr?.remoteName && pr.headRef
+        ? `git push ${pr.remoteName} HEAD:${pr.headRef}`
+        : undefined,
+    };
+  }
+  if (await exists(path)) {
+    await verifyRegisteredWorktree(g, path, branch);
+    const [branchHead, pathHead] = await Promise.all([
+      runGitOk(g.gitObjectPath, [
+        "rev-parse",
+        "--verify",
+        `refs/heads/${branch}`,
+      ]).then((value) => value.trim()),
+      worktreeHead(path),
+    ]);
+    if (branchHead !== headSha || pathHead !== headSha) {
+      throw new Error(
+        `unrecorded worktree does not match expected head ${headSha}: ${path}`,
+      );
+    }
+    const recoveredRecords = records.filter((record) =>
+      record.id !== proposedRecord.id
+    );
+    recoveredRecords.push(proposedRecord);
+    await writeWorktrees(g, recoveredRecords);
+    const handle = await ctx.writeResource(
+      "worktreeSnapshot",
+      proposedRecord.id,
+      persistedWorktree({ ...proposedRecord, snapshotPending: false }),
+    );
+    recoveredRecords[recoveredRecords.length - 1] = {
+      ...proposedRecord,
+      snapshotPending: false,
+    };
+    await writeWorktrees(g, recoveredRecords);
+    return {
+      dataHandles: [handle],
+      worktreeId: proposedRecord.id,
+      path,
+      branch,
+      baseHeadSha: headSha,
+      createdReason: proposedRecord.createdReason,
+      contributorRemote: pr?.remoteName,
+      contributorHeadRef: pr?.headRef,
+      maintainerCanModify: pr?.maintainerCanModify,
+      suggestedContributorPush: pr?.remoteName && pr.headRef
+        ? `git push ${pr.remoteName} HEAD:${pr.headRef}`
+        : undefined,
+    };
+  }
+  const branchHeadResult = await runGit(g.gitObjectPath, [
+    "rev-parse",
+    "--verify",
+    `refs/heads/${branch}`,
+  ]);
+  if (branchHeadResult.code === 0) {
+    if (branchHeadResult.stdout.trim() !== headSha) {
+      throw new Error(
+        `worktree branch already exists with conflicting head: ${branch}`,
+      );
+    }
+  } else {
+    await runGitOk(g.gitObjectPath, ["branch", branch, headSha]);
+  }
+  await runGitOk(g.gitObjectPath, ["worktree", "add", path, branch]);
+  await verifyRegisteredWorktree(g, path, branch);
+  if (isReview && await worktreeHead(path) !== headSha) {
+    throw new Error(
+      `created review worktree does not match mirrored PR head ${headSha}`,
+    );
+  }
+  const record = proposedRecord;
+  const updatedRecords = records.filter((r) => r.id !== proposedRecord.id);
+  updatedRecords.push(proposedRecord);
+  await writeWorktrees(g, updatedRecords);
+  const snapshot = persistedWorktree(record);
+  const handle = await ctx.writeResource(
+    "worktreeSnapshot",
+    record.id,
+    { ...snapshot, snapshotPending: false },
+  );
+  updatedRecords[updatedRecords.length - 1] = {
+    ...record,
+    snapshotPending: false,
+  };
+  await writeWorktrees(g, updatedRecords);
+  return {
+    dataHandles: [handle],
+    worktreeId: record.id,
+    path,
+    branch,
+    baseHeadSha: headSha,
+    createdReason: record.createdReason,
+    contributorRemote: pr?.remoteName,
+    contributorHeadRef: pr?.headRef,
+    maintainerCanModify: pr?.maintainerCanModify,
+    suggestedContributorPush: pr?.remoteName && pr.headRef
+      ? `git push ${pr.remoteName} HEAD:${pr.headRef}`
+      : undefined,
+  };
+}
+
 async function prepareWorktree(
   args: { prNumber: number; identity?: string },
   ctx: Context,
 ) {
-  const g = GlobalArgsSchema.parse(ctx.globalArgs);
-  const pr = await readPrRecord(g, args.prNumber);
-  const headSha = await readMirroredPrHead(g, args.prNumber);
-  const suffix = `pr-${args.prNumber}-patchhead-${shortSha(headSha)}${
-    identitySuffix(args.identity)
-  }`;
-  const branch = `review/${suffix}`;
-  const path = `${g.workspaceRoot}/${suffix}`;
-  if (!await exists(path)) {
-    await runGitOk(g.gitObjectPath, ["branch", branch, headSha]).catch(
-      async (err) => {
-        const branches = await runGit(g.gitObjectPath, [
-          "rev-parse",
-          "--verify",
-          branch,
-        ]);
-        if (branches.code !== 0) throw err;
-      },
-    );
-    await runGitOk(g.gitObjectPath, ["worktree", "add", path, branch]);
-  }
-  const record: WorktreeRecord = {
-    id: safeName("worktree", [
-      repoFullName(g),
-      args.prNumber,
-      shortSha(headSha),
-      args.identity,
-    ]),
-    repo: repoFullName(g),
-    prNumber: args.prNumber,
-    identity: args.identity,
-    path,
-    branch,
-    baseHeadSha: headSha,
-    createdAt: nowIso(),
-    status: "active",
-  };
-  const records = (await readWorktrees(g)).filter((r) => r.id !== record.id);
-  records.push(record);
-  await writeWorktrees(g, records);
-  const handle = await ctx.writeResource("worktreeSnapshot", record.id, record);
-  return {
-    dataHandles: [handle],
-    path,
-    branch,
-    baseHeadSha: headSha,
-    contributorRemote: pr.remoteName,
-    contributorHeadRef: pr.headRef,
-    maintainerCanModify: pr.maintainerCanModify,
-    suggestedContributorPush: pr.remoteName && pr.headRef
-      ? `git push ${pr.remoteName} HEAD:${pr.headRef}`
-      : undefined,
-  };
+  return await createWorktree(args, ctx);
 }
 
 async function gitInWorktree(path: string, args: string[]): Promise<RunResult> {
@@ -2524,77 +2929,503 @@ async function verifyGitWorktreeRemoved(
   }
 }
 
+async function requireActiveWorktree(
+  g: GlobalArgs,
+  worktreeId: string,
+): Promise<
+  { records: WorktreeRecord[]; record: WorktreeRecord; index: number }
+> {
+  const records = await readWorktrees(g);
+  const index = records.findIndex((record) => record.id === worktreeId);
+  if (index < 0) throw new Error(`unknown worktree: ${worktreeId}`);
+  const record = records[index];
+  if (record.filesystemState !== "active") {
+    throw new Error(`worktree is not active: ${worktreeId}`);
+  }
+  return { records, record, index };
+}
+
+async function worktreeHead(path: string): Promise<string> {
+  const result = await gitInWorktree(path, ["rev-parse", "--verify", "HEAD"]);
+  const head = result.stdout.trim();
+  if (result.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(head)) {
+    throw new Error(
+      `cannot inspect worktree HEAD at ${path}: ${result.stderr.trim()}`,
+    );
+  }
+  return head;
+}
+
+async function attachWorktree(
+  args: { worktreeId: string; prNumber: number },
+  ctx: Context,
+) {
+  const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  const { records, record, index } = await requireActiveWorktree(
+    g,
+    args.worktreeId,
+  );
+  if (!await exists(record.path)) {
+    throw new Error(`registered worktree path is missing: ${record.path}`);
+  }
+  const [{ headSha: prHeadSha }, headSha] = await Promise.all([
+    readValidatedPrHead(g, args.prNumber),
+    worktreeHead(record.path),
+  ]);
+  const revisionState = headSha === prHeadSha ? "current" : "superseded";
+  if (
+    record.prLink?.prNumber === args.prNumber &&
+    record.prLink.mode === "explicit" &&
+    record.prLink.headShaAtAttachment === prHeadSha &&
+    record.revisionState === revisionState
+  ) {
+    const published = { ...record, snapshotPending: false };
+    const handle = await ctx.writeResource(
+      "worktreeSnapshot",
+      record.id,
+      persistedWorktree(published),
+    );
+    if (record.snapshotPending) {
+      records[index] = published;
+      await writeWorktrees(g, records);
+    }
+    return {
+      dataHandles: [handle],
+      worktreeId: record.id,
+      path: record.path,
+      branch: record.branch,
+      prNumber: args.prNumber,
+      worktreeHeadSha: headSha,
+      prHeadSha,
+      match: headSha === prHeadSha,
+      createdReason: record.createdReason,
+    };
+  }
+  const updated: WorktreeRecord = {
+    ...record,
+    prLink: {
+      prNumber: args.prNumber,
+      attachedAt: record.prLink?.prNumber === args.prNumber &&
+          record.prLink.mode === "explicit"
+        ? record.prLink.attachedAt
+        : nowIso(),
+      headShaAtAttachment: prHeadSha,
+      mode: "explicit",
+    },
+    revisionState,
+    autoAttachSuppressed: false,
+    snapshotPending: true,
+  };
+  records[index] = updated;
+  await writeWorktrees(g, records);
+  const handle = await ctx.writeResource(
+    "worktreeSnapshot",
+    updated.id,
+    persistedWorktree({ ...updated, snapshotPending: false }),
+  );
+  records[index] = { ...updated, snapshotPending: false };
+  await writeWorktrees(g, records);
+  return {
+    dataHandles: [handle],
+    worktreeId: updated.id,
+    path: updated.path,
+    branch: updated.branch,
+    prNumber: args.prNumber,
+    worktreeHeadSha: headSha,
+    prHeadSha,
+    match: headSha === prHeadSha,
+    createdReason: updated.createdReason,
+  };
+}
+
+async function detachWorktree(args: { worktreeId: string }, ctx: Context) {
+  const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  const { records, record, index } = await requireActiveWorktree(
+    g,
+    args.worktreeId,
+  );
+  if (!record.prLink) {
+    const published = { ...record, snapshotPending: false };
+    const handle = await ctx.writeResource(
+      "worktreeSnapshot",
+      record.id,
+      persistedWorktree(published),
+    );
+    if (record.snapshotPending) {
+      records[index] = published;
+      await writeWorktrees(g, records);
+    }
+    return { dataHandles: [handle], worktreeId: record.id };
+  }
+  const updated: WorktreeRecord = {
+    ...record,
+    prLink: undefined,
+    revisionState: undefined,
+    autoAttachSuppressed: true,
+    snapshotPending: true,
+  };
+  records[index] = updated;
+  await writeWorktrees(g, records);
+  const handle = await ctx.writeResource(
+    "worktreeSnapshot",
+    updated.id,
+    persistedWorktree({ ...updated, snapshotPending: false }),
+  );
+  records[index] = { ...updated, snapshotPending: false };
+  await writeWorktrees(g, records);
+  return { dataHandles: [handle], worktreeId: updated.id };
+}
+
+async function removeWorktree(
+  args: { worktreeId: string; force?: boolean; deleteBranch?: boolean },
+  ctx: Context,
+) {
+  const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  const records = await readWorktrees(g);
+  const index = records.findIndex((record) => record.id === args.worktreeId);
+  if (index < 0) throw new Error(`unknown worktree: ${args.worktreeId}`);
+  const record = records[index];
+  if (record.filesystemState === "removed") {
+    const publishedRecord = { ...record, snapshotPending: false };
+    const handle = await ctx.writeResource(
+      "worktreeSnapshot",
+      record.id,
+      persistedWorktree(publishedRecord),
+    );
+    if (record.snapshotPending) {
+      records[index] = publishedRecord;
+      await writeWorktrees(g, records);
+    }
+    let branchDeleted = false;
+    if (args.deleteBranch) {
+      const branchExists = await runGit(g.gitObjectPath, [
+        "show-ref",
+        "--verify",
+        `refs/heads/${record.branch}`,
+      ]);
+      if (branchExists.code === 0) {
+        await runGitOk(g.gitObjectPath, ["branch", "-D", record.branch]);
+      }
+      branchDeleted = true;
+    }
+    return {
+      dataHandles: [handle],
+      worktreeId: record.id,
+      dirty: false,
+      aheadCommitCount: 0,
+      branchDeleted,
+      alreadyRemoved: true,
+    };
+  }
+  if (record.filesystemState !== "active") {
+    throw new Error(`worktree is not active: ${args.worktreeId}`);
+  }
+  const missing = !await exists(record.path);
+  let dirty = false;
+  let aheadCommitCount = 0;
+  if (!missing) {
+    const status = await gitInWorktree(record.path, [
+      "status",
+      "--porcelain",
+      "--ignored",
+    ]);
+    if (status.code !== 0) {
+      throw new Error(`git status failed: ${status.stderr.trim()}`);
+    }
+    dirty = status.stdout.trim().length > 0;
+    const ahead = await gitInWorktree(record.path, [
+      "rev-list",
+      "--count",
+      `${record.creationBaseSha}..HEAD`,
+    ]);
+    if (ahead.code !== 0) {
+      throw new Error(`git rev-list failed: ${ahead.stderr.trim()}`);
+    }
+    aheadCommitCount = Number(ahead.stdout.trim() || "0");
+    if (!args.force && (dirty || aheadCommitCount > 0)) {
+      throw new Error(
+        `refusing to remove worktree with ${dirty ? "local changes" : ""}${
+          dirty && aheadCommitCount > 0 ? " and " : ""
+        }${aheadCommitCount > 0 ? `${aheadCommitCount} local commits` : ""}`,
+      );
+    }
+    const removal = await runGit(g.gitObjectPath, [
+      "worktree",
+      "remove",
+      ...(args.force ? ["--force"] : []),
+      record.path,
+    ]);
+    if (removal.code !== 0) {
+      throw new Error(`git worktree remove failed: ${removal.stderr.trim()}`);
+    }
+  } else {
+    await verifyGitWorktreeRemoved(g, record.path, record.branch);
+  }
+  const updated: WorktreeRecord = {
+    ...record,
+    filesystemState: "removed",
+    snapshotPending: true,
+    removedAt: nowIso(),
+  };
+  records[index] = updated;
+  await writeWorktrees(g, records);
+  const handle = await ctx.writeResource(
+    "worktreeSnapshot",
+    updated.id,
+    persistedWorktree({ ...updated, snapshotPending: false }),
+  );
+  records[index] = { ...updated, snapshotPending: false };
+  await writeWorktrees(g, records);
+  let branchDeleted = false;
+  if (args.deleteBranch) {
+    const deletion = await runGit(g.gitObjectPath, [
+      "branch",
+      "-D",
+      record.branch,
+    ]);
+    if (deletion.code !== 0) {
+      throw new Error(
+        `worktree removed but git branch delete failed: ${deletion.stderr.trim()}`,
+      );
+    }
+    branchDeleted = true;
+  }
+  return {
+    dataHandles: [handle],
+    worktreeId: updated.id,
+    dirty,
+    aheadCommitCount,
+    branchDeleted,
+  };
+}
+
+async function readAllPrRecords(g: GlobalArgs): Promise<PrRecord[]> {
+  const records: PrRecord[] = [];
+  try {
+    for await (const entry of Deno.readDir(`${g.artifactRoot}/prs`)) {
+      if (!entry.isDirectory || !/^\d+$/.test(entry.name)) continue;
+      const record = await readJsonFile<PrRecord | null>(
+        prRecordPath(g, Number(entry.name)),
+        null,
+      );
+      if (record?.headSha) records.push(record);
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  return records;
+}
+
+async function inspectWorktree(record: WorktreeRecord) {
+  const missing = !await exists(record.path);
+  let isDirty = false;
+  let aheadCommitCount = 0;
+  let currentBranch: string | null = null;
+  let currentHeadSha: string | undefined;
+  let upstreamRemote: string | undefined;
+  let upstreamRef: string | undefined;
+  let upstreamRepository: string | undefined;
+  let analysisComplete = true;
+  const errors: string[] = [];
+  if (!missing) {
+    const status = await gitInWorktree(record.path, ["status", "--porcelain"]);
+    if (status.code === 0) isDirty = status.stdout.trim().length > 0;
+    else {
+      analysisComplete = false;
+      errors.push(`git status failed: ${status.stderr.trim()}`);
+    }
+    const head = await gitInWorktree(record.path, ["rev-parse", "HEAD"]);
+    if (head.code === 0) currentHeadSha = head.stdout.trim();
+    else {
+      analysisComplete = false;
+      errors.push(`git rev-parse failed: ${head.stderr.trim()}`);
+    }
+    const symbolic = await gitInWorktree(record.path, [
+      "symbolic-ref",
+      "--quiet",
+      "--short",
+      "HEAD",
+    ]);
+    if (symbolic.code === 0) currentBranch = symbolic.stdout.trim();
+    const ahead = await gitInWorktree(record.path, [
+      "rev-list",
+      "--count",
+      `${record.creationBaseSha}..HEAD`,
+    ]);
+    if (ahead.code === 0) aheadCommitCount = Number(ahead.stdout.trim() || "0");
+    else {
+      analysisComplete = false;
+      errors.push(`git rev-list failed: ${ahead.stderr.trim()}`);
+    }
+    if (currentBranch) {
+      const remote = await gitInWorktree(record.path, [
+        "config",
+        "--get",
+        `branch.${currentBranch}.remote`,
+      ]);
+      const merge = await gitInWorktree(record.path, [
+        "config",
+        "--get",
+        `branch.${currentBranch}.merge`,
+      ]);
+      if (remote.code === 0) upstreamRemote = remote.stdout.trim() || undefined;
+      if (merge.code === 0) upstreamRef = merge.stdout.trim() || undefined;
+      if (upstreamRemote) {
+        const remoteUrl = await gitInWorktree(record.path, [
+          "remote",
+          "get-url",
+          upstreamRemote,
+        ]);
+        if (remoteUrl.code === 0) {
+          upstreamRepository = normalizeRepositoryUrl(remoteUrl.stdout.trim());
+        }
+      }
+    }
+  }
+  return {
+    missing,
+    isDirty,
+    aheadCommitCount,
+    currentBranch,
+    currentHeadSha,
+    upstreamRemote,
+    upstreamRef,
+    upstreamRepository,
+    analysisComplete,
+    errors,
+  };
+}
+
+function normalizeRepositoryUrl(value: string): string | undefined {
+  const trimmed = value.trim().replace(/\.git\/?$/, "");
+  if (!trimmed) return undefined;
+  try {
+    const url = new URL(trimmed);
+    if (url.hostname) {
+      return `${url.hostname.toLowerCase()}${url.pathname}`.replace(/\/$/, "")
+        .toLowerCase();
+    }
+  } catch {
+    // SCP-style Git URLs are not valid URL objects.
+  }
+  const scp = trimmed.match(/^(?:[^@]+@)?([^:]+):(.+)$/);
+  return scp ? `${scp[1]}/${scp[2]}`.toLowerCase() : undefined;
+}
+
+function prRepositoryIdentities(pr: PrRecord): Set<string> {
+  return new Set([
+    pr.headSshUrl ? normalizeRepositoryUrl(pr.headSshUrl) : undefined,
+    pr.headHttpsUrl ? normalizeRepositoryUrl(pr.headHttpsUrl) : undefined,
+    pr.headFullName ? `github.com/${pr.headFullName}`.toLowerCase() : undefined,
+  ].filter((value): value is string => value !== undefined));
+}
+
+function findPrCandidates(
+  prs: PrRecord[],
+  inspected: Awaited<ReturnType<typeof inspectWorktree>>,
+): { matches: PrRecord[]; matchType?: "upstream" | "head" } {
+  const upstreamMatches = inspected.upstreamRemote && inspected.upstreamRef &&
+      inspected.upstreamRepository
+    ? prs.filter((pr) =>
+      pr.remoteName === inspected.upstreamRemote &&
+      `refs/heads/${pr.headRef}` === inspected.upstreamRef &&
+      prRepositoryIdentities(pr).has(inspected.upstreamRepository!)
+    )
+    : [];
+  if (upstreamMatches.length > 0) {
+    const headMatches = inspected.currentHeadSha
+      ? upstreamMatches.filter((pr) => pr.headSha === inspected.currentHeadSha)
+      : [];
+    return {
+      matches: headMatches.length > 0 ? headMatches : upstreamMatches,
+      matchType: "upstream",
+    };
+  }
+  const headMatches = inspected.currentHeadSha
+    ? prs.filter((pr) => pr.headSha === inspected.currentHeadSha)
+    : [];
+  return {
+    matches: headMatches,
+    matchType: headMatches.length > 0 ? "head" : undefined,
+  };
+}
+
 async function analyzeWorktrees(_args: Record<string, never>, ctx: Context) {
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
   const records = (await readWorktrees(g)).filter((record) =>
-    record.status === "active"
+    record.filesystemState === "active"
   );
+  const prs = await readAllPrRecords(g);
   const handles: unknown[] = [];
   const analyzedAt = nowIso();
   for (const record of records) {
-    const missing = !await exists(record.path);
-    let isDirty = false;
-    let aheadCommitCount = 0;
-    let analysisComplete = true;
-    const errors: string[] = [];
+    const inspected = await inspectWorktree(record);
     let latest: string | undefined;
-    try {
-      latest = await readMirroredPrHead(g, record.prNumber);
-    } catch (err) {
-      analysisComplete = false;
-      errors.push(errorMessage(err));
-    }
-    if (!missing) {
-      const status = await gitInWorktree(record.path, [
-        "status",
-        "--porcelain",
-      ]);
-      if (status.code === 0) {
-        isDirty = status.stdout.trim().length > 0;
-      } else {
+    let analysisComplete = inspected.analysisComplete;
+    const errors = [...inspected.errors];
+    if (record.prLink) {
+      try {
+        latest = await readMirroredPrHead(g, record.prLink.prNumber);
+      } catch (err) {
         analysisComplete = false;
-        errors.push(`git status failed: ${status.stderr.trim()}`);
-      }
-      const ahead = await gitInWorktree(record.path, [
-        "rev-list",
-        "--count",
-        `${record.baseHeadSha}..HEAD`,
-      ]);
-      if (ahead.code === 0) {
-        aheadCommitCount = Number(ahead.stdout.trim() || "0");
-      } else {
-        analysisComplete = false;
-        errors.push(`git rev-list failed: ${ahead.stderr.trim()}`);
+        errors.push(errorMessage(err));
       }
     }
-    const isPrHeadStale = Boolean(latest && latest !== record.baseHeadSha);
-    const recommendedAction = missing
+    const candidateResult = record.prLink
+      ? { matches: [] as PrRecord[], matchType: undefined }
+      : findPrCandidates(prs, inspected);
+    const candidates = candidateResult.matches;
+    const candidate = candidates.length === 1 ? candidates[0] : undefined;
+    const candidateMatch = candidate ? candidateResult.matchType : undefined;
+    const isPrHeadStale = record.prLink
+      ? latest && inspected.currentHeadSha
+        ? latest !== inspected.currentHeadSha
+        : null
+      : null;
+    const recommendedAction = inspected.missing
       ? "remove-or-recreate-worktree-record"
       : !analysisComplete
       ? "inspect-worktree-analysis-errors"
-      : isPrHeadStale && aheadCommitCount > 0
+      : candidates.length > 1
+      ? "choose-pull-request-manually"
+      : candidate
+      ? "attach-worktree"
+      : isPrHeadStale && inspected.aheadCommitCount > 0
       ? "rebase-or-recreate-after-saving-local-commits"
       : isPrHeadStale
       ? "recreate-from-latest-pr-head"
-      : isDirty
+      : inspected.isDirty
       ? "commit-or-stash-local-changes"
-      : aheadCommitCount > 0
+      : inspected.aheadCommitCount > 0
       ? "push-or-record-local-commits"
       : "none";
     handles.push(
       await ctx.writeResource("worktreeAnalysis", record.id, {
         worktreeId: record.id,
         repo: repoFullName(g),
-        prNumber: record.prNumber,
+        prNumber: record.prLink?.prNumber ?? null,
         identity: record.identity,
         path: record.path,
         branch: record.branch,
-        baseHeadSha: record.baseHeadSha,
+        baseHeadSha: record.creationBaseSha,
+        createdReason: record.createdReason,
+        creationBaseRef: record.creationBaseRef,
+        filesystemState: record.filesystemState,
+        revisionState: record.revisionState,
+        prLink: record.prLink,
+        currentBranch: inspected.currentBranch,
+        currentHeadSha: inspected.currentHeadSha,
+        upstreamRemote: inspected.upstreamRemote,
+        upstreamRef: inspected.upstreamRef,
+        upstreamRepository: inspected.upstreamRepository,
+        candidatePrNumber: candidate?.number,
+        candidateMatch,
+        candidateAmbiguous: candidates.length > 1,
         latestMirrorHeadSha: latest,
         isPrHeadStale,
-        isDirty,
-        aheadCommitCount,
-        missing,
+        isDirty: inspected.isDirty,
+        aheadCommitCount: inspected.aheadCommitCount,
+        missing: inspected.missing,
         analysisComplete,
         errors,
         recommendedAction,
@@ -2612,7 +3443,9 @@ async function closeMergedWorktrees(
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
   const startedAt = nowIso();
   const records = await readWorktrees(g);
-  const activeRecords = records.filter((record) => record.status === "active");
+  const activeRecords = records.filter((record) =>
+    record.filesystemState === "active" && record.prLink
+  );
   const handles: unknown[] = [];
   const results: Array<{
     worktreeId: string;
@@ -2630,17 +3463,18 @@ async function closeMergedWorktrees(
   let failedCount = 0;
 
   for (const record of activeRecords) {
+    const prNumber = record.prLink!.prNumber;
     let pr: PrRecord | null;
     try {
       pr = await readJsonFile<PrRecord | null>(
-        prRecordPath(g, record.prNumber),
+        prRecordPath(g, prNumber),
         null,
       );
     } catch (err) {
       failedCount++;
       results.push({
         worktreeId: record.id,
-        prNumber: record.prNumber,
+        prNumber,
         path: record.path,
         branch: record.branch,
         outcome: "failed",
@@ -2655,13 +3489,13 @@ async function closeMergedWorktrees(
       failedCount++;
       results.push({
         worktreeId: record.id,
-        prNumber: record.prNumber,
+        prNumber,
         path: record.path,
         branch: record.branch,
         outcome: "failed",
         reason: "pr-state-unavailable",
         error:
-          `PR ${record.prNumber} is not present in the local mirror; run sync first`,
+          `PR ${prNumber} is not present in the local mirror; run sync first`,
         branchRetained: true,
         stateRecorded: true,
       });
@@ -2670,7 +3504,7 @@ async function closeMergedWorktrees(
     if (pr.state !== "closed" || pr.merged !== true) {
       results.push({
         worktreeId: record.id,
-        prNumber: record.prNumber,
+        prNumber,
         path: record.path,
         branch: record.branch,
         outcome: "skipped",
@@ -2749,7 +3583,7 @@ async function closeMergedWorktrees(
       failedCount++;
       results.push({
         worktreeId: record.id,
-        prNumber: record.prNumber,
+        prNumber,
         path: record.path,
         branch: record.branch,
         outcome: "failed",
@@ -2765,7 +3599,7 @@ async function closeMergedWorktrees(
     const index = records.findIndex((candidate) => candidate.id === record.id);
     const removedRecord: WorktreeRecord = {
       ...record,
-      status: "removed",
+      filesystemState: "removed",
       removedAt,
     };
     removedCount++;
@@ -2776,7 +3610,7 @@ async function closeMergedWorktrees(
         await ctx.writeResource(
           "worktreeSnapshot",
           record.id,
-          removedRecord,
+          persistedWorktree(removedRecord),
         ),
       );
       records[index] = removedRecord;
@@ -2789,7 +3623,7 @@ async function closeMergedWorktrees(
     }
     results.push({
       worktreeId: record.id,
-      prNumber: record.prNumber,
+      prNumber,
       path: record.path,
       branch: record.branch,
       outcome: "removed",
@@ -2825,11 +3659,480 @@ async function closeMergedWorktrees(
   return { dataHandles: handles, ...summary };
 }
 
+type RefreshAction = {
+  action:
+    | "attached"
+    | "current"
+    | "superseded"
+    | "materialized"
+    | "removed"
+    | "retained"
+    | "skipped"
+    | "failed";
+  worktreeId?: string;
+  prNumber?: number;
+  reason?: string;
+  error?: string;
+};
+
+async function refreshPrWorktrees(
+  args: {
+    identity?: string;
+    autoAttach?: boolean;
+    materialize?: boolean;
+    dryRun?: boolean;
+  },
+  ctx: Context,
+) {
+  const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  const startedAt = nowIso();
+  const autoAttach = args.autoAttach ?? true;
+  const materialize = args.materialize ?? true;
+  const dryRun = args.dryRun ?? false;
+  let records = await readWorktrees(g);
+  const handles: unknown[] = [];
+  const actions: RefreshAction[] = [];
+  const inScope = (record: WorktreeRecord) =>
+    record.filesystemState === "active" &&
+    (args.identity === undefined || record.identity === args.identity);
+  const prs = await readAllPrRecords(g);
+  const prByNumber = new Map(prs.map((pr) => [pr.number, pr]));
+  const validatedPrs = new Map<number, { pr: PrRecord; headSha: string }>();
+  const validatePr = async (prNumber: number) => {
+    const cached = validatedPrs.get(prNumber);
+    if (cached) return cached;
+    const validated = await readValidatedPrHead(g, prNumber);
+    validatedPrs.set(prNumber, validated);
+    return validated;
+  };
+  let registryChanged = false;
+  const changedSnapshots: WorktreeRecord[] = [];
+
+  if (!dryRun) {
+    for (
+      const record of records.filter((candidate) =>
+        candidate.snapshotPending === true &&
+        (args.identity === undefined || candidate.identity === args.identity)
+      )
+    ) {
+      try {
+        const published = { ...record, snapshotPending: false };
+        handles.push(
+          await ctx.writeResource(
+            "worktreeSnapshot",
+            record.id,
+            persistedWorktree(published),
+          ),
+        );
+        const index = records.findIndex((candidate) =>
+          candidate.id === record.id
+        );
+        records[index] = published;
+        registryChanged = true;
+      } catch (err) {
+        actions.push({
+          action: "failed",
+          worktreeId: record.id,
+          prNumber: record.prLink?.prNumber,
+          reason: "snapshot-republish-failed",
+          error: errorMessage(err).slice(0, 2000),
+        });
+      }
+    }
+  }
+
+  if (autoAttach) {
+    for (
+      const record of records.filter((candidate) =>
+        inScope(candidate) && candidate.createdReason === "development" &&
+        !candidate.prLink && !candidate.autoAttachSuppressed
+      )
+    ) {
+      try {
+        const inspected = await inspectWorktree(record);
+        if (inspected.missing || !inspected.analysisComplete) {
+          actions.push({
+            action: "skipped",
+            worktreeId: record.id,
+            reason: "worktree-inspection-incomplete",
+          });
+          continue;
+        }
+        const candidateResult = findPrCandidates(prs, inspected);
+        const matches = candidateResult.matches;
+        if (matches.length !== 1) {
+          actions.push({
+            action: "skipped",
+            worktreeId: record.id,
+            reason: matches.length > 1
+              ? "ambiguous-pr-match"
+              : "no-unique-pr-match",
+          });
+          continue;
+        }
+        const { pr } = await validatePr(matches[0].number);
+        actions.push({
+          action: "attached",
+          worktreeId: record.id,
+          prNumber: pr.number,
+          reason: candidateResult.matchType,
+        });
+        const index = records.findIndex((candidate) =>
+          candidate.id === record.id
+        );
+        records[index] = {
+          ...record,
+          prLink: {
+            prNumber: pr.number,
+            attachedAt: nowIso(),
+            headShaAtAttachment: pr.headSha!,
+            mode: "automatic",
+          },
+          revisionState: inspected.currentHeadSha === pr.headSha
+            ? "current"
+            : "superseded",
+          autoAttachSuppressed: false,
+          snapshotPending: true,
+        };
+        if (!dryRun) {
+          registryChanged = true;
+          changedSnapshots.push(records[index]);
+        }
+      } catch (err) {
+        actions.push({
+          action: "failed",
+          worktreeId: record.id,
+          error: errorMessage(err).slice(0, 2000),
+        });
+      }
+    }
+  }
+
+  // Include lineages discovered above. Dry runs use the same planned records so
+  // their downstream reconciliation actions match a real run.
+  const lineageKeys = new Set(
+    records.filter((record) =>
+      record.prLink &&
+      (args.identity === undefined || record.identity === args.identity)
+    ).map((record) => `${record.prLink!.prNumber}\0${record.identity ?? ""}`),
+  );
+  for (const key of lineageKeys) {
+    const [numberText, identityText] = key.split("\0");
+    const prNumber = Number(numberText);
+    const identity = identityText || undefined;
+    let pr: PrRecord;
+    let prHeadSha: string;
+    try {
+      const validated = await validatePr(prNumber);
+      pr = validated.pr;
+      prHeadSha = validated.headSha;
+    } catch (err) {
+      actions.push({
+        action: "failed",
+        prNumber,
+        reason: prByNumber.has(prNumber)
+          ? "pr-head-inconsistent"
+          : "pr-state-unavailable",
+        error: errorMessage(err).slice(0, 2000),
+      });
+      continue;
+    }
+    const linked = records.filter((record) =>
+      inScope(record) && record.prLink?.prNumber === prNumber &&
+      record.identity === identity
+    );
+    if (pr.state === "closed" && pr.merged === true) {
+      for (const record of linked) {
+        try {
+          const inspected = await inspectWorktree(record);
+          if (inspected.missing) {
+            await verifyGitWorktreeRemoved(g, record.path, record.branch);
+            actions.push({
+              action: "removed",
+              worktreeId: record.id,
+              prNumber,
+              reason: "worktree-already-missing",
+            });
+            if (!dryRun) {
+              const index = records.findIndex((candidate) =>
+                candidate.id === record.id
+              );
+              records[index] = {
+                ...record,
+                filesystemState: "removed",
+                snapshotPending: true,
+                removedAt: nowIso(),
+              };
+              await writeWorktrees(g, records);
+              changedSnapshots.push(records[index]);
+              registryChanged = false;
+            }
+            continue;
+          }
+          if (!inspected.analysisComplete) {
+            throw new Error("worktree inspection was incomplete");
+          }
+          const status = await gitInWorktree(record.path, [
+            "status",
+            "--porcelain",
+            "--ignored",
+          ]);
+          if (status.code !== 0) {
+            throw new Error(`git status failed: ${status.stderr.trim()}`);
+          }
+          if (status.stdout.trim()) {
+            actions.push({
+              action: "retained",
+              worktreeId: record.id,
+              prNumber,
+              reason: "worktree-has-local-or-ignored-changes",
+            });
+            continue;
+          }
+          const localOnly = await gitInWorktree(record.path, [
+            "rev-list",
+            "--count",
+            "HEAD",
+            "--not",
+            prHeadSha,
+          ]);
+          if (localOnly.code !== 0) {
+            throw new Error(`git rev-list failed: ${localOnly.stderr.trim()}`);
+          }
+          if (Number(localOnly.stdout.trim() || "0") !== 0) {
+            actions.push({
+              action: "retained",
+              worktreeId: record.id,
+              prNumber,
+              reason: "worktree-has-local-only-commits",
+            });
+            continue;
+          }
+          actions.push({
+            action: "removed",
+            worktreeId: record.id,
+            prNumber,
+            reason: "pr-merged",
+          });
+          if (!dryRun) {
+            await runGitOk(g.gitObjectPath, [
+              "worktree",
+              "remove",
+              record.path,
+            ]);
+            const index = records.findIndex((candidate) =>
+              candidate.id === record.id
+            );
+            records[index] = {
+              ...record,
+              filesystemState: "removed",
+              snapshotPending: true,
+              removedAt: nowIso(),
+            };
+            await writeWorktrees(g, records);
+            changedSnapshots.push(records[index]);
+            registryChanged = false;
+          }
+        } catch (err) {
+          actions.push({
+            action: "failed",
+            worktreeId: record.id,
+            prNumber,
+            reason: "merged-worktree-inspection-or-removal-failed",
+            error: errorMessage(err).slice(0, 2000),
+          });
+        }
+      }
+      continue;
+    }
+    if (pr.state === "closed") {
+      for (const record of linked) {
+        actions.push({
+          action: "retained",
+          worktreeId: record.id,
+          prNumber,
+          reason: "pr-closed-unmerged",
+        });
+      }
+      continue;
+    }
+
+    const inspectedLinked: Array<{
+      record: WorktreeRecord;
+      available: boolean;
+      currentHeadSha?: string;
+    }> = [];
+    let lineageBlocked = false;
+    for (const record of linked) {
+      try {
+        const inspected = await inspectWorktree(record);
+        if (inspected.missing) {
+          await verifyGitWorktreeRemoved(g, record.path, record.branch);
+          actions.push({
+            action: "removed",
+            worktreeId: record.id,
+            prNumber,
+            reason: "worktree-already-missing",
+          });
+          const index = records.findIndex((candidate) =>
+            candidate.id === record.id
+          );
+          records[index] = {
+            ...record,
+            filesystemState: "removed",
+            snapshotPending: true,
+            removedAt: nowIso(),
+          };
+          if (!dryRun) {
+            await writeWorktrees(g, records);
+            changedSnapshots.push(records[index]);
+            registryChanged = false;
+          }
+          continue;
+        }
+        if (!inspected.analysisComplete) {
+          throw new Error("worktree inspection was incomplete");
+        }
+        inspectedLinked.push({
+          record,
+          available: true,
+          currentHeadSha: inspected.currentHeadSha,
+        });
+      } catch (err) {
+        lineageBlocked = true;
+        actions.push({
+          action: "failed",
+          worktreeId: record.id,
+          prNumber,
+          error: errorMessage(err).slice(0, 2000),
+        });
+      }
+    }
+    if (lineageBlocked) continue;
+    const current = inspectedLinked.filter((item) =>
+      item.available && item.currentHeadSha === prHeadSha
+    );
+    const keeper = current[0]?.record.id;
+    for (const item of inspectedLinked) {
+      const revisionState = item.record.id === keeper
+        ? "current"
+        : "superseded";
+      if (item.record.revisionState === revisionState) continue;
+      actions.push({
+        action: revisionState === "current" ? "current" : "superseded",
+        worktreeId: item.record.id,
+        prNumber,
+        reason: revisionState === "current"
+          ? "current-pr-head"
+          : "older-pr-head",
+      });
+      if (!dryRun) {
+        const index = records.findIndex((candidate) =>
+          candidate.id === item.record.id
+        );
+        records[index] = {
+          ...records[index],
+          revisionState,
+          snapshotPending: true,
+        };
+        registryChanged = true;
+        changedSnapshots.push(records[index]);
+      }
+    }
+    if (current.length === 0 && materialize) {
+      actions.push({
+        action: "materialized",
+        prNumber,
+        reason: "current-pr-head-missing",
+      });
+      if (!dryRun) {
+        try {
+          if (registryChanged) {
+            await writeWorktrees(g, records);
+            registryChanged = false;
+          }
+          const created = await createWorktree({ prNumber, identity }, ctx);
+          handles.push(...created.dataHandles);
+          records = await readWorktrees(g);
+          registryChanged = false;
+          actions.at(-1)!.worktreeId = records.find((record) =>
+            record.prLink?.prNumber === prNumber &&
+            record.identity === identity && record.revisionState === "current"
+          )?.id;
+        } catch (err) {
+          actions[actions.length - 1] = {
+            action: "failed",
+            prNumber,
+            reason: "materialization-failed",
+            error: errorMessage(err).slice(0, 2000),
+          };
+        }
+      }
+    }
+  }
+
+  if (!dryRun && registryChanged) {
+    await writeWorktrees(g, records);
+  }
+  if (!dryRun) {
+    const lastSnapshotIndex = new Map<string, number>();
+    changedSnapshots.forEach((record, index) =>
+      lastSnapshotIndex.set(record.id, index)
+    );
+    let snapshotStateChanged = false;
+    for (const [snapshotIndex, record] of changedSnapshots.entries()) {
+      try {
+        handles.push(
+          await ctx.writeResource(
+            "worktreeSnapshot",
+            record.id,
+            persistedWorktree({ ...record, snapshotPending: false }),
+          ),
+        );
+        if (lastSnapshotIndex.get(record.id) === snapshotIndex) {
+          const index = records.findIndex((candidate) =>
+            candidate.id === record.id
+          );
+          records[index] = { ...records[index], snapshotPending: false };
+          snapshotStateChanged = true;
+        }
+      } catch (err) {
+        actions.push({
+          action: "failed",
+          worktreeId: record.id,
+          prNumber: record.prLink?.prNumber,
+          reason: "snapshot-publish-failed",
+          error: errorMessage(err).slice(0, 2000),
+        });
+      }
+    }
+    if (snapshotStateChanged) await writeWorktrees(g, records);
+  }
+  const finishedAt = nowIso();
+  const summary = {
+    repo: repoFullName(g),
+    startedAt,
+    finishedAt,
+    identity: args.identity,
+    dryRun,
+    complete: actions.every((action) => action.action !== "failed"),
+    actions,
+  };
+  handles.push(
+    await ctx.writeResource(
+      "worktreeRefreshRun",
+      `refresh-${finishedAt}`,
+      summary,
+    ),
+  );
+  return { dataHandles: handles, ...summary };
+}
+
 async function status(_args: Record<string, never>, ctx: Context) {
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
   const state = await readState(g);
   const worktrees = (await readWorktrees(g)).filter((record) =>
-    record.status === "active"
+    record.filesystemState === "active"
   );
   const handle = await ctx.writeResource(
     "mirrorStatus",
@@ -2943,7 +4246,7 @@ async function recordPrAnalysis(args: unknown, ctx: Context) {
 /** Swamp-backed local GitHub mirror model. */
 export const model = {
   type: "@evrardjp/github-local-mirror",
-  version: "2026.07.23.2",
+  version: "2026.07.24.1",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -2986,6 +4289,12 @@ export const model = {
       toVersion: "2026.07.23.2",
       description:
         "Add reviewer identities and stale threshold configuration for the repository review focus report",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.07.24.1",
+      description:
+        "Add development worktrees, explicit PR association, and tracked PR worktree reconciliation",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],
@@ -3078,14 +4387,13 @@ export const model = {
       garbageCollection: 2000,
     },
     worktreeSnapshot: {
-      description: "Registered local review worktree",
+      description: "Registered local development or review worktree",
       schema: WorktreeSnapshotSchema,
       lifetime: "infinite",
       garbageCollection: 500,
     },
     worktreeAnalysis: {
-      description:
-        "Automated analysis of local review worktree freshness and state",
+      description: "Automated analysis of local worktree freshness and state",
       schema: WorktreeAnalysisSchema,
       lifetime: "infinite",
       garbageCollection: 500,
@@ -3093,6 +4401,12 @@ export const model = {
     worktreeCleanupRun: {
       description: "Results from one merged pull request worktree cleanup run",
       schema: WorktreeCleanupRunSchema,
+      lifetime: "infinite",
+      garbageCollection: 500,
+    },
+    worktreeRefreshRun: {
+      description: "Actions performed by one PR worktree reconciliation run",
+      schema: WorktreeRefreshRunSchema,
       lifetime: "infinite",
       garbageCollection: 500,
     },
@@ -3115,6 +4429,7 @@ export const model = {
         "Fetch GitHub refs plus full PR/issue metadata into the local mirror and Swamp index",
       arguments: z.object({
         budgetSeconds: z.number().int().positive().optional(),
+        requireComplete: z.boolean().optional(),
       }),
       execute: syncMirror,
     },
@@ -3126,6 +4441,48 @@ export const model = {
         identity: z.string().min(1).optional(),
       }),
       execute: prepareWorktree,
+    },
+    create_worktree: {
+      description:
+        "Create a review worktree from a mirrored PR or a development worktree from a local ref",
+      arguments: z.object({
+        prNumber: z.number().int().positive().optional(),
+        branch: z.string().min(1).optional(),
+        baseRef: z.string().min(1).optional(),
+        identity: z.string().min(1).optional(),
+      }).refine((args) => Boolean(args.prNumber) !== Boolean(args.branch), {
+        message: "exactly one of prNumber or branch is required",
+      }).refine(
+        (args) => args.branch !== undefined || args.baseRef === undefined,
+        {
+          message: "baseRef is only valid with branch",
+        },
+      ),
+      execute: createWorktree,
+    },
+    attach_worktree: {
+      description:
+        "Associate an active registered worktree with a locally mirrored pull request",
+      arguments: z.object({
+        worktreeId: z.string().min(1),
+        prNumber: z.number().int().positive(),
+      }),
+      execute: attachWorktree,
+    },
+    detach_worktree: {
+      description: "Remove only the pull request association from a worktree",
+      arguments: z.object({ worktreeId: z.string().min(1) }),
+      execute: detachWorktree,
+    },
+    remove_worktree: {
+      description:
+        "Remove a registered worktree after checking local changes and commits",
+      arguments: z.object({
+        worktreeId: z.string().min(1),
+        force: z.boolean().default(false),
+        deleteBranch: z.boolean().default(false),
+      }),
+      execute: removeWorktree,
     },
     prepare_review_context: {
       description:
@@ -3149,6 +4506,17 @@ export const model = {
         "Remove non-dirty worktrees for merged pull requests while retaining their review branches",
       arguments: z.object({}),
       execute: closeMergedWorktrees,
+    },
+    refresh_pr_worktrees: {
+      description:
+        "Reconcile tracked PR worktree lineages against current local mirror state",
+      arguments: z.object({
+        identity: z.string().min(1).optional(),
+        autoAttach: z.boolean().default(true),
+        materialize: z.boolean().default(true),
+        dryRun: z.boolean().default(false),
+      }),
+      execute: refreshPrWorktrees,
     },
     status: {
       description: "Write and return the current local mirror status summary",

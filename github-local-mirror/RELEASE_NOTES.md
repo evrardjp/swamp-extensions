@@ -1,14 +1,22 @@
-## 2026.07.23.2
+## 2026.07.24.1
 
-**Added:** The `@evrardjp/github-repo-review-focus` report classifies every
-mirrored open pull request into a deterministic reviewer action queue and
-includes reviewer load, label concentration, large changes, path overlap, and
-stale backlog summaries in Markdown and JSON.
+**Added:** `create_worktree` can register development worktrees from a local base
+ref before a pull request exists. `attach_worktree`, `detach_worktree`, and
+`remove_worktree` provide explicit lifecycle operations without conflating PR
+association with filesystem state.
 
-**Changed:** Model definitions can configure `reviewerHandles` and
-`reviewFocusStaleDays`. Report rendering uses stored mirror data only and marks
-missing current-HEAD or collection data as incomplete instead of ready.
+**Added:** `refresh_pr_worktrees` uniquely attaches matching development
+worktrees, retains superseded PR revisions, materializes missing current
+revisions for tracked identity lineages, and safely removes merged-PR worktrees.
 
-**Upgrade note:** Existing models remain valid with no configured reviewer
-handles and a 14-day stale threshold. Configure `reviewerHandles` to enable the
-personal Re-review and Requested From You queues.
+**Changed:** Worktree analysis and status now include creation provenance,
+optional PR association, current branch and HEAD, upstream configuration,
+revision state, and unambiguous PR attachment candidates.
+
+**Changed:** `sync` accepts `requireComplete=true` so workflows can stop before
+worktree reconciliation when synchronization returns partial results.
+
+**Upgrade note:** Existing worktree registry records are decoded as review
+worktrees and remain compatible. `prepare_worktree` and
+`close_merged_worktrees` remain available for existing callers; new automation
+should use `sync -> refresh_pr_worktrees -> analyze_worktrees`.

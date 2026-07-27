@@ -679,7 +679,9 @@ export const report = {
     });
     const activeWorktreeIds = new Set(
       values("worktreeSnapshot")
-        .filter((worktree) => worktree.status === "active")
+        .filter((worktree) =>
+          (worktree.filesystemState ?? worktree.status) === "active"
+        )
         .map((worktree) => stringField(worktree, "id"))
         .filter(Boolean),
     );

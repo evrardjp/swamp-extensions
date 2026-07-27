@@ -170,11 +170,32 @@ export const report = {
     const latestCleanup = cleanupEntry
       ? await readJson<Record<string, unknown>>(context, cleanupEntry)
       : null;
+    const refreshEntry = latestEntriesByPrefix(
+      currentEntries.filter((entry) =>
+        tagsOf(entry).specName === "worktreeRefreshRun"
+      ),
+      "refresh-",
+    )[0];
+    const latestRefresh = refreshEntry
+      ? await readJson<Record<string, unknown>>(context, refreshEntry)
+      : null;
+    const filesystemState = (worktree: Record<string, unknown>) =>
+      worktree.filesystemState ?? worktree.status;
+    const linkedPrNumber = (worktree: Record<string, unknown>) => {
+      const prLink = worktree.prLink;
+      if (prLink && typeof prLink === "object" && !Array.isArray(prLink)) {
+        const value = Number((prLink as Record<string, unknown>).prNumber);
+        if (Number.isInteger(value) && value > 0) return value;
+      }
+      const legacy = Number(worktree.prNumber);
+      return Number.isInteger(legacy) && legacy > 0 ? legacy : undefined;
+    };
     const activeWorktrees = worktrees.filter((worktree) =>
-      worktree.status === "active"
+      filesystemState(worktree) === "active"
     );
     const cleanupCandidates = activeWorktrees.filter((worktree) => {
-      const pr = prs.get(Number(worktree.prNumber));
+      const prNumber = linkedPrNumber(worktree);
+      const pr = prNumber === undefined ? undefined : prs.get(prNumber);
       return pr?.state === "closed" && pr.merged === true;
     });
     const cleanupResults = Array.isArray(latestCleanup?.results)
@@ -184,6 +205,16 @@ export const report = {
       : [];
     const cleanupFailures = cleanupResults.filter((result) =>
       result.outcome === "failed" || typeof result.error === "string"
+    );
+    const refreshActions = Array.isArray(latestRefresh?.actions)
+      ? latestRefresh.actions.filter((action) =>
+        action && typeof action === "object" && !Array.isArray(action)
+      ) as Record<string, unknown>[]
+      : [];
+    const refreshCount = (action: string) =>
+      refreshActions.filter((item) => item.action === action).length;
+    const refreshFailures = refreshActions.filter((item) =>
+      item.action === "failed"
     );
     const activeWorktreeIds = new Set(
       activeWorktrees.map((worktree) => String(worktree.id)),
@@ -307,6 +338,16 @@ export const report = {
       `- Removed in latest cleanup: ${md(latestCleanup?.removedCount ?? 0)}`,
     );
     lines.push(`- Latest cleanup failures: ${cleanupFailures.length}`);
+    lines.push(
+      `- Latest refresh complete: ${md(latestRefresh?.complete ?? "unknown")}`,
+    );
+    lines.push(`- Attached in latest refresh: ${refreshCount("attached")}`);
+    lines.push(
+      `- Materialized in latest refresh: ${refreshCount("materialized")}`,
+    );
+    lines.push(`- Removed in latest refresh: ${refreshCount("removed")}`);
+    lines.push(`- Retained in latest refresh: ${refreshCount("retained")}`);
+    lines.push(`- Latest refresh failures: ${refreshFailures.length}`);
     lines.push(`- Stale PR head: ${stale.length}`);
     lines.push(`- Dirty: ${dirty.length}`);
     lines.push(`- Ahead commits: ${ahead.length}`);
@@ -318,22 +359,33 @@ export const report = {
         }`,
       );
     }
+    for (const failure of refreshFailures) {
+      lines.push(
+        `- Refresh error (PR #${md(failure.prNumber ?? "unknown")}): ${
+          md(failure.error ?? failure.reason ?? "unknown error")
+        }`,
+      );
+    }
     if (activeAnalyses.length) {
       lines.push("");
       lines.push(
-        "| PR | Identity | Path | Stale | Dirty | Ahead | Recommendation |",
+        "| Kind | PR | Identity | Revision | Path | Stale | Dirty | Ahead | Candidate | Recommendation |",
       );
-      lines.push("| --- | --- | --- | --- | --- | ---: | --- |");
+      lines.push(
+        "| --- | --- | --- | --- | --- | --- | --- | ---: | --- | --- |",
+      );
       for (
         const a of activeAnalyses.sort((a, b) =>
           Number(a.prNumber ?? 0) - Number(b.prNumber ?? 0)
         )
       ) {
         lines.push(
-          `| ${md(a.prNumber)} | ${md(a.identity ?? "")} | \`${
-            md(a.path)
-          }\` | ${md(a.isPrHeadStale)} | ${md(a.isDirty)} | ${
-            md(a.aheadCommitCount)
+          `| ${md(a.createdReason ?? "review")} | ${md(a.prNumber ?? "")} | ${
+            md(a.identity ?? "")
+          } | ${md(a.revisionState ?? "")} | \`${md(a.path)}\` | ${
+            md(a.isPrHeadStale ?? "")
+          } | ${md(a.isDirty)} | ${md(a.aheadCommitCount)} | ${
+            md(a.candidatePrNumber ?? (a.candidateAmbiguous ? "ambiguous" : ""))
           } | ${md(a.recommendedAction)} |`,
         );
       }
@@ -346,6 +398,7 @@ export const report = {
         repo,
         state,
         latestSync,
+        latestRefresh,
         syncRuns,
         dataCounts: Object.fromEntries([...dataCounts.entries()].sort()),
         worktrees: {
@@ -353,6 +406,11 @@ export const report = {
           cleanupCandidates: cleanupCandidates.length,
           removedInLatestCleanup: Number(latestCleanup?.removedCount ?? 0),
           cleanupFailures: cleanupFailures.length,
+          attachedInLatestRefresh: refreshCount("attached"),
+          materializedInLatestRefresh: refreshCount("materialized"),
+          removedInLatestRefresh: refreshCount("removed"),
+          retainedInLatestRefresh: refreshCount("retained"),
+          refreshFailures: refreshFailures.length,
           stale: stale.length,
           dirty: dirty.length,
           ahead: ahead.length,
