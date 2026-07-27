@@ -16,6 +16,10 @@ revision state, and unambiguous PR attachment candidates.
 **Changed:** `sync` accepts `requireComplete=true` so workflows can stop before
 worktree reconciliation when synchronization returns partial results.
 
+**Changed:** Development worktrees now default to the mirrored repository's
+symbolic `HEAD`, and sync preserves their registered local branches instead of
+reconciling those branches as mirror-owned refs.
+
 **Upgrade note:** Existing worktree registry records are decoded as review
 worktrees and remain compatible. `prepare_worktree` and
 `close_merged_worktrees` remain available for existing callers; new automation

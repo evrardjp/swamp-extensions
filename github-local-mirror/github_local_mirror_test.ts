@@ -252,7 +252,7 @@ Deno.test("create_worktree creates development branches and validates its source
   );
   assertEquals(result.worktreeId, registry[0].id);
   assertEquals(registry[0].createdReason, "development");
-  assertEquals(registry[0].creationBaseRef, "refs/remotes/origin/main");
+  assertEquals(registry[0].creationBaseRef, "HEAD");
   assertEquals(registry[0].prLink, undefined);
   assertEquals(registry[0].filesystemState, "active");
 
@@ -285,6 +285,15 @@ Deno.test("create_worktree creates development branches and validates its source
   }, context);
   assertEquals(recovered.branch, "feature/recover-partial");
   assertEquals((await Deno.stat(recovered.path)).isDirectory, true);
+
+  const longPrefix = `feature/${"a".repeat(190)}`;
+  const firstLong = await model.methods.create_worktree.execute({
+    branch: `${longPrefix}-one`,
+  }, context);
+  const secondLong = await model.methods.create_worktree.execute({
+    branch: `${longPrefix}-two`,
+  }, context);
+  assertEquals(firstLong.worktreeId === secondLong.worktreeId, false);
 
   await assertRejects(
     () => model.methods.create_worktree.execute({}, context),
@@ -1159,7 +1168,7 @@ Deno.test("refresh dry-run reports missing merged worktree reconciliation withou
 });
 
 Deno.test("refresh rematerializes an unchanged current PR after its worktree vanishes", async () => {
-  const { root, context } = await tempContext();
+  const { root, writes, context } = await tempContext();
   const headSha = await createMirroredPrRef(
     root,
     context.globalArgs.gitObjectPath,
@@ -1194,6 +1203,7 @@ Deno.test("refresh rematerializes an unchanged current PR after its worktree van
   if (removed.code !== 0) {
     throw new Error(new TextDecoder().decode(removed.stderr));
   }
+  writes.length = 0;
 
   const result = await model.methods.refresh_pr_worktrees.execute({}, context);
 
@@ -1210,6 +1220,52 @@ Deno.test("refresh rematerializes an unchanged current PR after its worktree van
   assertEquals(registry[0].filesystemState, "active");
   assertEquals(registry[0].prLink.headShaAtAttachment, headSha);
   assertEquals((await Deno.stat(registry[0].path)).isDirectory, true);
+  const snapshots = writes.filter((write) =>
+    write.specName === "worktreeSnapshot" && write.name === registry[0].id
+  );
+  assertEquals(snapshots.at(-1)?.data.filesystemState, "active");
+});
+
+Deno.test("refresh does not recreate explicitly removed open PR worktrees", async () => {
+  const { root, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    53,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/53`, {
+    recursive: true,
+  });
+  await Deno.writeTextFile(
+    `${context.globalArgs.artifactRoot}/prs/53/current.json`,
+    JSON.stringify({
+      number: 53,
+      state: "open",
+      merged: false,
+      headSha,
+      observedAt: "2026-07-23T00:00:00.000Z",
+    }),
+  );
+  const worktree = await model.methods.prepare_worktree.execute({
+    prNumber: 53,
+  }, context);
+  await model.methods.remove_worktree.execute({
+    worktreeId: worktree.worktreeId,
+  }, context);
+
+  const result = await model.methods.refresh_pr_worktrees.execute({}, context);
+
+  assertEquals(
+    result.actions.some((action) => action.action === "materialized"),
+    false,
+  );
+  const registry = JSON.parse(
+    await Deno.readTextFile(
+      `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+    ),
+  );
+  assertEquals(registry.length, 1);
+  assertEquals(registry[0].filesystemState, "removed");
 });
 
 Deno.test("refresh rejects metadata and local ref PR head divergence", async () => {
@@ -2433,6 +2489,23 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
     gitRemote: "pull",
     gitRemoteUrl: upstream,
   });
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/worktrees`, {
+    recursive: true,
+  });
+  await Deno.writeTextFile(
+    `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+    JSON.stringify([{
+      id: "worktree-protected-development",
+      repo: "owner/repo",
+      path: `${context.globalArgs.workspaceRoot}/obsolete`,
+      branch: "obsolete",
+      createdReason: "development",
+      creationBaseSha: staleSha,
+      creationBaseRef: "HEAD",
+      createdAt: "2026-07-27T00:00:00.000Z",
+      filesystemState: "active",
+    }]),
+  );
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -2502,16 +2575,14 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
         ]),
       Error,
     );
-    await assertRejects(
-      () =>
-        run(root, [
-          "--git-dir",
-          context.globalArgs.gitObjectPath,
-          "show-ref",
-          "--verify",
-          "refs/heads/obsolete",
-        ]),
-      Error,
+    assertEquals(
+      await run(root, [
+        "--git-dir",
+        context.globalArgs.gitObjectPath,
+        "rev-parse",
+        "refs/heads/obsolete",
+      ]),
+      staleSha,
     );
     assertEquals(
       await run(root, [
@@ -2521,6 +2592,21 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
         "refs/heads/feature",
       ]),
       staleSha,
+    );
+    const defaultWorktree = await model.methods.create_worktree.execute({
+      branch: "local-default-base",
+    }, context);
+    assertEquals(defaultWorktree.baseHeadSha, currentSha);
+    const worktrees = JSON.parse(
+      await Deno.readTextFile(
+        `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+      ),
+    );
+    assertEquals(
+      worktrees.find((record: { id: string }) =>
+        record.id === defaultWorktree.worktreeId
+      ).creationBaseRef,
+      "HEAD",
     );
     await assertRejects(
       () =>

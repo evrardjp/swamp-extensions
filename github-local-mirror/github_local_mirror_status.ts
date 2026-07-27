@@ -213,6 +213,11 @@ export const report = {
       : [];
     const refreshCount = (action: string) =>
       refreshActions.filter((item) => item.action === action).length;
+    const refreshDryRun = latestRefresh?.dryRun === true;
+    const executedRefreshCount = (action: string) =>
+      refreshDryRun ? 0 : refreshCount(action);
+    const plannedRefreshCount = (action: string) =>
+      refreshDryRun ? refreshCount(action) : 0;
     const refreshFailures = refreshActions.filter((item) =>
       item.action === "failed"
     );
@@ -341,12 +346,20 @@ export const report = {
     lines.push(
       `- Latest refresh complete: ${md(latestRefresh?.complete ?? "unknown")}`,
     );
-    lines.push(`- Attached in latest refresh: ${refreshCount("attached")}`);
-    lines.push(
-      `- Materialized in latest refresh: ${refreshCount("materialized")}`,
-    );
-    lines.push(`- Removed in latest refresh: ${refreshCount("removed")}`);
-    lines.push(`- Retained in latest refresh: ${refreshCount("retained")}`);
+    lines.push(`- Latest refresh dry run: ${refreshDryRun}`);
+    if (refreshDryRun) {
+      lines.push(`- Planned attachments: ${refreshCount("attached")}`);
+      lines.push(`- Planned materializations: ${refreshCount("materialized")}`);
+      lines.push(`- Planned removals: ${refreshCount("removed")}`);
+      lines.push(`- Planned retentions: ${refreshCount("retained")}`);
+    } else {
+      lines.push(`- Attached in latest refresh: ${refreshCount("attached")}`);
+      lines.push(
+        `- Materialized in latest refresh: ${refreshCount("materialized")}`,
+      );
+      lines.push(`- Removed in latest refresh: ${refreshCount("removed")}`);
+      lines.push(`- Retained in latest refresh: ${refreshCount("retained")}`);
+    }
     lines.push(`- Latest refresh failures: ${refreshFailures.length}`);
     lines.push(`- Stale PR head: ${stale.length}`);
     lines.push(`- Dirty: ${dirty.length}`);
@@ -406,10 +419,15 @@ export const report = {
           cleanupCandidates: cleanupCandidates.length,
           removedInLatestCleanup: Number(latestCleanup?.removedCount ?? 0),
           cleanupFailures: cleanupFailures.length,
-          attachedInLatestRefresh: refreshCount("attached"),
-          materializedInLatestRefresh: refreshCount("materialized"),
-          removedInLatestRefresh: refreshCount("removed"),
-          retainedInLatestRefresh: refreshCount("retained"),
+          refreshDryRun,
+          attachedInLatestRefresh: executedRefreshCount("attached"),
+          materializedInLatestRefresh: executedRefreshCount("materialized"),
+          removedInLatestRefresh: executedRefreshCount("removed"),
+          retainedInLatestRefresh: executedRefreshCount("retained"),
+          plannedAttachments: plannedRefreshCount("attached"),
+          plannedMaterializations: plannedRefreshCount("materialized"),
+          plannedRemovals: plannedRefreshCount("removed"),
+          plannedRetentions: plannedRefreshCount("retained"),
           refreshFailures: refreshFailures.length,
           stale: stale.length,
           dirty: dirty.length,
