@@ -1,10 +1,10 @@
 manifestVersion: 1
 name: "@evrardjp/github-local-mirror"
-version: "2026.07.23.2"
+version: "2026.07.24.1"
 description: >-
   Swamp-backed local GitHub mirror: keeps a local git object cache plus
   queryable Swamp metadata for PRs, issues, comments, reviews, checks,
-  patch revisions, and local review worktrees.
+  patch revisions, and local development or review worktrees.
 repository: "https://github.com/evrardjp/swamp-extensions"
 paths:
   base: manifest

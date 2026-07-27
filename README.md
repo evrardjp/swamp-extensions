@@ -110,10 +110,11 @@ Use it for daily maintainer briefings and PR/issue drill-downs.
 
 Local GitHub mirror for maintainers and agents. It keeps a local git object
 cache plus Swamp-indexed PRs, issues, comments, reviews, checks, patch revision
-metadata, and local review worktree analysis.
+metadata, and local development or PR review worktree analysis.
 
 Use it when you want frequent lightweight syncs, durable local PR/issue context,
-and editable worktrees for human or agent review/fix workflows.
+and editable worktrees that can start before a PR and remain tracked through its
+review lifecycle.
 
 ### `@evrardjp/libvirt-vm-pool`
 

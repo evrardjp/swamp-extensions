@@ -101,6 +101,11 @@ Deno.test("mirror status reports merged cleanup candidates and latest failures",
       version: 1,
       tags: { specName: "worktreeCleanupRun" },
     },
+    {
+      name: "refresh-2026-07-22T11:00:00.000Z",
+      version: 1,
+      tags: { specName: "worktreeRefreshRun" },
+    },
   ];
   const contents = new Map<string, Record<string, unknown>>([
     [
@@ -164,6 +169,18 @@ Deno.test("mirror status reports merged cleanup candidates and latest failures",
         }],
       },
     ],
+    [
+      "refresh-2026-07-22T11:00:00.000Z:1:worktreeRefreshRun",
+      {
+        complete: true,
+        actions: [
+          { action: "attached", prNumber: 42 },
+          { action: "materialized", prNumber: 42 },
+          { action: "removed", prNumber: 42 },
+          { action: "retained", prNumber: 42 },
+        ],
+      },
+    ],
   ]);
   const result = await report.execute({
     modelType: "@evrardjp/github-local-mirror",
@@ -185,7 +202,70 @@ Deno.test("mirror status reports merged cleanup candidates and latest failures",
   assertStringIncludes(result.markdown, "Active: 1");
   assertStringIncludes(result.markdown, "Merged cleanup candidates: 1");
   assertStringIncludes(result.markdown, "Latest cleanup failures: 1");
+  assertStringIncludes(result.markdown, "Latest refresh complete: true");
+  assertStringIncludes(result.markdown, "Attached in latest refresh: 1");
+  assertStringIncludes(result.markdown, "Materialized in latest refresh: 1");
+  assertStringIncludes(result.markdown, "Removed in latest refresh: 1");
+  assertStringIncludes(result.markdown, "Retained in latest refresh: 1");
   assertStringIncludes(result.markdown, "worktree contains modified files");
   assertStringIncludes(result.markdown, "Dirty: 0");
   assertStringIncludes(result.markdown, "| worktreeAnalysis | 2 |");
+});
+
+Deno.test("mirror status distinguishes unattached development worktrees", async () => {
+  const entries = [
+    {
+      name: "worktree-dev",
+      version: 1,
+      tags: { specName: "worktreeSnapshot" },
+    },
+    {
+      name: "worktree-dev",
+      version: 2,
+      tags: { specName: "worktreeAnalysis" },
+    },
+  ];
+  const contents = new Map<string, Record<string, unknown>>([
+    [
+      "worktree-dev:1",
+      {
+        id: "worktree-dev",
+        createdReason: "development",
+        filesystemState: "active",
+        path: "/worktrees/feature",
+      },
+    ],
+    [
+      "worktree-dev:2",
+      {
+        worktreeId: "worktree-dev",
+        createdReason: "development",
+        prNumber: null,
+        path: "/worktrees/feature",
+        isPrHeadStale: null,
+        isDirty: false,
+        aheadCommitCount: 1,
+        missing: false,
+        candidatePrNumber: 27,
+        recommendedAction: "attach-worktree",
+      },
+    ],
+  ]);
+  const result = await report.execute({
+    modelType: "@evrardjp/github-local-mirror",
+    modelId: "mirror-id",
+    dataRepository: {
+      findAllForModel: () => Promise.resolve(entries),
+      getContent: (_type, _id, name, version) => {
+        const content = contents.get(`${name}:${version}`);
+        return Promise.resolve(
+          content ? new TextEncoder().encode(JSON.stringify(content)) : null,
+        );
+      },
+    },
+  });
+
+  assertStringIncludes(result.markdown, "Active: 1");
+  assertStringIncludes(result.markdown, "| development |  |  |  |");
+  assertStringIncludes(result.markdown, "| 27 | attach-worktree |");
 });
