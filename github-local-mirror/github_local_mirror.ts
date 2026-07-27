@@ -1089,13 +1089,22 @@ async function fetchGit(
       if (!ref || !sha) continue;
       localBranches.set(ref.slice("refs/heads/".length), { ref, sha });
     }
+    const registeredDevelopmentBranches = new Set(
+      (await readWorktrees(g)).filter((record) =>
+        record.createdReason === "development" &&
+        localBranches.has(record.branch)
+      ).map((record) => record.branch),
+    );
     const localReviewBranches = [...localBranches.keys()].filter(
       (branch) => branch.startsWith("review/"),
     );
     const remoteBranches = new Map(
       [...fetchedRemoteBranches].filter(([branch]) =>
         branch !== "review" && !isManagedWorktreeBranch(branch) &&
-        !localReviewBranches.some((local) => refsConflict(branch, local))
+        !localReviewBranches.some((local) => refsConflict(branch, local)) &&
+        ![...registeredDevelopmentBranches].some((local) =>
+          refsConflict(branch, local)
+        )
       ),
     );
     const remoteHead = await runGitOk(
@@ -1121,6 +1130,7 @@ async function fetchGit(
     ) => `verify ${ref} ${sha}`);
     const staleBranches = [...localBranches].filter(([branch]) =>
       !branch.startsWith("review/") &&
+      !registeredDevelopmentBranches.has(branch) &&
       !remoteBranches.has(branch) &&
       (defaultBranch !== undefined || currentHead !== `refs/heads/${branch}`)
     );
@@ -2671,7 +2681,7 @@ async function createWorktree(
     if (validBranch.code !== 0) {
       throw new Error(`invalid branch name: ${branch}`);
     }
-    const baseRef = args.baseRef ?? "refs/remotes/origin/main";
+    const baseRef = args.baseRef ?? "HEAD";
     creationBaseRef = baseRef;
     const resolved = await runGit(g.gitObjectPath, [
       "rev-parse",
@@ -2693,12 +2703,21 @@ async function createWorktree(
     throw new Error("generated worktree path escapes workspaceRoot");
   }
   const proposedRecord: WorktreeRecord = {
-    id: safeName("worktree", [
-      repoFullName(g),
-      isReview ? args.prNumber : branch,
-      isReview ? shortSha(headSha) : await hashPrefix(`${branch}\0${headSha}`),
-      args.identity,
-    ]),
+    id: isReview
+      ? safeName("worktree", [
+        repoFullName(g),
+        args.prNumber,
+        shortSha(headSha),
+        args.identity,
+      ])
+      : safeName("worktree", [
+        await hashPrefix(
+          `${repoFullName(g)}\0${branch}\0${headSha}\0${args.identity ?? ""}`,
+        ),
+        repoFullName(g),
+        branch,
+        args.identity,
+      ]),
     repo: repoFullName(g),
     identity: args.identity,
     path,
@@ -3812,7 +3831,7 @@ async function refreshPrWorktrees(
   // their downstream reconciliation actions match a real run.
   const lineageKeys = new Set(
     records.filter((record) =>
-      record.prLink &&
+      record.filesystemState === "active" && record.prLink &&
       (args.identity === undefined || record.identity === args.identity)
     ).map((record) => `${record.prLink!.prNumber}\0${record.identity ?? ""}`),
   );
@@ -4053,6 +4072,11 @@ async function refreshPrWorktrees(
           }
           const created = await createWorktree({ prNumber, identity }, ctx);
           handles.push(...created.dataHandles);
+          for (let index = changedSnapshots.length - 1; index >= 0; index--) {
+            if (changedSnapshots[index].id === created.worktreeId) {
+              changedSnapshots.splice(index, 1);
+            }
+          }
           records = await readWorktrees(g);
           registryChanged = false;
           actions.at(-1)!.worktreeId = records.find((record) =>

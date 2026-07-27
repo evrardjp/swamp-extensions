@@ -1,4 +1,4 @@
-import { assertStringIncludes } from "jsr:@std/assert@1";
+import { assertEquals, assertStringIncludes } from "jsr:@std/assert@1";
 import { report } from "./github_local_mirror_status.ts";
 
 Deno.test("mirror status report summarizes stored data", async () => {
@@ -173,6 +173,7 @@ Deno.test("mirror status reports merged cleanup candidates and latest failures",
       "refresh-2026-07-22T11:00:00.000Z:1:worktreeRefreshRun",
       {
         complete: true,
+        dryRun: true,
         actions: [
           { action: "attached", prNumber: 42 },
           { action: "materialized", prNumber: 42 },
@@ -203,10 +204,13 @@ Deno.test("mirror status reports merged cleanup candidates and latest failures",
   assertStringIncludes(result.markdown, "Merged cleanup candidates: 1");
   assertStringIncludes(result.markdown, "Latest cleanup failures: 1");
   assertStringIncludes(result.markdown, "Latest refresh complete: true");
-  assertStringIncludes(result.markdown, "Attached in latest refresh: 1");
-  assertStringIncludes(result.markdown, "Materialized in latest refresh: 1");
-  assertStringIncludes(result.markdown, "Removed in latest refresh: 1");
-  assertStringIncludes(result.markdown, "Retained in latest refresh: 1");
+  assertStringIncludes(result.markdown, "Latest refresh dry run: true");
+  assertStringIncludes(result.markdown, "Planned attachments: 1");
+  assertStringIncludes(result.markdown, "Planned materializations: 1");
+  assertStringIncludes(result.markdown, "Planned removals: 1");
+  assertStringIncludes(result.markdown, "Planned retentions: 1");
+  assertEquals(result.json?.worktrees.attachedInLatestRefresh, 0);
+  assertEquals(result.json?.worktrees.plannedAttachments, 1);
   assertStringIncludes(result.markdown, "worktree contains modified files");
   assertStringIncludes(result.markdown, "Dirty: 0");
   assertStringIncludes(result.markdown, "| worktreeAnalysis | 2 |");

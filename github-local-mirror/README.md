@@ -123,7 +123,8 @@ swamp model method run external-secrets-external-secrets-mirror create_worktree 
   --input identity=jp
 ```
 
-`baseRef` defaults to `refs/remotes/origin/main`. The method validates the Git
+`baseRef` defaults to the managed bare repository's symbolic `HEAD`, which sync
+keeps aligned with the configured remote's default branch. The method validates the Git
 branch and base commit locally, creates a collision-resistant path below
 `workspaceRoot`, and records the original base for ahead-commit analysis.
 
