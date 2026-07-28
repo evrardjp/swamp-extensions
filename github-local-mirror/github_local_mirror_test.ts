@@ -1208,6 +1208,22 @@ Deno.test("attach_worktree records the mirrored head when local HEAD is ahead", 
   assertEquals(registry[0].prLink.headShaAtAttachment, headSha);
   assertEquals(registry[0].revisionState, "superseded");
 
+  const refreshed = await model.methods.refresh_pr_worktrees.execute(
+    {},
+    context,
+  );
+  assertEquals(refreshed.complete, true);
+  assertEquals(
+    refreshed.actions.some((action) => action.action === "materialized"),
+    false,
+  );
+  registry = JSON.parse(
+    await Deno.readTextFile(
+      `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+    ),
+  );
+  assertEquals(registry[0].revisionState, "current");
+
   const attachedAt = registry[0].prLink.attachedAt;
   const localHeadSha = attached.worktreeHeadSha;
   const update = await new Deno.Command("git", {
@@ -1245,6 +1261,85 @@ Deno.test("attach_worktree records the mirrored head when local HEAD is ahead", 
   assertEquals(registry[0].prLink.attachedAt, attachedAt);
   assertEquals(registry[0].prLink.headShaAtAttachment, localHeadSha);
   assertEquals(registry[0].revisionState, "current");
+});
+
+Deno.test("attach_worktree rejects a renamed or replaced checkout", async () => {
+  const { root, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    57,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/57`, {
+    recursive: true,
+  });
+  await Deno.writeTextFile(
+    `${context.globalArgs.artifactRoot}/prs/57/current.json`,
+    JSON.stringify({
+      number: 57,
+      state: "open",
+      merged: false,
+      headSha,
+      observedAt: "2026-07-23T00:00:00.000Z",
+    }),
+  );
+  const worktree = await model.methods.create_worktree.execute({
+    branch: "feature/renamed-before-attachment",
+    baseRef: "refs/remotes/pull/57/head",
+  }, context);
+  const renamed = await new Deno.Command("git", {
+    cwd: worktree.path,
+    args: ["branch", "-m", "feature/renamed-externally"],
+    stderr: "piped",
+  }).output();
+  assertEquals(renamed.code, 0);
+
+  await assertRejects(
+    () =>
+      model.methods.attach_worktree.execute({
+        worktreeId: worktree.worktreeId,
+        prNumber: 57,
+      }, context),
+    Error,
+    "path is not the expected registered Git worktree",
+  );
+
+  const restored = await new Deno.Command("git", {
+    cwd: worktree.path,
+    args: ["branch", "-m", "feature/renamed-before-attachment"],
+    stderr: "piped",
+  }).output();
+  assertEquals(restored.code, 0);
+  await Deno.rename(worktree.path, `${worktree.path}-moved`);
+  await Deno.mkdir(worktree.path);
+  const initialized = await new Deno.Command("git", {
+    cwd: worktree.path,
+    args: ["init"],
+    stderr: "piped",
+  }).output();
+  assertEquals(initialized.code, 0);
+
+  await assertRejects(
+    () =>
+      model.methods.attach_worktree.execute({
+        worktreeId: worktree.worktreeId,
+        prNumber: 57,
+      }, context),
+    Error,
+    "path is not the expected registered Git worktree",
+  );
+
+  await Deno.remove(worktree.path, { recursive: true });
+  await Deno.symlink(`${worktree.path}-moved`, worktree.path);
+  await assertRejects(
+    () =>
+      model.methods.attach_worktree.execute({
+        worktreeId: worktree.worktreeId,
+        prNumber: 57,
+      }, context),
+    Error,
+    "path is not the expected registered Git worktree",
+  );
 });
 
 Deno.test("refresh retains closed unmerged lineages without materializing", async () => {
@@ -1427,6 +1522,67 @@ Deno.test("refresh dry-run reports missing merged worktree reconciliation withou
   assertEquals(
     JSON.parse(await Deno.readTextFile(registryPath))[0].filesystemState,
     "removed",
+  );
+});
+
+Deno.test("refresh does not report a locked merged worktree as removed", async () => {
+  const { root, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    58,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/58`, {
+    recursive: true,
+  });
+  const prPath = `${context.globalArgs.artifactRoot}/prs/58/current.json`;
+  await Deno.writeTextFile(
+    prPath,
+    JSON.stringify({
+      number: 58,
+      state: "open",
+      merged: false,
+      headSha,
+      observedAt: "2026-07-23T00:00:00.000Z",
+    }),
+  );
+  const worktree = await model.methods.prepare_worktree.execute({
+    prNumber: 58,
+  }, context);
+  const locked = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "worktree",
+      "lock",
+      worktree.path,
+    ],
+    stderr: "piped",
+  }).output();
+  assertEquals(locked.code, 0);
+  await Deno.writeTextFile(
+    prPath,
+    JSON.stringify({
+      number: 58,
+      state: "closed",
+      merged: true,
+      headSha,
+      observedAt: "2026-07-23T01:00:00.000Z",
+    }),
+  );
+
+  const result = await model.methods.refresh_pr_worktrees.execute({}, context);
+
+  assertEquals(result.complete, false);
+  assertEquals(result.actions.map((action) => action.action), ["failed"]);
+  assertEquals((await Deno.stat(worktree.path)).isDirectory, true);
+  assertEquals(
+    JSON.parse(
+      await Deno.readTextFile(
+        `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+      ),
+    )[0].filesystemState,
+    "active",
   );
 });
 

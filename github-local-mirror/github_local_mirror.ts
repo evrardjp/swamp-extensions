@@ -2706,19 +2706,66 @@ async function verifyRegisteredWorktree(
   path: string,
   branch: string,
 ): Promise<void> {
-  const listed = await runGitOk(g.gitObjectPath, [
-    "worktree",
-    "list",
-    "--porcelain",
-    "-z",
-  ]);
+  const [listed, commonDir, actualGitDir, actualBranch, topLevel] =
+    await Promise
+      .all([
+        runGitOk(g.gitObjectPath, [
+          "worktree",
+          "list",
+          "--porcelain",
+          "-z",
+        ]),
+        gitInWorktree(path, [
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-common-dir",
+        ]),
+        gitInWorktree(path, ["rev-parse", "--absolute-git-dir"]),
+        gitInWorktree(path, ["symbolic-ref", "--quiet", "HEAD"]),
+        gitInWorktree(path, [
+          "rev-parse",
+          "--path-format=absolute",
+          "--show-toplevel",
+        ]),
+      ]);
   const expectedBranch = `branch refs/heads/${branch}`;
   const registered = listed.split("\0\0").some((entry) => {
     const fields = entry.split("\0");
     return fields.includes(`worktree ${path}`) &&
       fields.includes(expectedBranch);
   });
-  if (!registered) {
+  let checkoutMatches = false;
+  if (
+    commonDir.code === 0 && actualGitDir.code === 0 &&
+    actualBranch.code === 0 && topLevel.code === 0
+  ) {
+    try {
+      const expectedCommonDir = await Deno.realPath(g.gitObjectPath);
+      let expectedGitDir: string | undefined;
+      for await (
+        const entry of Deno.readDir(`${expectedCommonDir}/worktrees`)
+      ) {
+        if (!entry.isDirectory) continue;
+        const candidate = `${expectedCommonDir}/worktrees/${entry.name}`;
+        const checkoutGitFile = (await Deno.readTextFile(`${candidate}/gitdir`))
+          .trim();
+        if (checkoutGitFile === `${path}/.git`) {
+          expectedGitDir = candidate;
+          break;
+        }
+      }
+      checkoutMatches = expectedGitDir !== undefined &&
+        await Deno.realPath(path) === path &&
+        await Deno.realPath(commonDir.stdout.trim()) === expectedCommonDir &&
+        await Deno.realPath(actualGitDir.stdout.trim()) ===
+          await Deno.realPath(expectedGitDir) &&
+        actualBranch.stdout.trim() === `refs/heads/${branch}` &&
+        topLevel.stdout.trim() === path;
+    } catch {
+      checkoutMatches = false;
+    }
+  }
+  if (!registered || !checkoutMatches) {
     throw new Error(
       `path is not the expected registered Git worktree for ${branch}: ${path}`,
     );
@@ -3177,6 +3224,7 @@ async function attachWorktreeUnlocked(
   if (!await exists(record.path)) {
     throw new Error(`registered worktree path is missing: ${record.path}`);
   }
+  await verifyRegisteredWorktree(g, record.path, record.branch);
   const [{ headSha: prHeadSha }, headSha] = await Promise.all([
     readValidatedPrHead(g, args.prNumber),
     worktreeHead(record.path),
@@ -4116,25 +4164,34 @@ async function refreshPrWorktreesUnlocked(
           const inspected = await inspectWorktree(record);
           if (inspected.missing) {
             await verifyGitWorktreeRemoved(g, record.path, record.branch);
-            actions.push({
-              action: "removed",
-              worktreeId: record.id,
-              prNumber,
-              reason: "worktree-already-missing",
-            });
-            if (!dryRun) {
+            if (dryRun) {
+              actions.push({
+                action: "removed",
+                worktreeId: record.id,
+                prNumber,
+                reason: "worktree-already-missing",
+              });
+            } else {
               const index = records.findIndex((candidate) =>
                 candidate.id === record.id
               );
-              records[index] = {
+              const updatedRecord: WorktreeRecord = {
                 ...record,
                 filesystemState: "removed",
                 snapshotPending: true,
                 removedAt: nowIso(),
               };
-              await writeWorktrees(g, records);
-              changedSnapshots.push(records[index]);
+              const updatedRecords = records.with(index, updatedRecord);
+              await writeWorktrees(g, updatedRecords);
+              records = updatedRecords;
+              changedSnapshots.push(updatedRecord);
               registryChanged = false;
+              actions.push({
+                action: "removed",
+                worktreeId: record.id,
+                prNumber,
+                reason: "worktree-already-missing",
+              });
             }
             continue;
           }
@@ -4177,13 +4234,14 @@ async function refreshPrWorktreesUnlocked(
             });
             continue;
           }
-          actions.push({
-            action: "removed",
-            worktreeId: record.id,
-            prNumber,
-            reason: "pr-merged",
-          });
-          if (!dryRun) {
+          if (dryRun) {
+            actions.push({
+              action: "removed",
+              worktreeId: record.id,
+              prNumber,
+              reason: "pr-merged",
+            });
+          } else {
             await runGitOk(g.gitObjectPath, [
               "worktree",
               "remove",
@@ -4192,15 +4250,23 @@ async function refreshPrWorktreesUnlocked(
             const index = records.findIndex((candidate) =>
               candidate.id === record.id
             );
-            records[index] = {
+            const updatedRecord: WorktreeRecord = {
               ...record,
               filesystemState: "removed",
               snapshotPending: true,
               removedAt: nowIso(),
             };
-            await writeWorktrees(g, records);
-            changedSnapshots.push(records[index]);
+            const updatedRecords = records.with(index, updatedRecord);
+            await writeWorktrees(g, updatedRecords);
+            records = updatedRecords;
+            changedSnapshots.push(updatedRecord);
             registryChanged = false;
+            actions.push({
+              action: "removed",
+              worktreeId: record.id,
+              prNumber,
+              reason: "pr-merged",
+            });
           }
         } catch (err) {
           actions.push({
@@ -4230,6 +4296,7 @@ async function refreshPrWorktreesUnlocked(
       record: WorktreeRecord;
       available: boolean;
       currentHeadSha?: string;
+      containsCurrentPrHead: boolean;
     }> = [];
     let lineageBlocked = false;
     for (const record of linked) {
@@ -4237,35 +4304,61 @@ async function refreshPrWorktreesUnlocked(
         const inspected = await inspectWorktree(record);
         if (inspected.missing) {
           await verifyGitWorktreeRemoved(g, record.path, record.branch);
-          actions.push({
-            action: "removed",
-            worktreeId: record.id,
-            prNumber,
-            reason: "worktree-already-missing",
-          });
-          const index = records.findIndex((candidate) =>
-            candidate.id === record.id
-          );
-          records[index] = {
-            ...record,
-            filesystemState: "removed",
-            snapshotPending: true,
-            removedAt: nowIso(),
-          };
-          if (!dryRun) {
-            await writeWorktrees(g, records);
-            changedSnapshots.push(records[index]);
+          if (dryRun) {
+            actions.push({
+              action: "removed",
+              worktreeId: record.id,
+              prNumber,
+              reason: "worktree-already-missing",
+            });
+          } else {
+            const index = records.findIndex((candidate) =>
+              candidate.id === record.id
+            );
+            const updatedRecord: WorktreeRecord = {
+              ...record,
+              filesystemState: "removed",
+              snapshotPending: true,
+              removedAt: nowIso(),
+            };
+            const updatedRecords = records.with(index, updatedRecord);
+            await writeWorktrees(g, updatedRecords);
+            records = updatedRecords;
+            changedSnapshots.push(updatedRecord);
             registryChanged = false;
+            actions.push({
+              action: "removed",
+              worktreeId: record.id,
+              prNumber,
+              reason: "worktree-already-missing",
+            });
           }
           continue;
         }
         if (!inspected.analysisComplete) {
           throw new Error("worktree inspection was incomplete");
         }
+        let containsCurrentPrHead = false;
+        if (record.prLink?.headShaAtAttachment === prHeadSha) {
+          const contains = await gitInWorktree(record.path, [
+            "merge-base",
+            "--is-ancestor",
+            prHeadSha,
+            "HEAD",
+          ]);
+          if (contains.code === 0) containsCurrentPrHead = true;
+          else if (contains.code !== 1) {
+            throw new Error(
+              contains.stderr.trim() ||
+                `git merge-base --is-ancestor exited ${contains.code}`,
+            );
+          }
+        }
         inspectedLinked.push({
           record,
           available: true,
           currentHeadSha: inspected.currentHeadSha,
+          containsCurrentPrHead,
         });
       } catch (err) {
         lineageBlocked = true;
@@ -4279,7 +4372,8 @@ async function refreshPrWorktreesUnlocked(
     }
     if (lineageBlocked) continue;
     const current = inspectedLinked.filter((item) =>
-      item.available && item.currentHeadSha === prHeadSha
+      item.available &&
+      (item.currentHeadSha === prHeadSha || item.containsCurrentPrHead)
     );
     const keeper = current[0]?.record.id;
     for (const item of inspectedLinked) {
