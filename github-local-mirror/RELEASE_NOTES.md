@@ -28,6 +28,10 @@ missing checkouts cannot delete ahead branches without explicit force.
 **Fixed:** Identity-specific review worktrees use collision-resistant names and
 resource IDs, while existing unhashed identity worktrees remain idempotent.
 
+**Fixed:** Retrying review preparation preserves local descendant commits, and
+sync keeps exact-name upstream branches local-owned while still rejecting Git
+namespace prefix conflicts.
+
 **Changed:** Detached, identity-verified worktrees remain eligible for refresh,
 and analysis treats local descendants of the latest PR head as current.
 
