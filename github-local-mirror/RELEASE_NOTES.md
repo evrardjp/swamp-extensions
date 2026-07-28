@@ -32,3 +32,5 @@ should use `sync -> refresh_pr_worktrees -> analyze_worktrees`. The
 worktrees. Consumers must read a PR association as
 `prLink?.prNumber ?? prNumber` so both new and legacy review snapshots remain
 supported; both values are absent for unattached development worktrees.
+`worktreeAnalysis.isPrHeadStale` is now nullable while a development worktree is
+unattached; consumers must test for `true` or `false` before using PR freshness.

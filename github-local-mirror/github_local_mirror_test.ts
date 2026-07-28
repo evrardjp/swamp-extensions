@@ -2890,6 +2890,18 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
       ]),
       upstream,
     );
+    await model.methods.create_worktree.execute({
+      branch: "future/topic",
+    }, context);
+    await run(source, ["branch", "future"]);
+    await run(source, ["remote", "add", "test-upstream", upstream]);
+    await run(source, ["push", "test-upstream", "future"]);
+
+    await assertRejects(
+      () => model.methods.sync.execute({}, context),
+      Error,
+      "mirrored branches conflict with registered development branches: future",
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
