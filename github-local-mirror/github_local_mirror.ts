@@ -1138,8 +1138,33 @@ async function fetchGitUnlocked(
       if (!ref || !sha) continue;
       localBranches.set(ref.slice("refs/heads/".length), { ref, sha });
     }
+    const worktreeRecords = await readWorktrees(g);
+    for (
+      const record of worktreeRecords.filter((candidate) =>
+        candidate.createdReason === "development" &&
+        candidate.filesystemState === "active"
+      )
+    ) {
+      if (!await exists(record.path)) continue;
+      const currentBranch = await gitInWorktree(record.path, [
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "HEAD",
+      ]);
+      if (currentBranch.code !== 0) {
+        throw new Error(
+          `registered development worktree is detached or branch inspection failed: ${record.path}`,
+        );
+      }
+      if (currentBranch.stdout.trim() !== record.branch) {
+        throw new Error(
+          `registered development worktree branch changed from ${record.branch} to ${currentBranch.stdout.trim()}: ${record.path}`,
+        );
+      }
+    }
     const registeredDevelopmentBranches = new Set(
-      (await readWorktrees(g)).filter((record) =>
+      worktreeRecords.filter((record) =>
         record.createdReason === "development" &&
         localBranches.has(record.branch)
       ).map((record) => record.branch),
@@ -2743,6 +2768,9 @@ async function createWorktreeUnlocked(
     creationBaseRef = `refs/remotes/pull/${args.prNumber}/head`;
   } else {
     branch = args.branch!;
+    if (branch === "review") {
+      throw new Error("development branch uses reserved name: review");
+    }
     const validBranch = await runGit(g.gitObjectPath, [
       "check-ref-format",
       "--branch",
@@ -3037,6 +3065,68 @@ async function verifyGitWorktreeRemoved(
   }
 }
 
+async function registeredBranchState(
+  g: GlobalArgs,
+  record: WorktreeRecord,
+  force: boolean,
+): Promise<{ sha: string; aheadCommitCount: number } | undefined> {
+  const branchRef = `refs/heads/${record.branch}`;
+  const exists = await runGit(g.gitObjectPath, [
+    "show-ref",
+    "--verify",
+    "--quiet",
+    branchRef,
+  ]);
+  if (exists.code === 1) return undefined;
+  if (exists.code !== 0) {
+    throw new Error(
+      exists.stderr.trim() || `git show-ref exited ${exists.code}`,
+    );
+  }
+  const resolved = await runGit(g.gitObjectPath, [
+    "rev-parse",
+    "--verify",
+    `${branchRef}^{commit}`,
+  ]);
+  const sha = resolved.stdout.trim();
+  if (resolved.code !== 0 || !/^[0-9a-f]{40,64}$/i.test(sha)) {
+    if (force) return undefined;
+    throw new Error(`cannot resolve worktree branch: ${record.branch}`);
+  }
+  const ahead = await runGit(g.gitObjectPath, [
+    "rev-list",
+    "--count",
+    `${record.creationBaseSha}..${sha}`,
+  ]);
+  if (ahead.code !== 0) {
+    if (force) return { sha, aheadCommitCount: 0 };
+    throw new Error(`git rev-list failed: ${ahead.stderr.trim()}`);
+  }
+  return {
+    sha,
+    aheadCommitCount: Number(ahead.stdout.trim() || "0"),
+  };
+}
+
+async function deleteRegisteredBranch(
+  g: GlobalArgs,
+  record: WorktreeRecord,
+  state: { sha: string; aheadCommitCount: number } | undefined,
+): Promise<void> {
+  if (!state) return;
+  const deletion = await runGit(g.gitObjectPath, [
+    "update-ref",
+    "-d",
+    `refs/heads/${record.branch}`,
+    state.sha,
+  ]);
+  if (deletion.code !== 0) {
+    throw new Error(
+      `worktree branch changed after safety checks and was retained: ${record.branch}`,
+    );
+  }
+}
+
 async function requireActiveWorktree(
   g: GlobalArgs,
   worktreeId: string,
@@ -3238,22 +3328,27 @@ async function removeWorktreeUnlocked(
       await writeWorktrees(g, records);
     }
     let branchDeleted = false;
+    let aheadCommitCount = 0;
     if (args.deleteBranch) {
-      const branchExists = await runGit(g.gitObjectPath, [
-        "show-ref",
-        "--verify",
-        `refs/heads/${record.branch}`,
-      ]);
-      if (branchExists.code === 0) {
-        await runGitOk(g.gitObjectPath, ["branch", "-D", record.branch]);
+      const branchState = await registeredBranchState(
+        g,
+        record,
+        args.force ?? false,
+      );
+      aheadCommitCount = branchState?.aheadCommitCount ?? 0;
+      if (!args.force && aheadCommitCount > 0) {
+        throw new Error(
+          `refusing to delete worktree branch with ${aheadCommitCount} local commits`,
+        );
       }
+      await deleteRegisteredBranch(g, record, branchState);
       branchDeleted = true;
     }
     return {
       dataHandles: [handle],
       worktreeId: record.id,
       dirty: false,
-      aheadCommitCount: 0,
+      aheadCommitCount,
       branchDeleted,
       alreadyRemoved: true,
     };
@@ -3264,6 +3359,9 @@ async function removeWorktreeUnlocked(
   const missing = !await exists(record.path);
   let dirty = false;
   let aheadCommitCount = 0;
+  const branchDeletionState = args.deleteBranch
+    ? await registeredBranchState(g, record, args.force ?? false)
+    : undefined;
   if (!missing) {
     const status = await gitInWorktree(record.path, [
       "status",
@@ -3285,6 +3383,10 @@ async function removeWorktreeUnlocked(
     if (ahead.code === 0) {
       aheadCommitCount = Number(ahead.stdout.trim() || "0");
     }
+    aheadCommitCount = Math.max(
+      aheadCommitCount,
+      branchDeletionState?.aheadCommitCount ?? 0,
+    );
     if (!args.force && (dirty || aheadCommitCount > 0)) {
       throw new Error(
         `refusing to remove worktree with ${dirty ? "local changes" : ""}${
@@ -3303,6 +3405,14 @@ async function removeWorktreeUnlocked(
     }
   } else {
     await verifyGitWorktreeRemoved(g, record.path, record.branch);
+    if (args.deleteBranch) {
+      aheadCommitCount = branchDeletionState?.aheadCommitCount ?? 0;
+      if (!args.force && aheadCommitCount > 0) {
+        throw new Error(
+          `refusing to delete worktree branch with ${aheadCommitCount} local commits`,
+        );
+      }
+    }
   }
   const updated: WorktreeRecord = {
     ...record,
@@ -3321,16 +3431,7 @@ async function removeWorktreeUnlocked(
   await writeWorktrees(g, records);
   let branchDeleted = false;
   if (args.deleteBranch) {
-    const deletion = await runGit(g.gitObjectPath, [
-      "branch",
-      "-D",
-      record.branch,
-    ]);
-    if (deletion.code !== 0) {
-      throw new Error(
-        `worktree removed but git branch delete failed: ${deletion.stderr.trim()}`,
-      );
-    }
+    await deleteRegisteredBranch(g, record, branchDeletionState);
     branchDeleted = true;
   }
   return {

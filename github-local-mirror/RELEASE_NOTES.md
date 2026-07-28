@@ -22,7 +22,12 @@ reconciling those branches as mirror-owned refs. Creation rejects branch names
 already owned by the configured mirror.
 
 **Fixed:** Concurrent worktree lifecycle methods no longer lose registry
-updates, and interrupted PR-head materialization remains registered for retry.
+updates, interrupted PR-head materialization remains registered for retry, and
+missing checkouts cannot delete ahead branches without explicit force.
+
+**Changed:** The `review` branch name is reserved for managed PR worktrees. Sync
+fails safely when a registered development worktree was renamed outside the
+model instead of pruning its current branch.
 
 **Upgrade note:** Existing worktree registry records are decoded as review
 worktrees and remain compatible. `prepare_worktree` and
