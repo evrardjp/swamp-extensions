@@ -2740,8 +2740,11 @@ async function writeWorktrees(
   );
 }
 
-function identitySuffix(identity?: string): string {
-  return identity ? `-${safeName("", [identity])}` : "";
+async function identitySuffix(identity?: string): Promise<string> {
+  if (!identity) return "";
+  const label = safeName("", [identity]).slice(0, 80);
+  const hash = await hashPrefix(identity);
+  return `-${label ? `${label}-` : ""}${hash}`;
 }
 
 async function readGitWorktreeId(g: GlobalArgs, path: string): Promise<string> {
@@ -2942,9 +2945,9 @@ async function createWorktreeUnlocked(
     const validated = await readValidatedPrHead(g, args.prNumber!);
     pr = validated.pr;
     headSha = validated.headSha;
-    suffix = `pr-${args.prNumber}-patchhead-${shortSha(headSha)}${
-      identitySuffix(args.identity)
-    }`;
+    suffix = `pr-${args.prNumber}-patchhead-${
+      shortSha(headSha)
+    }${await identitySuffix(args.identity)}`;
     branch = `review/${suffix}`;
     creationBaseRef = `refs/remotes/pull/${args.prNumber}/head`;
   } else {
@@ -2994,6 +2997,7 @@ async function createWorktreeUnlocked(
   const proposedRecord: WorktreeRecord = {
     id: isReview
       ? safeName("worktree", [
+        args.identity ? await hashPrefix(args.identity) : undefined,
         repoFullName(g),
         args.prNumber,
         shortSha(headSha),
@@ -3041,7 +3045,7 @@ async function createWorktreeUnlocked(
     record.filesystemState === "active" &&
     (comparablePaths.get(record.id) === path || record.branch === branch)
   );
-  const existing = collisions.find((record) =>
+  const collisionExisting = collisions.find((record) =>
     comparablePaths.get(record.id) === path && record.branch === branch &&
     record.identity === args.identity && record.createdReason ===
       (isReview ? "review" : "development") &&
@@ -3052,26 +3056,39 @@ async function createWorktreeUnlocked(
         record.prLink?.headShaAtAttachment === headSha
       : true)
   );
+  const logicalExisting = isReview
+    ? records.find((record) =>
+      record.filesystemState === "active" && record.repo === repoFullName(g) &&
+      record.createdReason === "review" &&
+      record.identity === args.identity &&
+      record.creationBaseSha === headSha &&
+      record.prLink?.prNumber === args.prNumber &&
+      record.prLink?.headShaAtAttachment === headSha
+    )
+    : undefined;
+  const existing = collisionExisting ?? logicalExisting;
   if (collisions.length > 0 && !existing) {
     throw new Error(`worktree branch or path conflicts with ${branch}`);
   }
   if (existing) {
-    if (!await exists(path)) {
-      throw new Error(`registered worktree path is missing: ${path}`);
+    const existingPath = comparablePaths.get(existing.id) ?? existing.path;
+    const existingBranch = existing.branch;
+    if (!await exists(existingPath)) {
+      throw new Error(`registered worktree path is missing: ${existingPath}`);
     }
     const gitWorktreeId = existing.gitWorktreeId ??
-      await readGitWorktreeId(g, path);
+      await readGitWorktreeId(g, existingPath);
     const gitWorktreeToken = existing.gitWorktreeToken ??
       await ensureGitWorktreeToken(g, gitWorktreeId);
     await verifyRegisteredWorktree(
       g,
-      path,
-      branch,
+      existingPath,
+      existingBranch,
       false,
       gitWorktreeId,
       gitWorktreeToken,
     );
-    if (isReview && await worktreeHead(path) !== headSha) {
+    if (isReview && await worktreeHead(existingPath) !== headSha) {
       throw new Error(
         `existing review worktree HEAD does not match mirrored PR head ${headSha}`,
       );
@@ -3079,16 +3096,16 @@ async function createWorktreeUnlocked(
     const branchHead = (await runGitOk(g.gitObjectPath, [
       "rev-parse",
       "--verify",
-      `refs/heads/${branch}`,
+      `refs/heads/${existingBranch}`,
     ])).trim();
     if (isReview && branchHead !== headSha) {
       throw new Error(
-        `existing review branch ${branch} does not match mirrored PR head ${headSha}`,
+        `existing review branch ${existingBranch} does not match mirrored PR head ${headSha}`,
       );
     }
     const published = {
       ...existing,
-      path,
+      path: existingPath,
       gitWorktreeId,
       gitWorktreeToken,
       snapshotPending: false,
@@ -3110,8 +3127,8 @@ async function createWorktreeUnlocked(
     return {
       dataHandles: [handle],
       worktreeId: existing.id,
-      path,
-      branch,
+      path: existingPath,
+      branch: existingBranch,
       baseHeadSha: headSha,
       createdReason: existing.createdReason,
       contributorRemote: pr?.remoteName,
@@ -3931,11 +3948,24 @@ async function analyzeWorktrees(_args: Record<string, never>, ctx: Context) {
     const candidates = candidateResult.matches;
     const candidate = candidates.length === 1 ? candidates[0] : undefined;
     const candidateMatch = candidate ? candidateResult.matchType : undefined;
-    const isPrHeadStale = record.prLink
-      ? latest && inspected.currentHeadSha
-        ? latest !== inspected.currentHeadSha
-        : null
-      : null;
+    let isPrHeadStale: boolean | null = null;
+    if (record.prLink && latest && inspected.currentHeadSha) {
+      const containsLatest = await gitInWorktree(record.path, [
+        "merge-base",
+        "--is-ancestor",
+        latest,
+        "HEAD",
+      ]);
+      if (containsLatest.code === 0) isPrHeadStale = false;
+      else if (containsLatest.code === 1) isPrHeadStale = true;
+      else {
+        analysisComplete = false;
+        errors.push(
+          containsLatest.stderr.trim() ||
+            `git merge-base --is-ancestor exited ${containsLatest.code}`,
+        );
+      }
+    }
     const recommendedAction = inspected.missing
       ? "remove-or-recreate-worktree-record"
       : !analysisComplete
@@ -4646,11 +4676,13 @@ async function refreshPrWorktreesUnlocked(
     for (const record of linked) {
       try {
         if (await exists(record.path)) {
+          const allowDetached = record.gitWorktreeId !== undefined &&
+            record.gitWorktreeToken !== undefined;
           await verifyRegisteredWorktree(
             g,
             record.path,
             record.branch,
-            false,
+            allowDetached,
             record.gitWorktreeId,
             record.gitWorktreeToken,
           );

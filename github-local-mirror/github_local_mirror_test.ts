@@ -1339,7 +1339,7 @@ Deno.test("attach_worktree records the mirrored head when local HEAD is ahead", 
 });
 
 Deno.test("refresh recognizes an updated descendant with an exact identity", async () => {
-  const { root, context } = await tempContext();
+  const { root, writes, context } = await tempContext();
   const oldHead = await createMirroredPrRef(
     root,
     context.globalArgs.gitObjectPath,
@@ -1436,6 +1436,12 @@ Deno.test("refresh recognizes an updated descendant with an exact identity", asy
     stderr: "piped",
   }).output();
   assertEquals(localCommit.code, 0);
+  const detached = await new Deno.Command("git", {
+    cwd: worktree.path,
+    args: ["checkout", "--detach", "HEAD"],
+    stderr: "piped",
+  }).output();
+  assertEquals(detached.code, 0);
 
   const refreshed = await model.methods.refresh_pr_worktrees.execute({
     identity,
@@ -1454,6 +1460,96 @@ Deno.test("refresh recognizes an updated descendant with an exact identity", asy
   assertEquals(registry.length, 1);
   assertEquals(registry[0].identity, identity);
   assertEquals(registry[0].revisionState, "current");
+
+  writes.length = 0;
+  await model.methods.analyze_worktrees.execute({}, context);
+  const analysis = writes.find((write) =>
+    write.specName === "worktreeAnalysis" &&
+    write.name === worktree.worktreeId
+  );
+  assertEquals(analysis?.data.isPrHeadStale, false);
+  assertEquals(
+    analysis?.data.recommendedAction,
+    "push-or-record-local-commits",
+  );
+});
+
+Deno.test("review identities with the same normalized name remain distinct", async () => {
+  const { root, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    66,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/66`, {
+    recursive: true,
+  });
+  await Deno.writeTextFile(
+    `${context.globalArgs.artifactRoot}/prs/66/current.json`,
+    JSON.stringify({
+      number: 66,
+      state: "open",
+      merged: false,
+      headSha,
+      observedAt: "2026-07-23T00:00:00.000Z",
+    }),
+  );
+
+  const slash = await model.methods.prepare_worktree.execute({
+    prNumber: 66,
+    identity: "foo/bar",
+  }, context);
+  const legacySuffix = `pr-66-patchhead-${headSha.slice(0, 12)}-foo-bar`;
+  const legacyBranch = `review/${legacySuffix}`;
+  const legacyPath = `${context.globalArgs.workspaceRoot}/${legacySuffix}`;
+  const rename = await new Deno.Command("git", {
+    cwd: slash.path,
+    args: ["branch", "-m", legacyBranch],
+    stderr: "piped",
+  }).output();
+  assertEquals(rename.code, 0);
+  const move = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "worktree",
+      "move",
+      slash.path,
+      legacyPath,
+    ],
+    stderr: "piped",
+  }).output();
+  assertEquals(move.code, 0);
+  const registryPath =
+    `${context.globalArgs.artifactRoot}/worktrees/index.json`;
+  const legacyRegistry = JSON.parse(await Deno.readTextFile(registryPath));
+  legacyRegistry[0].id = `worktree-owner-repo-66-${
+    headSha.slice(0, 12)
+  }-foo-bar`;
+  legacyRegistry[0].path = legacyPath;
+  legacyRegistry[0].branch = legacyBranch;
+  await Deno.writeTextFile(registryPath, JSON.stringify(legacyRegistry));
+
+  const replayed = await model.methods.prepare_worktree.execute({
+    prNumber: 66,
+    identity: "foo/bar",
+  }, context);
+  assertEquals(replayed.path, legacyPath);
+  assertEquals(
+    JSON.parse(await Deno.readTextFile(registryPath)).length,
+    1,
+  );
+  const dash = await model.methods.prepare_worktree.execute({
+    prNumber: 66,
+    identity: "foo-bar",
+  }, context);
+
+  assertEquals(slash.path === dash.path, false);
+  assertEquals(slash.branch === dash.branch, false);
+  const registry = JSON.parse(
+    await Deno.readTextFile(registryPath),
+  );
+  assertEquals(registry.length, 2);
 });
 
 Deno.test("attach_worktree rejects a renamed or replaced checkout", async () => {
