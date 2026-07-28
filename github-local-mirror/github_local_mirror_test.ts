@@ -1198,6 +1198,11 @@ Deno.test("refresh_pr_worktrees preserves merged worktrees with local-only commi
     cwd: worktree.path,
     args: ["commit", "-am", "local"],
   }).output();
+  const replayed = await model.methods.prepare_worktree.execute({
+    prNumber: 42,
+  }, context);
+  assertEquals(replayed.worktreeId, worktree.worktreeId);
+  assertEquals(replayed.path, worktree.path);
   await Deno.writeTextFile(
     prPath,
     JSON.stringify({
@@ -3788,8 +3793,42 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
     );
     await run(renamedWorktree.path, ["switch", "future/renamed"]);
     await run(renamedWorktree.path, ["branch", "-m", "future/topic"]);
-    await run(source, ["branch", "future"]);
     await run(source, ["remote", "add", "test-upstream", upstream]);
+    await run(source, ["branch", "future/topic"]);
+    await run(source, ["push", "test-upstream", "future/topic"]);
+    await run(renamedWorktree.path, [
+      "config",
+      "user.email",
+      "test@example.com",
+    ]);
+    await run(renamedWorktree.path, ["config", "user.name", "Test"]);
+    await run(renamedWorktree.path, ["config", "commit.gpgsign", "false"]);
+    await Deno.writeTextFile(
+      `${renamedWorktree.path}/local.txt`,
+      "local-owned\n",
+    );
+    await run(renamedWorktree.path, ["add", "local.txt"]);
+    await run(renamedWorktree.path, ["commit", "-m", "local-owned"]);
+    const localOwnedSha = await run(renamedWorktree.path, [
+      "rev-parse",
+      "HEAD",
+    ]);
+
+    const exactMatch = await model.methods.sync.execute({}, context);
+    assertEquals(exactMatch.complete, true);
+    assertEquals(
+      await run(root, [
+        "--git-dir",
+        context.globalArgs.gitObjectPath,
+        "rev-parse",
+        "refs/heads/future/topic",
+      ]),
+      localOwnedSha,
+    );
+
+    await run(source, ["branch", "-D", "future/topic"]);
+    await run(source, ["push", "test-upstream", ":future/topic"]);
+    await run(source, ["branch", "future"]);
     await run(source, ["push", "test-upstream", "future"]);
 
     await assertRejects(

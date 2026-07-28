@@ -1205,7 +1205,7 @@ async function fetchGitUnlocked(
     const developmentBranchConflicts = [...fetchedRemoteBranches.keys()].filter(
       (branch) =>
         [...registeredDevelopmentBranches].some((local) =>
-          refsConflict(branch, local)
+          branch !== local && refsConflict(branch, local)
         ),
     );
     if (developmentBranchConflicts.length > 0) {
@@ -3088,20 +3088,37 @@ async function createWorktreeUnlocked(
       gitWorktreeId,
       gitWorktreeToken,
     );
-    if (isReview && await worktreeHead(existingPath) !== headSha) {
-      throw new Error(
-        `existing review worktree HEAD does not match mirrored PR head ${headSha}`,
-      );
-    }
+    const checkoutHead = await worktreeHead(existingPath);
     const branchHead = (await runGitOk(g.gitObjectPath, [
       "rev-parse",
       "--verify",
       `refs/heads/${existingBranch}`,
     ])).trim();
-    if (isReview && branchHead !== headSha) {
-      throw new Error(
-        `existing review branch ${existingBranch} does not match mirrored PR head ${headSha}`,
-      );
+    if (isReview) {
+      for (
+        const [description, descendant] of [
+          ["worktree HEAD", checkoutHead],
+          [`branch ${existingBranch}`, branchHead],
+        ] as const
+      ) {
+        const containsBase = await runGit(g.gitObjectPath, [
+          "merge-base",
+          "--is-ancestor",
+          headSha,
+          descendant,
+        ]);
+        if (containsBase.code === 1) {
+          throw new Error(
+            `existing review ${description} does not descend from mirrored PR head ${headSha}`,
+          );
+        }
+        if (containsBase.code !== 0) {
+          throw new Error(
+            containsBase.stderr.trim() ||
+              `git merge-base --is-ancestor exited ${containsBase.code}`,
+          );
+        }
+      }
     }
     const published = {
       ...existing,
