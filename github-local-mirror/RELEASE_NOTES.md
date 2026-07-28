@@ -25,6 +25,12 @@ already owned by the configured mirror.
 updates, interrupted PR-head materialization remains registered for retry, and
 missing checkouts cannot delete ahead branches without explicit force.
 
+**Fixed:** Identity-specific review worktrees use collision-resistant names and
+resource IDs, while existing unhashed identity worktrees remain idempotent.
+
+**Changed:** Detached, identity-verified worktrees remain eligible for refresh,
+and analysis treats local descendants of the latest PR head as current.
+
 **Changed:** The `review` branch name is reserved for managed PR worktrees. Sync
 fails safely when a registered development worktree was renamed outside the
 model instead of pruning its current branch.
