@@ -27,4 +27,8 @@ updates, and interrupted PR-head materialization remains registered for retry.
 **Upgrade note:** Existing worktree registry records are decoded as review
 worktrees and remain compatible. `prepare_worktree` and
 `close_merged_worktrees` remain available for existing callers; new automation
-should use `sync -> refresh_pr_worktrees -> analyze_worktrees`.
+should use `sync -> refresh_pr_worktrees -> analyze_worktrees`. The
+`worktreeSnapshot.prNumber` field is now optional for pre-PR development
+worktrees. Consumers must read a PR association as
+`prLink?.prNumber ?? prNumber` so both new and legacy review snapshots remain
+supported; both values are absent for unattached development worktrees.

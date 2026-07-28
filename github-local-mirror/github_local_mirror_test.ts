@@ -217,6 +217,29 @@ Deno.test("prepare_worktree uses mirrored PR data and records push hints", async
     ).length,
     1,
   );
+  const workspaceLink = `${root}/workspace-link`;
+  await Deno.symlink(context.globalArgs.workspaceRoot, workspaceLink);
+  const registryPath =
+    `${context.globalArgs.artifactRoot}/worktrees/index.json`;
+  const legacyRegistry = JSON.parse(await Deno.readTextFile(registryPath));
+  const legacyPath = `${workspaceLink}/${result.path.split("/").at(-1)}`;
+  legacyRegistry[0].path = legacyPath;
+  await Deno.writeTextFile(registryPath, JSON.stringify(legacyRegistry));
+  context.globalArgs.workspaceRoot = workspaceLink;
+
+  const normalized = await model.methods.prepare_worktree.execute({
+    prNumber: 42,
+    identity: "jp",
+  }, context);
+
+  assertEquals(
+    await Deno.realPath(normalized.path),
+    await Deno.realPath(result.path),
+  );
+  assertEquals(
+    JSON.parse(await Deno.readTextFile(registryPath))[0].path,
+    normalized.path,
+  );
 });
 
 Deno.test("create_worktree creates development branches and validates its source", async () => {
@@ -478,12 +501,12 @@ Deno.test("refresh auto-attaches a first lineage and materializes it in the same
   for (
     const [key, value] of [[
       "branch.feature/first-lineage.remote",
-      "fork-contributor",
+      "contributor",
     ], [
       "branch.feature/first-lineage.merge",
       "refs/heads/feature",
     ], [
-      "remote.fork-contributor.url",
+      "remote.contributor.url",
       "git@github.com:contributor/repo.git",
     ]]
   ) {
@@ -765,6 +788,30 @@ Deno.test("remove_worktree retries snapshot publication and branch deletion", as
   assertEquals(branch.code === 0, false);
 });
 
+Deno.test("force removal tolerates an unavailable creation base", async () => {
+  const { root, context } = await tempContext();
+  await createMirroredPrRef(root, context.globalArgs.gitObjectPath, 17);
+  const worktree = await model.methods.create_worktree.execute({
+    branch: "feature/unavailable-base",
+    baseRef: "refs/remotes/pull/17/head",
+  }, context);
+  const registryPath =
+    `${context.globalArgs.artifactRoot}/worktrees/index.json`;
+  const registry = JSON.parse(await Deno.readTextFile(registryPath));
+  registry[0].creationBaseSha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+  registry[0].baseHeadSha = registry[0].creationBaseSha;
+  await Deno.writeTextFile(registryPath, JSON.stringify(registry));
+  await Deno.writeTextFile(`${worktree.path}/untracked.txt`, "discard\n");
+
+  const removed = await model.methods.remove_worktree.execute({
+    worktreeId: worktree.worktreeId,
+    force: true,
+  }, context);
+
+  assertEquals(removed.aheadCommitCount, 0);
+  await assertRejects(() => Deno.stat(worktree.path), Deno.errors.NotFound);
+});
+
 Deno.test("refresh republishes only worktree snapshots marked pending", async () => {
   const { root, writes, context } = await tempContext();
   await createMirroredPrRef(root, context.globalArgs.gitObjectPath, 16);
@@ -809,6 +856,38 @@ Deno.test("refresh republishes only worktree snapshots marked pending", async ()
     JSON.parse(await Deno.readTextFile(registryPath))[0].snapshotPending,
     false,
   );
+});
+
+Deno.test("refresh is incomplete when development worktree inspection is skipped", async () => {
+  const { root, context } = await tempContext();
+  await createMirroredPrRef(root, context.globalArgs.gitObjectPath, 18);
+  const worktree = await model.methods.create_worktree.execute({
+    branch: "feature/missing-unlinked",
+    baseRef: "refs/remotes/pull/18/head",
+  }, context);
+  const removal = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "worktree",
+      "remove",
+      worktree.path,
+    ],
+    stderr: "piped",
+  }).output();
+  assertEquals(removal.code, 0);
+
+  const refreshed = await model.methods.refresh_pr_worktrees.execute(
+    {},
+    context,
+  );
+
+  assertEquals(refreshed.complete, false);
+  assertEquals(refreshed.actions, [{
+    action: "skipped",
+    worktreeId: worktree.worktreeId,
+    reason: "worktree-inspection-incomplete",
+  }]);
 });
 
 Deno.test("analyze_worktrees reports ambiguous exact-head PR candidates", async () => {
