@@ -1147,13 +1147,24 @@ async function fetchGitUnlocked(
     const localReviewBranches = [...localBranches.keys()].filter(
       (branch) => branch.startsWith("review/"),
     );
+    const developmentBranchConflicts = [...fetchedRemoteBranches.keys()].filter(
+      (branch) =>
+        [...registeredDevelopmentBranches].some((local) =>
+          refsConflict(branch, local)
+        ),
+    );
+    if (developmentBranchConflicts.length > 0) {
+      throw new Error(
+        `mirrored branches conflict with registered development branches: ${
+          developmentBranchConflicts.join(", ")
+        }`,
+      );
+    }
     const remoteBranches = new Map(
       [...fetchedRemoteBranches].filter(([branch]) =>
         branch !== "review" && !isManagedWorktreeBranch(branch) &&
         !localReviewBranches.some((local) => refsConflict(branch, local)) &&
-        ![...registeredDevelopmentBranches].some((local) =>
-          refsConflict(branch, local)
-        )
+        !registeredDevelopmentBranches.has(branch)
       ),
     );
     const remoteHead = await runGitOk(
