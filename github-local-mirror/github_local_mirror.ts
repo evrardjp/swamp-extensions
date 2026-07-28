@@ -2808,12 +2808,21 @@ async function createWorktreeUnlocked(
     snapshotPending: true,
   };
   const records = await readWorktrees(g);
+  const comparablePaths = new Map(
+    await Promise.all(records.map(async (record) => {
+      try {
+        return [record.id, await Deno.realPath(record.path)] as const;
+      } catch {
+        return [record.id, record.path] as const;
+      }
+    })),
+  );
   const collisions = records.filter((record) =>
     record.filesystemState === "active" &&
-    (record.path === path || record.branch === branch)
+    (comparablePaths.get(record.id) === path || record.branch === branch)
   );
   const existing = collisions.find((record) =>
-    record.path === path && record.branch === branch &&
+    comparablePaths.get(record.id) === path && record.branch === branch &&
     record.identity === args.identity && record.createdReason ===
       (isReview ? "review" : "development") &&
     record.creationBaseSha === headSha &&
@@ -2846,13 +2855,13 @@ async function createWorktreeUnlocked(
         `existing review branch ${branch} does not match mirrored PR head ${headSha}`,
       );
     }
-    const published = { ...existing, snapshotPending: false };
+    const published = { ...existing, path, snapshotPending: false };
     const handle = await ctx.writeResource(
       "worktreeSnapshot",
       existing.id,
       persistedWorktree(published),
     );
-    if (existing.snapshotPending) {
+    if (existing.snapshotPending || existing.path !== published.path) {
       const index = records.findIndex((record) => record.id === existing.id);
       records[index] = published;
       await writeWorktrees(g, records);
@@ -3259,10 +3268,12 @@ async function removeWorktreeUnlocked(
       "--count",
       `${record.creationBaseSha}..HEAD`,
     ]);
-    if (ahead.code !== 0) {
+    if (ahead.code !== 0 && !args.force) {
       throw new Error(`git rev-list failed: ${ahead.stderr.trim()}`);
     }
-    aheadCommitCount = Number(ahead.stdout.trim() || "0");
+    if (ahead.code === 0) {
+      aheadCommitCount = Number(ahead.stdout.trim() || "0");
+    }
     if (!args.force && (dirty || aheadCommitCount > 0)) {
       throw new Error(
         `refusing to remove worktree with ${dirty ? "local changes" : ""}${
@@ -3448,7 +3459,6 @@ function findPrCandidates(
   const upstreamMatches = inspected.upstreamRemote && inspected.upstreamRef &&
       inspected.upstreamRepository
     ? prs.filter((pr) =>
-      pr.remoteName === inspected.upstreamRemote &&
       `refs/heads/${pr.headRef}` === inspected.upstreamRef &&
       prRepositoryIdentities(pr).has(inspected.upstreamRepository!)
     )
@@ -4289,7 +4299,11 @@ async function refreshPrWorktreesUnlocked(
     finishedAt,
     identity: args.identity,
     dryRun,
-    complete: actions.every((action) => action.action !== "failed"),
+    complete: actions.every((action) =>
+      action.action !== "failed" &&
+      !(action.action === "skipped" &&
+        action.reason === "worktree-inspection-incomplete")
+    ),
     actions,
   };
   handles.push(
