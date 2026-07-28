@@ -614,6 +614,12 @@ function isManagedWorktreeBranch(branch: string): boolean {
   return /^review\/pr-\d+-patchhead-[0-9a-f]{12}(?:-.+)?$/i.test(branch);
 }
 
+function mirrorRemoteBranchPrefix(g: ParsedGlobalArgs): string {
+  return g.gitRemote === "pull" || g.gitRemote.startsWith("pull/")
+    ? `refs/swamp/remotes/${g.gitRemote}/`
+    : `refs/remotes/${g.gitRemote}/`;
+}
+
 function refsConflict(left: string, right: string): boolean {
   return left === right || left.startsWith(`${right}/`) ||
     right.startsWith(`${left}/`);
@@ -954,6 +960,41 @@ function worktreeIndexPath(g: GlobalArgs): string {
   return `${g.artifactRoot}/worktrees/index.json`;
 }
 
+async function withWorktreeRegistryLock<T>(
+  g: GlobalArgs,
+  operation: () => Promise<T>,
+  deadlineMs?: number,
+): Promise<T> {
+  const directory = `${g.artifactRoot}/worktrees`;
+  await ensureDir(directory);
+  const lockFile = await Deno.open(`${directory}/registry.lock`, {
+    create: true,
+    read: true,
+    write: true,
+  });
+  try {
+    if (deadlineMs) {
+      while (!await lockFile.tryLock(true)) {
+        const remaining = deadlineMs - Date.now();
+        if (remaining <= 0) {
+          throw new Error(
+            "sync budget exhausted while waiting for worktree registry lock",
+          );
+        }
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(50, remaining))
+        );
+      }
+    } else {
+      await lockFile.lock(true);
+    }
+    return await operation();
+  } finally {
+    await lockFile.unlock().catch(() => {});
+    lockFile.close();
+  }
+}
+
 async function readState(
   g: GlobalArgs,
 ): Promise<z.infer<typeof MirrorStateSchema>> {
@@ -1017,6 +1058,17 @@ async function fetchGit(
   g: ParsedGlobalArgs,
   deadlineMs?: number,
 ): Promise<void> {
+  await withWorktreeRegistryLock(
+    g,
+    () => fetchGitUnlocked(g, deadlineMs),
+    deadlineMs,
+  );
+}
+
+async function fetchGitUnlocked(
+  g: ParsedGlobalArgs,
+  deadlineMs?: number,
+): Promise<void> {
   if (!await exists(g.gitObjectPath)) {
     throw new Error(
       `gitObjectPath ${g.gitObjectPath} does not exist; create it with git init --bare or provide an existing bare repo`,
@@ -1041,10 +1093,7 @@ async function fetchGit(
     } else {
       await lockFile.lock(true);
     }
-    const remoteBranchPrefix = g.gitRemote === "pull" ||
-        g.gitRemote.startsWith("pull/")
-      ? `refs/swamp/remotes/${g.gitRemote}/`
-      : `refs/remotes/${g.gitRemote}/`;
+    const remoteBranchPrefix = mirrorRemoteBranchPrefix(g);
     await ensureGitRepo(g, deadlineMs);
     await runGitOk(g.gitObjectPath, [
       "config",
@@ -2640,14 +2689,25 @@ async function verifyRegisteredWorktree(
   }
 }
 
-async function createWorktree(
-  args: {
-    prNumber?: number;
-    branch?: string;
-    baseRef?: string;
-    identity?: string;
-  },
+type CreateWorktreeArgs = {
+  prNumber?: number;
+  branch?: string;
+  baseRef?: string;
+  identity?: string;
+};
+
+async function createWorktree(args: CreateWorktreeArgs, ctx: Context) {
+  const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  return await withWorktreeRegistryLock(
+    g,
+    () => createWorktreeUnlocked(args, ctx, g),
+  );
+}
+
+async function createWorktreeUnlocked(
+  args: CreateWorktreeArgs,
   ctx: Context,
+  g: ParsedGlobalArgs,
 ) {
   if ((args.prNumber === undefined) === (args.branch === undefined)) {
     throw new Error("exactly one of prNumber or branch is required");
@@ -2655,7 +2715,6 @@ async function createWorktree(
   if (args.prNumber !== undefined && args.baseRef !== undefined) {
     throw new Error("baseRef is only valid with branch");
   }
-  const g = GlobalArgsSchema.parse(ctx.globalArgs);
   const isReview = args.prNumber !== undefined;
   let pr: PrRecord | undefined;
   let headSha: string;
@@ -2680,6 +2739,16 @@ async function createWorktree(
     ]);
     if (validBranch.code !== 0) {
       throw new Error(`invalid branch name: ${branch}`);
+    }
+    const mirroredBranch = await runGit(g.gitObjectPath, [
+      "show-ref",
+      "--verify",
+      `${mirrorRemoteBranchPrefix(g)}${branch}`,
+    ]);
+    if (mirroredBranch.code === 0) {
+      throw new Error(
+        `development branch conflicts with mirrored branch: ${branch}`,
+      );
     }
     const baseRef = args.baseRef ?? "HEAD";
     creationBaseRef = baseRef;
@@ -2980,6 +3049,17 @@ async function attachWorktree(
   ctx: Context,
 ) {
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  return await withWorktreeRegistryLock(
+    g,
+    () => attachWorktreeUnlocked(args, ctx, g),
+  );
+}
+
+async function attachWorktreeUnlocked(
+  args: { worktreeId: string; prNumber: number },
+  ctx: Context,
+  g: ParsedGlobalArgs,
+) {
   const { records, record, index } = await requireActiveWorktree(
     g,
     args.worktreeId,
@@ -3059,6 +3139,17 @@ async function attachWorktree(
 
 async function detachWorktree(args: { worktreeId: string }, ctx: Context) {
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  return await withWorktreeRegistryLock(
+    g,
+    () => detachWorktreeUnlocked(args, ctx, g),
+  );
+}
+
+async function detachWorktreeUnlocked(
+  args: { worktreeId: string },
+  ctx: Context,
+  g: ParsedGlobalArgs,
+) {
   const { records, record, index } = await requireActiveWorktree(
     g,
     args.worktreeId,
@@ -3100,6 +3191,17 @@ async function removeWorktree(
   ctx: Context,
 ) {
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  return await withWorktreeRegistryLock(
+    g,
+    () => removeWorktreeUnlocked(args, ctx, g),
+  );
+}
+
+async function removeWorktreeUnlocked(
+  args: { worktreeId: string; force?: boolean; deleteBranch?: boolean },
+  ctx: Context,
+  g: ParsedGlobalArgs,
+) {
   const records = await readWorktrees(g);
   const index = records.findIndex((record) => record.id === args.worktreeId);
   if (index < 0) throw new Error(`unknown worktree: ${args.worktreeId}`);
@@ -3460,6 +3562,16 @@ async function closeMergedWorktrees(
   ctx: Context,
 ) {
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  return await withWorktreeRegistryLock(
+    g,
+    () => closeMergedWorktreesUnlocked(ctx, g),
+  );
+}
+
+async function closeMergedWorktreesUnlocked(
+  ctx: Context,
+  g: ParsedGlobalArgs,
+) {
   const startedAt = nowIso();
   const records = await readWorktrees(g);
   const activeRecords = records.filter((record) =>
@@ -3704,6 +3816,22 @@ async function refreshPrWorktrees(
   ctx: Context,
 ) {
   const g = GlobalArgsSchema.parse(ctx.globalArgs);
+  return await withWorktreeRegistryLock(
+    g,
+    () => refreshPrWorktreesUnlocked(args, ctx, g),
+  );
+}
+
+async function refreshPrWorktreesUnlocked(
+  args: {
+    identity?: string;
+    autoAttach?: boolean;
+    materialize?: boolean;
+    dryRun?: boolean;
+  },
+  ctx: Context,
+  g: ParsedGlobalArgs,
+) {
   const startedAt = nowIso();
   const autoAttach = args.autoAttach ?? true;
   const materialize = args.materialize ?? true;
@@ -4070,7 +4198,11 @@ async function refreshPrWorktrees(
             await writeWorktrees(g, records);
             registryChanged = false;
           }
-          const created = await createWorktree({ prNumber, identity }, ctx);
+          const created = await createWorktreeUnlocked(
+            { prNumber, identity },
+            ctx,
+            g,
+          );
           handles.push(...created.dataHandles);
           for (let index = changedSnapshots.length - 1; index >= 0; index--) {
             if (changedSnapshots[index].id === created.worktreeId) {
@@ -4084,6 +4216,24 @@ async function refreshPrWorktrees(
             record.identity === identity && record.revisionState === "current"
           )?.id;
         } catch (err) {
+          records = await readWorktrees(g);
+          const partial = records.find((record) =>
+            record.filesystemState === "active" &&
+            record.prLink?.prNumber === prNumber &&
+            record.identity === identity &&
+            record.prLink.headShaAtAttachment === prHeadSha
+          );
+          if (partial) {
+            for (
+              let index = changedSnapshots.length - 1;
+              index >= 0;
+              index--
+            ) {
+              if (changedSnapshots[index].id === partial.id) {
+                changedSnapshots.splice(index, 1);
+              }
+            }
+          }
           actions[actions.length - 1] = {
             action: "failed",
             prNumber,

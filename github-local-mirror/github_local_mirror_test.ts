@@ -326,6 +326,33 @@ Deno.test("create_worktree creates development branches and validates its source
   );
 });
 
+Deno.test("concurrent worktree creation preserves every registry record", async () => {
+  const { root, context } = await tempContext();
+  await createMirroredPrRef(root, context.globalArgs.gitObjectPath, 2);
+
+  const [first, second] = await Promise.all([
+    model.methods.create_worktree.execute(
+      { branch: "concurrent/first" },
+      context,
+    ),
+    model.methods.create_worktree.execute(
+      { branch: "concurrent/second" },
+      context,
+    ),
+  ]);
+
+  const registry = JSON.parse(
+    await Deno.readTextFile(
+      `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+    ),
+  );
+  assertEquals(registry.length, 2);
+  assertEquals(
+    new Set(registry.map((record: { id: string }) => record.id)),
+    new Set([first.worktreeId, second.worktreeId]),
+  );
+});
+
 Deno.test("legacy worktrees normalize for analysis without rewriting the registry", async () => {
   const { writes, context } = await tempContext();
   const indexPath = `${context.globalArgs.artifactRoot}/worktrees/index.json`;
@@ -1268,6 +1295,83 @@ Deno.test("refresh does not recreate explicitly removed open PR worktrees", asyn
   assertEquals(registry[0].filesystemState, "removed");
 });
 
+Deno.test("refresh preserves partial materialization for snapshot retry", async () => {
+  const { root, writes, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    54,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/54`, {
+    recursive: true,
+  });
+  await Deno.writeTextFile(
+    `${context.globalArgs.artifactRoot}/prs/54/current.json`,
+    JSON.stringify({
+      number: 54,
+      state: "open",
+      merged: false,
+      headSha,
+      observedAt: "2026-07-23T00:00:00.000Z",
+    }),
+  );
+  const original = await model.methods.prepare_worktree.execute({
+    prNumber: 54,
+  }, context);
+  const removed = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "worktree",
+      "remove",
+      original.path,
+    ],
+    stderr: "piped",
+  }).output();
+  assertEquals(removed.code, 0);
+  const originalWriteResource = context.writeResource;
+  let rejectActiveSnapshot = true;
+  context.writeResource = (specName, name, data) => {
+    if (
+      specName === "worktreeSnapshot" && data.filesystemState === "active" &&
+      rejectActiveSnapshot
+    ) {
+      rejectActiveSnapshot = false;
+      return Promise.reject(new Error("active snapshot unavailable"));
+    }
+    return originalWriteResource(specName, name, data);
+  };
+
+  const failed = await model.methods.refresh_pr_worktrees.execute({}, context);
+
+  assertEquals(failed.complete, false);
+  assertEquals(failed.actions.at(-1)?.reason, "materialization-failed");
+  const registryPath =
+    `${context.globalArgs.artifactRoot}/worktrees/index.json`;
+  let registry = JSON.parse(await Deno.readTextFile(registryPath));
+  assertEquals(registry.length, 1);
+  assertEquals(registry[0].filesystemState, "active");
+  assertEquals(registry[0].snapshotPending, true);
+  assertEquals((await Deno.stat(registry[0].path)).isDirectory, true);
+
+  context.writeResource = originalWriteResource;
+  writes.length = 0;
+  const retried = await model.methods.refresh_pr_worktrees.execute({}, context);
+
+  assertEquals(retried.complete, true);
+  assertEquals(
+    retried.actions.some((action) => action.action === "materialized"),
+    false,
+  );
+  registry = JSON.parse(await Deno.readTextFile(registryPath));
+  assertEquals(registry[0].snapshotPending, false);
+  assertEquals(
+    writes.filter((write) => write.specName === "worktreeSnapshot").at(-1)?.data
+      .filesystemState,
+    "active",
+  );
+});
+
 Deno.test("refresh rejects metadata and local ref PR head divergence", async () => {
   for (const divergence of ["metadata-ahead", "ref-ahead"] as const) {
     const { root, context } = await tempContext();
@@ -2140,6 +2244,30 @@ Deno.test("sync budget expires while waiting for the git lock", async () => {
   }
 });
 
+Deno.test("sync budget expires while waiting for the worktree registry lock", async () => {
+  const { context } = await tempContext();
+  const lockDirectory = `${context.globalArgs.artifactRoot}/worktrees`;
+  await Deno.mkdir(lockDirectory, { recursive: true });
+  const lockFile = await Deno.open(`${lockDirectory}/registry.lock`, {
+    create: true,
+    read: true,
+    write: true,
+  });
+  await lockFile.lock(true);
+  const startedAt = performance.now();
+  try {
+    await assertRejects(
+      () => model.methods.sync.execute({ budgetSeconds: 1 }, context),
+      Error,
+      "sync budget exhausted while waiting for worktree registry lock",
+    );
+    assertEquals(performance.now() - startedAt < 2_000, true);
+  } finally {
+    await lockFile.unlock();
+    lockFile.close();
+  }
+});
+
 Deno.test("sync writes one issue collection status when its budget expires", async () => {
   const { root, writes, context } = await tempContext();
   const upstream = `${root}/upstream.git`;
@@ -2607,6 +2735,11 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
         record.id === defaultWorktree.worktreeId
       ).creationBaseRef,
       "HEAD",
+    );
+    await assertRejects(
+      () => model.methods.create_worktree.execute({ branch: "trunk" }, context),
+      Error,
+      "conflicts with mirrored branch",
     );
     await assertRejects(
       () =>

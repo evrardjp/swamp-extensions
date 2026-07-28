@@ -18,7 +18,11 @@ worktree reconciliation when synchronization returns partial results.
 
 **Changed:** Development worktrees now default to the mirrored repository's
 symbolic `HEAD`, and sync preserves their registered local branches instead of
-reconciling those branches as mirror-owned refs.
+reconciling those branches as mirror-owned refs. Creation rejects branch names
+already owned by the configured mirror.
+
+**Fixed:** Concurrent worktree lifecycle methods no longer lose registry
+updates, and interrupted PR-head materialization remains registered for retry.
 
 **Upgrade note:** Existing worktree registry records are decoded as review
 worktrees and remain compatible. `prepare_worktree` and
