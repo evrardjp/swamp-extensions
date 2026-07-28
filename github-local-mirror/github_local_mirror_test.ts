@@ -672,6 +672,55 @@ Deno.test("create_worktree recovers a validated orphan after publication failure
   assertEquals(registry[0].prLink.headShaAtAttachment, headSha);
 });
 
+Deno.test("create_worktree recovers an advanced development orphan", async () => {
+  const { root, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    60,
+  );
+  const created = await model.methods.create_worktree.execute({
+    branch: "feature/advanced-orphan",
+    baseRef: "refs/remotes/pull/60/head",
+  }, context);
+  await Deno.remove(
+    `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+  );
+  for (
+    const [key, value] of [["user.email", "test@example.com"], [
+      "user.name",
+      "Test",
+    ], ["commit.gpgsign", "false"]]
+  ) {
+    await new Deno.Command("git", {
+      cwd: created.path,
+      args: ["config", key, value],
+    }).output();
+  }
+  await Deno.writeTextFile(`${created.path}/README.md`, "advanced orphan\n");
+  const commit = await new Deno.Command("git", {
+    cwd: created.path,
+    args: ["commit", "-am", "advance orphan"],
+    stderr: "piped",
+  }).output();
+  assertEquals(commit.code, 0);
+
+  const recovered = await model.methods.create_worktree.execute({
+    branch: "feature/advanced-orphan",
+    baseRef: "refs/remotes/pull/60/head",
+  }, context);
+
+  assertEquals(recovered.path, created.path);
+  assertEquals(recovered.baseHeadSha, headSha);
+  const registry = JSON.parse(
+    await Deno.readTextFile(
+      `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+    ),
+  );
+  assertEquals(registry.length, 1);
+  assertEquals(registry[0].creationBaseSha, headSha);
+});
+
 Deno.test("attach and detach replay intended registry state after snapshot failures", async () => {
   const { root, context } = await tempContext();
   const headSha = await createMirroredPrRef(
@@ -820,6 +869,32 @@ Deno.test("force removal tolerates an unavailable creation base", async () => {
   }, context);
 
   assertEquals(removed.aheadCommitCount, 0);
+  await assertRejects(() => Deno.stat(worktree.path), Deno.errors.NotFound);
+});
+
+Deno.test("force removal accepts a verified detached worktree", async () => {
+  const { root, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    65,
+  );
+  const worktree = await model.methods.create_worktree.execute({
+    branch: "feature/detached-removal",
+    baseRef: "refs/remotes/pull/65/head",
+  }, context);
+  const detached = await new Deno.Command("git", {
+    cwd: worktree.path,
+    args: ["checkout", "--detach", headSha],
+    stderr: "piped",
+  }).output();
+  assertEquals(detached.code, 0);
+
+  await model.methods.remove_worktree.execute({
+    worktreeId: worktree.worktreeId,
+    force: true,
+  }, context);
+
   await assertRejects(() => Deno.stat(worktree.path), Deno.errors.NotFound);
 });
 
@@ -1263,6 +1338,124 @@ Deno.test("attach_worktree records the mirrored head when local HEAD is ahead", 
   assertEquals(registry[0].revisionState, "current");
 });
 
+Deno.test("refresh recognizes an updated descendant with an exact identity", async () => {
+  const { root, context } = await tempContext();
+  const oldHead = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    61,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/61`, {
+    recursive: true,
+  });
+  const prPath = `${context.globalArgs.artifactRoot}/prs/61/current.json`;
+  await Deno.writeTextFile(
+    prPath,
+    JSON.stringify({
+      number: 61,
+      state: "open",
+      merged: false,
+      headSha: oldHead,
+      observedAt: "2026-07-23T00:00:00.000Z",
+    }),
+  );
+  const identity = "team\0a";
+  const worktree = await model.methods.prepare_worktree.execute({
+    prNumber: 61,
+    identity,
+  }, context);
+  const source = `${root}/source-61`;
+  await Deno.writeTextFile(`${source}/README.md`, "new PR revision\n");
+  const upstreamCommit = await new Deno.Command("git", {
+    cwd: source,
+    args: ["commit", "-am", "new PR revision"],
+    stderr: "piped",
+  }).output();
+  assertEquals(upstreamCommit.code, 0);
+  const newHeadOutput = await new Deno.Command("git", {
+    cwd: source,
+    args: ["rev-parse", "HEAD"],
+    stdout: "piped",
+  }).output();
+  const newHead = new TextDecoder().decode(newHeadOutput.stdout).trim();
+  const fetch = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "fetch",
+      source,
+      "HEAD",
+    ],
+    stderr: "piped",
+  }).output();
+  assertEquals(fetch.code, 0);
+  const update = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "update-ref",
+      "refs/remotes/pull/61/head",
+      newHead,
+    ],
+  }).output();
+  assertEquals(update.code, 0);
+  await Deno.writeTextFile(
+    prPath,
+    JSON.stringify({
+      number: 61,
+      state: "open",
+      merged: false,
+      headSha: newHead,
+      observedAt: "2026-07-23T01:00:00.000Z",
+    }),
+  );
+  const reset = await new Deno.Command("git", {
+    cwd: worktree.path,
+    args: ["reset", "--hard", newHead],
+    stderr: "piped",
+  }).output();
+  assertEquals(reset.code, 0);
+  for (
+    const [key, value] of [["user.email", "test@example.com"], [
+      "user.name",
+      "Test",
+    ], ["commit.gpgsign", "false"]]
+  ) {
+    await new Deno.Command("git", {
+      cwd: worktree.path,
+      args: ["config", key, value],
+    }).output();
+  }
+  await Deno.writeTextFile(
+    `${worktree.path}/README.md`,
+    "local after update\n",
+  );
+  const localCommit = await new Deno.Command("git", {
+    cwd: worktree.path,
+    args: ["commit", "-am", "local after update"],
+    stderr: "piped",
+  }).output();
+  assertEquals(localCommit.code, 0);
+
+  const refreshed = await model.methods.refresh_pr_worktrees.execute({
+    identity,
+  }, context);
+
+  assertEquals(refreshed.complete, true);
+  assertEquals(
+    refreshed.actions.some((action) => action.action === "materialized"),
+    false,
+  );
+  const registry = JSON.parse(
+    await Deno.readTextFile(
+      `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+    ),
+  );
+  assertEquals(registry.length, 1);
+  assertEquals(registry[0].identity, identity);
+  assertEquals(registry[0].revisionState, "current");
+});
+
 Deno.test("attach_worktree rejects a renamed or replaced checkout", async () => {
   const { root, context } = await tempContext();
   const headSha = await createMirroredPrRef(
@@ -1287,6 +1480,28 @@ Deno.test("attach_worktree rejects a renamed or replaced checkout", async () => 
     branch: "feature/renamed-before-attachment",
     baseRef: "refs/remotes/pull/57/head",
   }, context);
+  const registryPath =
+    `${context.globalArgs.artifactRoot}/worktrees/index.json`;
+  const originalRegistry = await Deno.readTextFile(registryPath);
+  const tamperedRegistry = JSON.parse(originalRegistry);
+  tamperedRegistry[0].gitWorktreeId = "../escape";
+  delete tamperedRegistry[0].gitWorktreeToken;
+  await Deno.mkdir(`${context.globalArgs.gitObjectPath}/escape`);
+  await Deno.writeTextFile(registryPath, JSON.stringify(tamperedRegistry));
+  await assertRejects(
+    () =>
+      model.methods.attach_worktree.execute({
+        worktreeId: worktree.worktreeId,
+        prNumber: 57,
+      }, context),
+    Error,
+    "invalid registered Git worktree ID",
+  );
+  await assertRejects(
+    () => Deno.stat(`${context.globalArgs.gitObjectPath}/escape/swamp-token`),
+    Deno.errors.NotFound,
+  );
+  await Deno.writeTextFile(registryPath, originalRegistry);
   const renamed = await new Deno.Command("git", {
     cwd: worktree.path,
     args: ["branch", "-m", "feature/renamed-externally"],
@@ -1586,6 +1801,173 @@ Deno.test("refresh does not report a locked merged worktree as removed", async (
   );
 });
 
+Deno.test("refresh does not remove a replacement checkout", async () => {
+  const { root, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    64,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/64`, {
+    recursive: true,
+  });
+  const prPath = `${context.globalArgs.artifactRoot}/prs/64/current.json`;
+  await Deno.writeTextFile(
+    prPath,
+    JSON.stringify({
+      number: 64,
+      state: "open",
+      merged: false,
+      headSha,
+      observedAt: "2026-07-23T00:00:00.000Z",
+    }),
+  );
+  const original = await model.methods.prepare_worktree.execute({
+    prNumber: 64,
+  }, context);
+  const removeOriginal = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "worktree",
+      "remove",
+      original.path,
+    ],
+    stderr: "piped",
+  }).output();
+  assertEquals(removeOriginal.code, 0);
+  const branch = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "branch",
+      "replacement",
+      headSha,
+    ],
+  }).output();
+  assertEquals(branch.code, 0);
+  const addReplacement = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "worktree",
+      "add",
+      original.path,
+      "replacement",
+    ],
+    stderr: "piped",
+  }).output();
+  assertEquals(addReplacement.code, 0);
+  const detachReplacement = await new Deno.Command("git", {
+    cwd: original.path,
+    args: ["checkout", "--detach", headSha],
+    stderr: "piped",
+  }).output();
+  assertEquals(detachReplacement.code, 0);
+  await Deno.writeTextFile(
+    prPath,
+    JSON.stringify({
+      number: 64,
+      state: "closed",
+      merged: true,
+      headSha,
+      observedAt: "2026-07-23T01:00:00.000Z",
+    }),
+  );
+
+  const result = await model.methods.refresh_pr_worktrees.execute({}, context);
+
+  assertEquals(result.complete, false);
+  assertEquals(result.actions.map((action) => action.action), ["failed"]);
+  assertEquals((await Deno.stat(original.path)).isDirectory, true);
+  const replacementHead = await new Deno.Command("git", {
+    cwd: original.path,
+    args: ["rev-parse", "HEAD"],
+    stdout: "piped",
+  }).output();
+  assertEquals(
+    new TextDecoder().decode(replacementHead.stdout).trim(),
+    headSha,
+  );
+});
+
+Deno.test("refresh retries materialization after worktree creation fails", async () => {
+  const { root, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    62,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/62`, {
+    recursive: true,
+  });
+  await Deno.writeTextFile(
+    `${context.globalArgs.artifactRoot}/prs/62/current.json`,
+    JSON.stringify({
+      number: 62,
+      state: "open",
+      merged: false,
+      headSha,
+      observedAt: "2026-07-23T00:00:00.000Z",
+    }),
+  );
+  const worktree = await model.methods.prepare_worktree.execute({
+    prNumber: 62,
+  }, context);
+  const removed = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "worktree",
+      "remove",
+      worktree.path,
+    ],
+    stderr: "piped",
+  }).output();
+  assertEquals(removed.code, 0);
+  await Deno.chmod(context.globalArgs.workspaceRoot, 0o500);
+  let failed;
+  try {
+    failed = await model.methods.refresh_pr_worktrees.execute({}, context);
+  } finally {
+    await Deno.chmod(context.globalArgs.workspaceRoot, 0o700);
+  }
+  assertEquals(failed.complete, false);
+  assertEquals(failed.actions.at(-1)?.reason, "materialization-failed");
+  let registry = JSON.parse(
+    await Deno.readTextFile(
+      `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+    ),
+  );
+  assertEquals(registry[0].filesystemState, "removed");
+  assertEquals(registry[0].materializationPending, true);
+
+  const retried = await model.methods.refresh_pr_worktrees.execute({}, context);
+
+  assertEquals(retried.complete, true);
+  assertEquals(
+    retried.actions.some((action) => action.action === "materialized"),
+    true,
+  );
+  registry = JSON.parse(
+    await Deno.readTextFile(
+      `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+    ),
+  );
+  assertEquals(
+    registry.filter((record: { filesystemState: string }) =>
+      record.filesystemState === "active"
+    ).length,
+    1,
+  );
+  assertEquals(
+    registry.some((record: { materializationPending?: boolean }) =>
+      record.materializationPending === true
+    ),
+    false,
+  );
+});
+
 Deno.test("refresh rematerializes an unchanged current PR after its worktree vanishes", async () => {
   const { root, writes, context } = await tempContext();
   const headSha = await createMirroredPrRef(
@@ -1761,6 +2143,87 @@ Deno.test("refresh preserves partial materialization for snapshot retry", async 
     writes.filter((write) => write.specName === "worktreeSnapshot").at(-1)?.data
       .filesystemState,
     "active",
+  );
+});
+
+Deno.test("refresh isolates malformed PR artifacts", async () => {
+  const { root, writes, context } = await tempContext();
+  const headSha = await createMirroredPrRef(
+    root,
+    context.globalArgs.gitObjectPath,
+    63,
+  );
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/63`, {
+    recursive: true,
+  });
+  await Deno.writeTextFile(
+    `${context.globalArgs.artifactRoot}/prs/63/current.json`,
+    JSON.stringify({
+      number: 63,
+      state: "open",
+      merged: false,
+      headSha,
+      observedAt: "2026-07-23T00:00:00.000Z",
+    }),
+  );
+  await model.methods.prepare_worktree.execute({ prNumber: 63 }, context);
+  const development = await model.methods.create_worktree.execute({
+    branch: "feature/malformed-artifact",
+    baseRef: "refs/remotes/pull/63/head",
+  }, context);
+  await Deno.mkdir(`${context.globalArgs.artifactRoot}/prs/999`, {
+    recursive: true,
+  });
+  await Deno.writeTextFile(
+    `${context.globalArgs.artifactRoot}/prs/999/current.json`,
+    JSON.stringify({
+      number: 999,
+      headSha: 42,
+      observedAt: "2026-07-23T00:00:00.000Z",
+    }),
+  );
+
+  const refreshed = await model.methods.refresh_pr_worktrees.execute(
+    {},
+    context,
+  );
+
+  assertEquals(refreshed.complete, false);
+  assertEquals(
+    refreshed.actions.some((action) =>
+      action.reason === "pr-artifact-unreadable" && action.prNumber === 999
+    ),
+    true,
+  );
+  assertEquals(
+    refreshed.actions.some((action) =>
+      action.worktreeId === development.worktreeId &&
+      action.reason === "pr-candidate-set-incomplete"
+    ),
+    true,
+  );
+  const registry = JSON.parse(
+    await Deno.readTextFile(
+      `${context.globalArgs.artifactRoot}/worktrees/index.json`,
+    ),
+  );
+  assertEquals(
+    registry.find((record: { id: string }) =>
+      record.id === development.worktreeId
+    ).prLink,
+    undefined,
+  );
+
+  writes.length = 0;
+  await model.methods.analyze_worktrees.execute({}, context);
+  const analysis = writes.find((write) =>
+    write.specName === "worktreeAnalysis" &&
+    write.name === development.worktreeId
+  );
+  assertEquals(analysis?.data.analysisComplete, false);
+  assertStringIncludes(
+    (analysis?.data.errors as string[]).join("\n"),
+    "PR 999 artifact unreadable",
   );
 });
 

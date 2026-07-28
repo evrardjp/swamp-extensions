@@ -29,6 +29,10 @@ missing checkouts cannot delete ahead branches without explicit force.
 fails safely when a registered development worktree was renamed outside the
 model instead of pruning its current branch.
 
+**Changed:** Worktree cleanup verifies a persistent checkout identity before
+removal, and malformed PR artifacts are isolated instead of aborting all
+analysis and reconciliation.
+
 **Upgrade note:** Existing worktree registry records are decoded as review
 worktrees and remain compatible. `prepare_worktree` and
 `close_merged_worktrees` remain available for existing callers; new automation
@@ -39,3 +43,6 @@ worktrees. Consumers must read a PR association as
 supported; both values are absent for unattached development worktrees.
 `worktreeAnalysis.isPrHeadStale` is now nullable while a development worktree is
 unattached; consumers must test for `true` or `false` before using PR freshness.
+Legacy worktrees without a checkout identity are retained by automatic cleanup;
+re-run `prepare_worktree` or the matching `create_worktree`, or explicitly run
+`attach_worktree`, to validate the checkout and backfill its identity.
