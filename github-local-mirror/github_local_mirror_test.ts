@@ -347,6 +347,11 @@ Deno.test("create_worktree creates development branches and validates its source
     Error,
     "invalid branch name",
   );
+  await assertRejects(
+    () => model.methods.create_worktree.execute({ branch: "review" }, context),
+    Error,
+    "reserved name",
+  );
 });
 
 Deno.test("concurrent worktree creation preserves every registry record", async () => {
@@ -786,6 +791,12 @@ Deno.test("remove_worktree retries snapshot publication and branch deletion", as
     ],
   }).output();
   assertEquals(branch.code === 0, false);
+  const repeated = await model.methods.remove_worktree.execute({
+    worktreeId,
+    deleteBranch: true,
+  }, context);
+  assertEquals(repeated.alreadyRemoved, true);
+  assertEquals(repeated.branchDeleted, true);
 });
 
 Deno.test("force removal tolerates an unavailable creation base", async () => {
@@ -810,6 +821,152 @@ Deno.test("force removal tolerates an unavailable creation base", async () => {
 
   assertEquals(removed.aheadCommitCount, 0);
   await assertRejects(() => Deno.stat(worktree.path), Deno.errors.NotFound);
+});
+
+Deno.test("missing worktree cannot delete an ahead branch without force", async () => {
+  const { root, context } = await tempContext();
+  await createMirroredPrRef(root, context.globalArgs.gitObjectPath, 19);
+  const worktree = await model.methods.create_worktree.execute({
+    branch: "feature/missing-ahead",
+    baseRef: "refs/remotes/pull/19/head",
+  }, context);
+  for (
+    const [key, value] of [["user.email", "test@example.com"], [
+      "user.name",
+      "Test",
+    ], ["commit.gpgsign", "false"]]
+  ) {
+    await new Deno.Command("git", {
+      cwd: worktree.path,
+      args: ["config", key, value],
+    }).output();
+  }
+  await Deno.writeTextFile(`${worktree.path}/README.md`, "ahead\n");
+  const commit = await new Deno.Command("git", {
+    cwd: worktree.path,
+    args: ["commit", "-am", "ahead"],
+    stderr: "piped",
+  }).output();
+  assertEquals(commit.code, 0);
+  const removal = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "worktree",
+      "remove",
+      worktree.path,
+    ],
+    stderr: "piped",
+  }).output();
+  assertEquals(removal.code, 0);
+
+  await assertRejects(
+    () =>
+      model.methods.remove_worktree.execute({
+        worktreeId: worktree.worktreeId,
+        deleteBranch: true,
+      }, context),
+    Error,
+    "1 local commits",
+  );
+  const branch = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "show-ref",
+      "--verify",
+      "refs/heads/feature/missing-ahead",
+    ],
+  }).output();
+  assertEquals(branch.code, 0);
+
+  const forced = await model.methods.remove_worktree.execute({
+    worktreeId: worktree.worktreeId,
+    deleteBranch: true,
+    force: true,
+  }, context);
+  assertEquals(forced.branchDeleted, true);
+});
+
+Deno.test("branch deletion retains refs advanced after safety checks", async () => {
+  const { root, context } = await tempContext();
+  await createMirroredPrRef(root, context.globalArgs.gitObjectPath, 20);
+  const worktree = await model.methods.create_worktree.execute({
+    branch: "feature/concurrent-advance",
+    baseRef: "refs/remotes/pull/20/head",
+  }, context);
+  const source = `${root}/source-20`;
+  await Deno.writeTextFile(`${source}/README.md`, "external advance\n");
+  const commit = await new Deno.Command("git", {
+    cwd: source,
+    args: ["commit", "-am", "external advance"],
+    stderr: "piped",
+  }).output();
+  assertEquals(commit.code, 0);
+  const head = await new Deno.Command("git", {
+    cwd: source,
+    args: ["rev-parse", "HEAD"],
+    stdout: "piped",
+  }).output();
+  const externalHead = new TextDecoder().decode(head.stdout).trim();
+  const fetch = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "fetch",
+      source,
+      "HEAD",
+    ],
+  }).output();
+  assertEquals(fetch.code, 0);
+  const originalWriteResource = context.writeResource;
+  let advanceBranch = true;
+  context.writeResource = async (specName, name, data) => {
+    if (specName === "worktreeSnapshot" && advanceBranch) {
+      advanceBranch = false;
+      const update = await new Deno.Command("git", {
+        args: [
+          "--git-dir",
+          context.globalArgs.gitObjectPath,
+          "update-ref",
+          "refs/heads/feature/concurrent-advance",
+          externalHead,
+        ],
+      }).output();
+      assertEquals(update.code, 0);
+    }
+    return await originalWriteResource(specName, name, data);
+  };
+
+  await assertRejects(
+    () =>
+      model.methods.remove_worktree.execute({
+        worktreeId: worktree.worktreeId,
+        deleteBranch: true,
+        force: true,
+      }, context),
+    Error,
+    "branch changed after safety checks and was retained",
+  );
+  const retained = await new Deno.Command("git", {
+    args: [
+      "--git-dir",
+      context.globalArgs.gitObjectPath,
+      "rev-parse",
+      "refs/heads/feature/concurrent-advance",
+    ],
+    stdout: "piped",
+  }).output();
+  assertEquals(new TextDecoder().decode(retained.stdout).trim(), externalHead);
+
+  context.writeResource = originalWriteResource;
+  const retried = await model.methods.remove_worktree.execute({
+    worktreeId: worktree.worktreeId,
+    deleteBranch: true,
+    force: true,
+  }, context);
+  assertEquals(retried.alreadyRemoved, true);
+  assertEquals(retried.branchDeleted, true);
 });
 
 Deno.test("refresh republishes only worktree snapshots marked pending", async () => {
@@ -2890,9 +3047,32 @@ Deno.test("sync reconciles canonical branches and HEAD while preserving review b
       ]),
       upstream,
     );
-    await model.methods.create_worktree.execute({
+    const renamedWorktree = await model.methods.create_worktree.execute({
       branch: "future/topic",
     }, context);
+    await run(renamedWorktree.path, ["switch", "--detach"]);
+    await run(renamedWorktree.path, [
+      "branch",
+      "-m",
+      "future/topic",
+      "future/renamed",
+    ]);
+    await assertRejects(
+      () => model.methods.sync.execute({}, context),
+      Error,
+      "registered development worktree is detached or branch inspection failed",
+    );
+    assertEquals(
+      await run(root, [
+        "--git-dir",
+        context.globalArgs.gitObjectPath,
+        "rev-parse",
+        "refs/heads/future/renamed",
+      ]),
+      currentSha,
+    );
+    await run(renamedWorktree.path, ["switch", "future/renamed"]);
+    await run(renamedWorktree.path, ["branch", "-m", "future/topic"]);
     await run(source, ["branch", "future"]);
     await run(source, ["remote", "add", "test-upstream", upstream]);
     await run(source, ["push", "test-upstream", "future"]);
