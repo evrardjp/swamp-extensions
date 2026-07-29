@@ -545,6 +545,10 @@ export const report = {
       }
     }
     const values = (spec: string) => bySpec.get(spec) ?? [];
+    const mirrorState =
+      values("mirrorState").find((value) =>
+        value._dataName === "mirror-state-current"
+      ) ?? values("mirrorState")[0];
     const selection = values("reviewSelection")[0];
     const hasRequestedType = requestedSubjectType === "pr" ||
       requestedSubjectType === "issue";
@@ -573,8 +577,7 @@ export const report = {
         json: { error: "invalid-subject" },
       };
     }
-    const repo = repoName(context) ||
-      stringField(values("mirrorState")[0] ?? {}, "repo");
+    const repo = repoName(context) || stringField(mirrorState ?? {}, "repo");
     const primary: Subject = { type: subjectType, number };
     const headStates = values("prHeadState");
     const headByPr = new Map<number, StoredValue>();
@@ -741,7 +744,6 @@ export const report = {
     const granularity = context.globalArgs?.timelineCodeGranularity === "commit"
       ? "commit"
       : "observed-push";
-    const mirrorState = values("mirrorState")[0];
     const latestSync =
       values("syncRunSummary").sort((a, b) =>
         iso(b.finishedAt).localeCompare(iso(a.finishedAt))

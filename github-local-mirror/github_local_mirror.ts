@@ -5047,7 +5047,7 @@ async function recordPrAnalysis(args: unknown, ctx: Context) {
 /** Swamp-backed local GitHub mirror model. */
 export const model = {
   type: "@evrardjp/github-local-mirror",
-  version: "2026.07.24.1",
+  version: "2026.07.29.1",
   globalArguments: GlobalArgsSchema,
   upgrades: [
     {
@@ -5096,6 +5096,11 @@ export const model = {
       toVersion: "2026.07.24.1",
       description:
         "Add development worktrees, explicit PR association, and tracked PR worktree reconciliation",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.07.29.1",
+      description: "Prefer canonical mirror state in PR context reports",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

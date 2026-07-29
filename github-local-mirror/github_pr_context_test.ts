@@ -160,6 +160,35 @@ Deno.test("stored review selection supports later report retrieval", async () =>
   assertEquals(result.json.primary, { type: "pr", number: 1 });
 });
 
+Deno.test("PR context prefers the canonical mirror state", async () => {
+  const result = await report.execute(context([
+    prFixture(),
+    {
+      name: "current",
+      spec: "mirrorState",
+      value: {
+        updatedAt: "2026-07-16T00:00:00Z",
+        cursor: { lastSuccessfulSyncAt: "2026-07-16T00:00:00Z" },
+      },
+    },
+    {
+      name: "mirror-state-current",
+      spec: "mirrorState",
+      value: {
+        updatedAt: "2026-07-29T00:00:00Z",
+        cursor: { lastSuccessfulSyncAt: "2026-07-29T00:00:00Z" },
+      },
+    },
+  ]));
+
+  const freshness = result.json.freshness as Record<string, unknown>;
+  assertEquals(freshness.mirrorUpdatedAt, "2026-07-29T00:00:00Z");
+  assertEquals(
+    freshness.lastSuccessfulGithubSync,
+    "2026-07-29T00:00:00Z",
+  );
+});
+
 Deno.test("partial report arguments do not mix with stored selection", async () => {
   const fixtures: Fixture[] = [
     prFixture(),
