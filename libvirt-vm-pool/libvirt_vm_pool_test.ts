@@ -36,15 +36,20 @@ function baseVm(overrides: Record<string, unknown> = {}) {
 
 function recordingContext(vms: Array<Record<string, unknown>>) {
   const writes: WriteCall[] = [];
+  const warnings: string[] = [];
   return {
     writes,
+    warnings,
     context: {
       globalArgs: {
         uri: "qemu:///system",
         sshCertificateAuthorities: { host: [], user: [] },
         vms,
       },
-      logger: { info: (_message: string) => {} },
+      logger: {
+        info: (_message: string) => {},
+        warning: (message: string) => warnings.push(message),
+      },
       writeResource: async (
         specName: string,
         name: string,
@@ -179,6 +184,21 @@ Deno.test("plan rejects mirror values containing injected directives", async () 
     Error,
     "Invalid string",
   );
+});
+
+Deno.test("plan warns when reachable is normalized to poweredOn", async () => {
+  await withFakeVirsh("exit 1", async () => {
+    const { warnings, writes, context } = recordingContext([
+      baseVm({ desiredState: "reachable" }),
+    ]);
+
+    await model.methods.plan.execute({}, context as never);
+
+    assertEquals(writes[0].data.desiredState, "poweredOn");
+    assertEquals(warnings, [
+      'VM gitea uses deprecated desiredState "reachable"; use "poweredOn" and an explicit downstream connectivity check',
+    ]);
+  });
 });
 
 Deno.test("sync normalizes legacy states and shuts down poweredOff VMs", async () => {

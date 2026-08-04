@@ -98,6 +98,9 @@ globalArguments:
 - `poweredOff` - ensure the disk, seed, and domain exist, then shut it down.
 - `poweredOn` - ensure the disk, seed, and domain exist, then start it.
 
+`reachable` is deprecated and currently normalizes to `poweredOn` with a
+warning. Use an explicit downstream SSH or network readiness check instead.
+
 ## SSH identity metadata
 
 The VM pool publishes SSH-related intent, but does not implement the SSH CA
