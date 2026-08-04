@@ -279,8 +279,11 @@ const SummarySchema = z.object({
 });
 
 type PoolContext = {
-  globalArgs: z.infer<typeof GlobalArgsSchema>;
-  logger: { info: (message: string) => void };
+  globalArgs: z.input<typeof GlobalArgsSchema>;
+  logger: {
+    info: (message: string) => void;
+    warning: (message: string) => void;
+  };
   writeResource: (
     specName: string,
     instanceName: string,
@@ -556,6 +559,13 @@ async function reconcile(
 
 async function executePool(context: PoolContext, apply: boolean) {
   const globalArgs = GlobalArgsSchema.parse(context.globalArgs);
+  for (const [index, vm] of globalArgs.vms.entries()) {
+    if (context.globalArgs.vms[index]?.desiredState === "reachable") {
+      context.logger.warning(
+        `VM ${vm.name} uses deprecated desiredState "reachable"; use "poweredOn" and an explicit downstream connectivity check`,
+      );
+    }
+  }
   const handles: unknown[] = [];
   const results: Array<z.infer<typeof VmResultSchema>> = [];
   for (const vm of globalArgs.vms) {
@@ -586,14 +596,21 @@ async function executePool(context: PoolContext, apply: boolean) {
 /** Desired-state reconciler for a local libvirt VM pool. Produces per-VM Swamp data for downstream SSH/config models. */
 export const model = {
   type: "@evrardjp/libvirt-vm-pool",
-  version: "2026.07.17.2",
+  version: "2026.08.04.1",
   globalArguments: GlobalArgsSchema,
-  upgrades: [{
-    toVersion: "2026.07.17.2",
-    description:
-      "Normalize legacy desired-state names while keeping stored VM attributes readable",
-    upgradeAttributes: (old: Record<string, unknown>) => old,
-  }],
+  upgrades: [
+    {
+      toVersion: "2026.07.17.2",
+      description:
+        "Normalize legacy desired-state names while keeping stored VM attributes readable",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.08.04.1",
+      description: "Add a reachable desired-state deprecation warning",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+  ],
   resources: {
     vm: {
       description: "Observed and desired state for one VM in the pool",
