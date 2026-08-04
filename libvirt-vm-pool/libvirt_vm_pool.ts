@@ -143,12 +143,15 @@ const LegacyDesiredStateSchema = z.enum([
 const DesiredStateInputSchema = z.union([
   DesiredStateSchema,
   LegacyDesiredStateSchema,
-]).transform((state) => {
+]);
+function normalizeDesiredState(
+  state: z.infer<typeof DesiredStateInputSchema>,
+): z.infer<typeof DesiredStateSchema> {
   if (state === "absent") return "deleted" as const;
   if (state === "defined") return "poweredOff" as const;
   if (state === "running" || state === "reachable") return "poweredOn" as const;
   return state;
-});
+}
 const StoredDesiredStateSchema = z.union([
   DesiredStateSchema,
   LegacyDesiredStateSchema,
@@ -559,8 +562,8 @@ async function reconcile(
 
 async function executePool(context: PoolContext, apply: boolean) {
   const globalArgs = GlobalArgsSchema.parse(context.globalArgs);
-  for (const [index, vm] of globalArgs.vms.entries()) {
-    if (context.globalArgs.vms[index]?.desiredState === "reachable") {
+  for (const vm of globalArgs.vms) {
+    if (vm.desiredState === "reachable") {
       context.logger.warning(
         `VM ${vm.name} uses deprecated desiredState "reachable"; use "poweredOn" and an explicit downstream connectivity check`,
       );
@@ -570,9 +573,18 @@ async function executePool(context: PoolContext, apply: boolean) {
   const results: Array<z.infer<typeof VmResultSchema>> = [];
   for (const vm of globalArgs.vms) {
     context.logger.info(
-      `${apply ? "Syncing" : "Planning"} VM ${vm.name} -> ${vm.desiredState}`,
+      `${apply ? "Syncing" : "Planning"} VM ${vm.name} -> ${
+        normalizeDesiredState(vm.desiredState)
+      }`,
     );
-    const result = await reconcile(vm, globalArgs.uri, apply);
+    const result = await reconcile(
+      {
+        ...vm,
+        desiredState: normalizeDesiredState(vm.desiredState),
+      },
+      globalArgs.uri,
+      apply,
+    );
     results.push(result);
     handles.push(await context.writeResource("vm", vm.name, result));
   }
