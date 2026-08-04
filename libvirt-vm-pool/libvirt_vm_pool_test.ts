@@ -192,7 +192,10 @@ Deno.test("plan warns when reachable is normalized to poweredOn", async () => {
       baseVm({ desiredState: "reachable" }),
     ]);
 
-    await model.methods.plan.execute({}, context as never);
+    await model.methods.plan.execute({}, {
+      ...context,
+      globalArgs: model.globalArguments.parse(context.globalArgs),
+    } as never);
 
     assertEquals(writes[0].data.desiredState, "poweredOn");
     assertEquals(warnings, [
