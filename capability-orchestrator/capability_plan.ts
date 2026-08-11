@@ -76,11 +76,23 @@ const PlanSchema = z.object({
   plannedAt: z.string(),
 });
 
-type Capability = z.infer<typeof CapabilitySchema>;
-type Vm = z.infer<typeof VmSchema>;
-type PlanItem = z.infer<typeof PlanItemSchema>;
+export type Capability = z.infer<typeof CapabilitySchema>;
+export type Vm = z.infer<typeof VmSchema>;
+export type PlanItem = z.infer<typeof PlanItemSchema>;
 type CapabilityImplementation = z.infer<typeof CapabilityImplementationSchema>;
-type TaskImplementation = z.infer<typeof TaskImplementationSchema>;
+export type TaskImplementation = z.infer<typeof TaskImplementationSchema>;
+
+export type CapabilityNode = {
+  key: string;
+  item: PlanItem;
+  dependsOn: string[];
+};
+
+export type CapabilityGraph = {
+  nodes: CapabilityNode[];
+  requested: Record<string, string[]>;
+  resolved: Record<string, string[]>;
+};
 
 type TemplateContext = {
   host: string;
@@ -229,7 +241,23 @@ function uniqueSorted(values: string[]): string[] {
   return [...new Set(values)].sort((a, b) => a.localeCompare(b));
 }
 
-function buildWaves(vms: Vm[], capabilities: Capability[]) {
+function rejectDuplicateNames(names: string[], kind: "VM" | "capability") {
+  const seen = new Set<string>();
+  for (const name of names) {
+    if (seen.has(name)) throw new Error(`Duplicate ${kind} name ${name}`);
+    seen.add(name);
+  }
+}
+
+export function buildCapabilityGraph(
+  vms: Vm[],
+  capabilities: Capability[],
+): CapabilityGraph {
+  rejectDuplicateNames(vms.map((vm) => vm.name), "VM");
+  rejectDuplicateNames(
+    capabilities.map((capability) => capability.name),
+    "capability",
+  );
   const catalog = new Map(capabilities.map((c) => [c.name, c]));
   const requested: Record<string, string[]> = {};
   const resolved: Record<string, string[]> = {};
@@ -252,9 +280,13 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
     }
   }
 
-  for (const vm of vms) {
-    requested[vm.name] = vm.capabilities;
-    resolved[vm.name] = resolveForVm(vm, catalog);
+  for (const vm of [...vms].sort((a, b) => a.name.localeCompare(b.name))) {
+    requested[vm.name] = [...vm.capabilities].sort((a, b) =>
+      a.localeCompare(b)
+    );
+    resolved[vm.name] = resolveForVm(vm, catalog).sort((a, b) =>
+      a.localeCompare(b)
+    );
     for (
       const collector of resolved[vm.name].filter((cap) =>
         packageCollectors.has(cap)
@@ -321,39 +353,56 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
     }
   }
 
-  const remaining = new Set(itemsByKey.keys());
+  const nodes = [...itemsByKey.entries()].map(([key, item]) => {
+    const spec = catalog.get(item.capability)!;
+    const requirements = requirementsByKey.get(key) ?? spec.requires;
+    return {
+      key,
+      item,
+      dependsOn: uniqueSorted(
+        requirements.flatMap((dep) =>
+          packageOnlyCaps.has(dep)
+            ? packageCollectorDeps(catalog.get(dep)!, catalog).map((
+              collector,
+            ) => `${item.host}:${collector}`)
+            : [`${item.host}:${dep}`]
+        ),
+      ),
+    };
+  }).sort((a, b) => a.key.localeCompare(b.key));
+
+  return { nodes, requested, resolved };
+}
+
+function buildWaves(vms: Vm[], capabilities: Capability[]) {
+  const graph = buildCapabilityGraph(vms, capabilities);
+  const nodesByKey = new Map(graph.nodes.map((node) => [node.key, node]));
+  const remaining = new Set(nodesByKey.keys());
   const done = new Set<string>();
   const waves: Array<{ name: string; index: number; items: PlanItem[] }> = [];
   let index = 0;
   while (remaining.size > 0) {
-    const waveItems: PlanItem[] = [];
-    for (const key of [...remaining].sort()) {
-      const item = itemsByKey.get(key)!;
-      let depsSatisfied = false;
-      const spec = catalog.get(item.capability)!;
-      const requirements = requirementsByKey.get(key) ?? spec.requires;
-      depsSatisfied = requirements.every((dep) =>
-        packageOnlyCaps.has(dep)
-          ? packageCollectorDeps(catalog.get(dep)!, catalog).every((
-            collector,
-          ) => done.has(`${item.host}:${collector}`))
-          : done.has(`${item.host}:${dep}`)
+    const waveNodes = [...remaining].sort().map((key) => nodesByKey.get(key)!)
+      .filter((node) =>
+        node.dependsOn.every((dependency) => done.has(dependency))
       );
-      if (depsSatisfied) waveItems.push(item);
-    }
-    if (waveItems.length === 0) {
+    if (waveNodes.length === 0) {
       throw new Error(
         "Cannot build capability waves; unresolved dependency cycle or missing dependency",
       );
     }
-    for (const item of waveItems) {
-      remaining.delete(`${item.host}:${item.capability}`);
-      done.add(`${item.host}:${item.capability}`);
+    for (const node of waveNodes) {
+      remaining.delete(node.key);
+      done.add(node.key);
     }
-    waves.push({ name: `wave-${index}`, index, items: waveItems });
+    waves.push({
+      name: `wave-${index}`,
+      index,
+      items: waveNodes.map((node) => node.item),
+    });
     index += 1;
   }
-  return { waves, requested, resolved };
+  return { waves, requested: graph.requested, resolved: graph.resolved };
 }
 
 /** Capability planner model that resolves requested VM capabilities into dependency-ordered waves. */

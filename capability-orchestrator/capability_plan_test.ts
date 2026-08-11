@@ -1,5 +1,5 @@
-import { assertEquals, assertRejects } from "jsr:@std/assert@1";
-import { model } from "./capability_plan.ts";
+import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
+import { buildCapabilityGraph, model } from "./capability_plan.ts";
 
 function recordingContext() {
   const writes: Array<{
@@ -43,6 +43,65 @@ const capabilities = [
   },
 ];
 
+function vm(name: string) {
+  return {
+    name,
+    ipAddress: "192.0.2.42",
+    sshUser: "admin",
+    capabilities: ["app"],
+  };
+}
+
+function workflowCapability(name: string, requires: string[] = []) {
+  return {
+    name,
+    requires,
+    implementation: {
+      type: "workflow" as const,
+      workflowIdOrName: name,
+      inputs: {},
+    },
+  };
+}
+
+Deno.test("graph keeps exact diamond dependencies", () => {
+  const graph = buildCapabilityGraph([{
+    name: "node1",
+    ipAddress: "192.0.2.42",
+    sshUser: "admin",
+    capabilities: ["app"],
+  }], [
+    workflowCapability("base"),
+    workflowCapability("left", ["base"]),
+    workflowCapability("right", ["base"]),
+    workflowCapability("app", ["left", "right"]),
+  ]);
+
+  assertEquals(
+    Object.fromEntries(graph.nodes.map((node) => [node.key, node.dependsOn])),
+    {
+      "node1:app": ["node1:left", "node1:right"],
+      "node1:base": [],
+      "node1:left": ["node1:base"],
+      "node1:right": ["node1:base"],
+    },
+  );
+});
+
+Deno.test("graph rejects duplicate names", () => {
+  assertThrows(
+    () => buildCapabilityGraph([vm("node1"), vm("node1")], capabilities),
+    Error,
+    "Duplicate VM name node1",
+  );
+  assertThrows(
+    () =>
+      buildCapabilityGraph([vm("node1")], [capabilities[0], capabilities[0]]),
+    Error,
+    "Duplicate capability name base",
+  );
+});
+
 Deno.test("plan resolves dependencies into ordered waves", async () => {
   const { writes, context } = recordingContext();
 
@@ -66,7 +125,7 @@ Deno.test("plan resolves dependencies into ordered waves", async () => {
     ["app"],
   ]);
   assertEquals(writes[0].data.requested, { gitea: ["app"] });
-  assertEquals(writes[0].data.resolved, { gitea: ["base", "app"] });
+  assertEquals(writes[0].data.resolved, { gitea: ["app", "base"] });
 });
 
 Deno.test("plan renders model method global arguments separately from method inputs", async () => {
