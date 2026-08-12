@@ -1,15 +1,16 @@
-## 2026.07.20.1
+## 2026.08.12.1
 
-**Added:** Initial release of `@evrardjp/caddy`, with reverse-proxy JSON
-rendering, Caddy-native validation, and remote Docker Compose deployment over
-SSH.
+**Changed:** Rendered Caddy configurations now use their SHA-256 digest as the
+artifact name, so validation and deployment refer to exact configuration
+content instead of mutable `current` outputs.
 
-**Added:** Upstream transport configuration requires an explicit decision about
-TLS certificate verification.
+**Changed:** Validation and apply results are recorded by swamp method outputs;
+the redundant `validation` and `apply` data resources are no longer produced.
 
-**Fixed:** Remote paths and file content are safely encoded, HTTP-only sites
-honor disabled TLS, and failed Compose startup no longer removes a running
-proxy.
+**Fixed:** Compound apply methods no longer return duplicate data instance names
+after successfully updating the remote Caddy service.
 
-**Fixed:** Container and host restarts now load the durable managed Caddy
-configuration instead of returning to the bootstrap placeholder.
+**Upgrade note:** `validateConfig` and `applyConfig` now require `configName`
+instead of `configJson`. Run `renderReverseProxy` first and pass its config
+artifact name. Replace consumers of `validation/current` and `apply/current`
+with the corresponding swamp method output or `@swamp/method-summary` report.
