@@ -1,6 +1,6 @@
 # @evrardjp/capability-orchestrator
 
-Capability catalog and planner models for Swamp.
+Capability catalog, planner, and concrete workflow generator models for Swamp.
 
 The catalog is manually maintained as a Swamp model definition. The planner
 combines the catalog with VM facts from a fleet/pool model and emits dependency
@@ -20,6 +20,13 @@ materializes per target VM.
   - method: `plan`
   - reads `globalArguments.vms` and `globalArguments.capabilities`
   - writes `plan/current` with ordered `waves`
+
+- `@evrardjp/capability-based-workflow-generator`
+  - method: `generate`
+  - reads `globalArguments.targetWorkflowName`, `globalArguments.vms`, and
+    `globalArguments.capabilities`
+  - writes `workflowDraft/current` with deterministic `workflowYaml`, its
+    `contentHash`, compilation metadata, and requested and resolved capabilities
 
 ## Catalog shape
 
@@ -85,4 +92,19 @@ globalArguments:
 }
 ```
 
-Workflows should execute waves in order and items within a wave in parallel.
+`@evrardjp/capability-plan` remains available for consumers that execute ordered
+waves. The generator instead emits concrete jobs with exact dependency edges:
+
+```yaml
+jobs:
+  - name: node1:app
+    dependsOn:
+      - job: node1:left
+        condition: { type: succeeded }
+      - job: node1:right
+        condition: { type: succeeded }
+  - name: node1:left
+    dependsOn:
+      - job: node1:base
+        condition: { type: succeeded }
+```

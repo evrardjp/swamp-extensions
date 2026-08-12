@@ -76,18 +76,24 @@ const PlanSchema = z.object({
   plannedAt: z.string(),
 });
 
+/** Validated capability catalog entry. */
 export type Capability = z.infer<typeof CapabilitySchema>;
+/** Validated VM facts and requested capabilities. */
 export type Vm = z.infer<typeof VmSchema>;
+/** Rendered capability task for one host. */
 export type PlanItem = z.infer<typeof PlanItemSchema>;
 type CapabilityImplementation = z.infer<typeof CapabilityImplementationSchema>;
+/** Rendered workflow or model method task implementation. */
 export type TaskImplementation = z.infer<typeof TaskImplementationSchema>;
 
+/** Concrete capability task and its exact dependency keys. */
 export type CapabilityNode = {
   key: string;
   item: PlanItem;
   dependsOn: string[];
 };
 
+/** Resolved capability tasks and request metadata. */
 export type CapabilityGraph = {
   nodes: CapabilityNode[];
   requested: Record<string, string[]>;
@@ -249,6 +255,7 @@ function rejectDuplicateNames(names: string[], kind: "VM" | "capability") {
   }
 }
 
+/** Resolve VM capability requests into concrete tasks with exact dependency edges. */
 export function buildCapabilityGraph(
   vms: Vm[],
   capabilities: Capability[],
@@ -408,7 +415,7 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
 /** Capability planner model that resolves requested VM capabilities into dependency-ordered waves. */
 export const model = {
   type: "@evrardjp/capability-plan",
-  version: "2026.07.17.3",
+  version: "2026.08.11.1",
   globalArguments: z.object({}),
   resources: {
     plan: {

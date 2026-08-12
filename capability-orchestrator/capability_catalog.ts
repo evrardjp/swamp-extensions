@@ -81,7 +81,7 @@ function validateCatalog(catalog: Record<string, CapabilitySpec>) {
 /** Capability catalog model that validates and publishes capability definitions. */
 export const model = {
   type: "@evrardjp/capability-catalog",
-  version: "2026.07.17.3",
+  version: "2026.08.11.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     capability: {

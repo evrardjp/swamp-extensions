@@ -1,3 +1,12 @@
+## 2026.08.11.1
+
+**Added:** `@evrardjp/capability-based-workflow-generator` compiles VM facts and
+capability declarations into deterministic concrete Swamp workflow YAML with
+exact dependency edges.
+
+**Unchanged:** `@evrardjp/capability-plan` remains available for consumers of
+ordered wave data.
+
 ## 2026.07.17.3
 
 **Fixed:** Direct `model_method` capability plans now render catalog

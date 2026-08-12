@@ -1,16 +1,16 @@
 manifestVersion: 1
 name: "@evrardjp/capability-orchestrator"
-version: "2026.07.17.3"
+version: "2026.08.11.1"
 description: >-
-  Capability catalog and DAG planner models for Swamp workflows and direct
-  model method calls. Publishes capability definitions and resolves per-host
-  requested capabilities into dependency waves for execution.
+  Capability catalog, DAG wave planner, and deterministic concrete workflow
+  generator for Swamp workflows and direct model method calls.
 repository: "https://github.com/evrardjp/swamp-extensions"
 paths:
   base: manifest
 models:
   - capability_catalog.ts
   - capability_plan.ts
+  - capability_workflow_generator.ts
 reports: []
 workflows: []
 vaults: []
