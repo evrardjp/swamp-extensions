@@ -37,8 +37,13 @@ sites:
         tlsInsecureSkipVerify: false
 ```
 
-Use `renderReverseProxy` for an inspectable JSON artifact, `validateConfig` to
-run Caddy's parser, and `applyReverseProxy` only when the target is ready. Apply
-creates a managed Compose file and bootstrap configuration, starts the Caddy
-container, and loads the final JSON through the loopback admin API. Existing
-files under the configured `workDir` with the same managed names are replaced.
+`renderReverseProxy` creates an inspectable config artifact named by the
+SHA-256 digest of its JSON content. Pass that artifact's `configName` to
+`validateConfig` or `applyConfig`; their swamp method outputs record success or
+failure metadata. Use `applyReverseProxy` for the combined render, validate, and
+apply operation when the target is ready.
+
+Apply creates a managed Compose file and bootstrap configuration, starts the
+Caddy container, and loads the final JSON through the loopback admin API.
+Existing files under the configured `workDir` with the same managed names are
+replaced.

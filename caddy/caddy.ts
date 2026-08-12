@@ -41,7 +41,7 @@ const SiteSchema = z.object({
 const RenderReverseProxyArgs = z.object({
   sites: z.array(SiteSchema).default([]),
 });
-const ValidateConfigArgs = z.object({ configJson: z.string().min(1) });
+const ValidateConfigArgs = z.object({ configName: z.string().min(1) });
 const ApplyConfigArgs = ValidateConfigArgs;
 const ApplyReverseProxyArgs = RenderReverseProxyArgs;
 
@@ -50,22 +50,6 @@ const ConfigOutput = z.object({
   configJson: z.string(),
   sites: z.array(SiteSchema),
   warnings: z.array(z.string()),
-  timestamp: z.string(),
-});
-
-const ValidationOutput = z.object({
-  valid: z.boolean(),
-  errors: z.array(z.string()),
-  warnings: z.array(z.string()),
-  timestamp: z.string(),
-});
-
-const ApplyOutput = z.object({
-  success: z.boolean(),
-  configPath: z.string(),
-  composePath: z.string(),
-  publishedPorts: z.array(z.number()),
-  timestamp: z.string(),
 });
 
 type Global = z.infer<typeof GlobalArgs>;
@@ -78,6 +62,7 @@ type MethodContext = {
     name: string,
     data: Record<string, unknown>,
   ) => Promise<unknown>;
+  readResource: (name: string) => Promise<Record<string, unknown> | null>;
 };
 
 async function runCmd(
@@ -354,6 +339,17 @@ function ensureAdminApi(configJson: string): string {
   return JSON.stringify(config, null, 2);
 }
 
+async function sha256(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return Array.from(
+    new Uint8Array(digest),
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
 async function writeConfigResource(
   context: MethodContext,
   sites: Site[],
@@ -361,34 +357,52 @@ async function writeConfigResource(
   configJson: string,
   warnings: string[],
 ) {
-  return await context.writeResource("config", "current", {
+  return await context.writeResource("config", await sha256(configJson), {
     config,
     configJson,
     sites,
     warnings,
-    timestamp: new Date().toISOString(),
   });
 }
 
-async function validateAndWrite(context: MethodContext, configJson: string) {
+async function validateConfig(
+  context: MethodContext,
+  configJson: string,
+): Promise<void> {
   const globalArgs = GlobalArgs.parse(context.globalArgs);
   const result = await validateCaddyJson(configJson, globalArgs.containerImage);
-  const handle = await context.writeResource("validation", "current", {
-    valid: result.errors.length === 0,
-    errors: result.errors,
-    warnings: result.warnings,
-    timestamp: new Date().toISOString(),
-  });
   if (result.errors.length > 0) {
     throw new Error(`Invalid Caddy JSON config: ${result.errors.join("; ")}`);
   }
-  return handle;
 }
 
-async function applyConfig(configJson: string, context: MethodContext) {
+async function readConfigResource(
+  context: MethodContext,
+  configName: string,
+): Promise<string> {
+  if (!/^[0-9a-f]{64}$/.test(configName)) {
+    throw new Error(`Config artifact name '${configName}' is invalid`);
+  }
+  const resource = await context.readResource(configName);
+  if (!resource) throw new Error(`Config artifact '${configName}' not found`);
+  if (typeof resource.configJson !== "string") {
+    throw new Error(`Config artifact '${configName}' is malformed`);
+  }
+  if (await sha256(resource.configJson) !== configName) {
+    throw new Error(
+      `Config artifact '${configName}' content does not match its name`,
+    );
+  }
+  return resource.configJson;
+}
+
+async function applyConfig(
+  configJson: string,
+  context: MethodContext,
+): Promise<void> {
   const globalArgs = GlobalArgs.parse(context.globalArgs);
+  await validateConfig(context, configJson);
   const loadConfigJson = ensureAdminApi(configJson);
-  const validationHandle = await validateAndWrite(context, loadConfigJson);
   await sshExec(
     globalArgs,
     `mkdir -p -- ${shellQuoteRemotePath(globalArgs.workDir)}`,
@@ -412,37 +426,17 @@ async function applyConfig(configJson: string, context: MethodContext) {
       shellQuoteRemotePath(globalArgs.workDir)
     } && curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @caddy.json http://127.0.0.1:2019/load`,
   );
-  const applyHandle = await context.writeResource("apply", "current", {
-    success: true,
-    configPath,
-    composePath,
-    publishedPorts: ports,
-    timestamp: new Date().toISOString(),
-  });
-  return { dataHandles: [validationHandle, applyHandle] };
 }
 
 /** Caddy model: render, validate, and run Caddy JSON configuration. */
 export const model = {
   type: "@evrardjp/caddy",
-  version: "2026.07.20.1",
+  version: "2026.08.12.1",
   globalArguments: GlobalArgs,
   resources: {
     config: {
       description: "Rendered Caddy JSON config artifact",
       schema: ConfigOutput,
-      lifetime: "infinite",
-      garbageCollection: 20,
-    },
-    validation: {
-      description: "Caddy JSON validation result",
-      schema: ValidationOutput,
-      lifetime: "infinite",
-      garbageCollection: 20,
-    },
-    apply: {
-      description: "Applied Caddy runtime state",
-      schema: ApplyOutput,
       lifetime: "infinite",
       garbageCollection: 20,
     },
@@ -474,18 +468,28 @@ export const model = {
       execute: async (
         args: z.infer<typeof ValidateConfigArgs>,
         context: MethodContext,
-      ) => ({
-        dataHandles: [await validateAndWrite(context, args.configJson)],
-      }),
+      ) => {
+        await validateConfig(
+          context,
+          await readConfigResource(context, args.configName),
+        );
+        return { dataHandles: [] };
+      },
     },
     applyConfig: {
       description:
-        "Validate and apply a provided Caddy JSON config on the target host",
+        "Validate and apply a rendered Caddy config artifact on the target host",
       arguments: ApplyConfigArgs,
       execute: async (
         args: z.infer<typeof ApplyConfigArgs>,
         context: MethodContext,
-      ) => await applyConfig(args.configJson, context),
+      ) => {
+        await applyConfig(
+          await readConfigResource(context, args.configName),
+          context,
+        );
+        return { dataHandles: [] };
+      },
     },
     applyReverseProxy: {
       description:
@@ -504,8 +508,8 @@ export const model = {
           configJson,
           warnings,
         );
-        const result = await applyConfig(configJson, context);
-        return { dataHandles: [configHandle, ...result.dataHandles] };
+        await applyConfig(configJson, context);
+        return { dataHandles: [configHandle] };
       },
     },
   },
