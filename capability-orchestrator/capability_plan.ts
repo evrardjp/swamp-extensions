@@ -243,13 +243,20 @@ function packageCollectorDeps(
   });
 }
 
+export function compareCodeUnits(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 function uniqueSorted(values: string[]): string[] {
-  return [...new Set(values)].sort((a, b) => a.localeCompare(b));
+  return [...new Set(values)].sort(compareCodeUnits);
 }
 
 function rejectDuplicateNames(names: string[], kind: "VM" | "capability") {
   const seen = new Set<string>();
   for (const name of names) {
+    if (name.includes(":")) {
+      throw new Error(`${kind} name "${name}" must not contain ":"`);
+    }
     if (seen.has(name)) throw new Error(`Duplicate ${kind} name ${name}`);
     seen.add(name);
   }
@@ -287,13 +294,9 @@ export function buildCapabilityGraph(
     }
   }
 
-  for (const vm of [...vms].sort((a, b) => a.name.localeCompare(b.name))) {
-    requested[vm.name] = [...vm.capabilities].sort((a, b) =>
-      a.localeCompare(b)
-    );
-    resolved[vm.name] = resolveForVm(vm, catalog).sort((a, b) =>
-      a.localeCompare(b)
-    );
+  for (const vm of [...vms].sort((a, b) => compareCodeUnits(a.name, b.name))) {
+    requested[vm.name] = [...vm.capabilities].sort(compareCodeUnits);
+    resolved[vm.name] = resolveForVm(vm, catalog).sort(compareCodeUnits);
     for (
       const collector of resolved[vm.name].filter((cap) =>
         packageCollectors.has(cap)
@@ -373,10 +376,10 @@ export function buildCapabilityGraph(
               collector,
             ) => `${item.host}:${collector}`)
             : [`${item.host}:${dep}`]
-        ),
+        ).filter((dependency) => dependency !== key),
       ),
     };
-  }).sort((a, b) => a.key.localeCompare(b.key));
+  }).sort((a, b) => compareCodeUnits(a.key, b.key));
 
   return { nodes, requested, resolved };
 }
@@ -389,7 +392,9 @@ function buildWaves(vms: Vm[], capabilities: Capability[]) {
   const waves: Array<{ name: string; index: number; items: PlanItem[] }> = [];
   let index = 0;
   while (remaining.size > 0) {
-    const waveNodes = [...remaining].sort().map((key) => nodesByKey.get(key)!)
+    const waveNodes = [...remaining].sort(compareCodeUnits).map((key) =>
+      nodesByKey.get(key)!
+    )
       .filter((node) =>
         node.dependsOn.every((dependency) => done.has(dependency))
       );

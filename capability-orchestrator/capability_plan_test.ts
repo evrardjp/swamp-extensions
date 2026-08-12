@@ -102,6 +102,74 @@ Deno.test("graph rejects duplicate names", () => {
   );
 });
 
+Deno.test("graph rejects names that make host capability keys ambiguous", () => {
+  assertThrows(
+    () => buildCapabilityGraph([vm("node:1")], capabilities),
+    Error,
+    'VM name "node:1" must not contain ":"',
+  );
+  assertThrows(
+    () =>
+      buildCapabilityGraph([vm("node1")], [
+        workflowCapability("base:system"),
+      ]),
+    Error,
+    'capability name "base:system" must not contain ":"',
+  );
+});
+
+Deno.test("graph collapses same-collector package dependencies", () => {
+  const graph = buildCapabilityGraph([{
+    ...vm("node1"),
+    capabilities: ["app-packages"],
+  }], [
+    {
+      name: "packages",
+      requires: [],
+      implementation: {
+        type: "model_method" as const,
+        modelType: "@adam/cfgmgmt/pacman",
+        modelName: "packages",
+        methodName: "apply",
+        globalArgs: { packages: [], ensure: "present" },
+        inputs: {},
+      },
+    },
+    {
+      name: "base-packages",
+      requires: ["packages"],
+      implementation: {
+        type: "model_method" as const,
+        modelType: "@adam/cfgmgmt/pacman",
+        modelName: "unused",
+        methodName: "apply",
+        globalArgs: { packages: ["base"], ensure: "present" },
+        inputs: {},
+      },
+    },
+    {
+      name: "app-packages",
+      requires: ["base-packages", "packages"],
+      implementation: {
+        type: "model_method" as const,
+        modelType: "@adam/cfgmgmt/pacman",
+        modelName: "unused",
+        methodName: "apply",
+        globalArgs: { packages: ["app"], ensure: "present" },
+        inputs: {},
+      },
+    },
+  ]);
+
+  assertEquals(
+    graph.nodes.map((node) => ({
+      key: node.key,
+      dependsOn: node.dependsOn,
+    })),
+    [{ key: "node1:packages", dependsOn: [] }],
+  );
+});
+
 Deno.test("plan resolves dependencies into ordered waves", async () => {
   const { writes, context } = recordingContext();
 

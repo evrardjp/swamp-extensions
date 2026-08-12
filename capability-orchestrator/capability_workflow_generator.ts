@@ -3,6 +3,7 @@ import { stringify } from "jsr:@std/yaml@1";
 import {
   buildCapabilityGraph,
   type CapabilityNode,
+  compareCodeUnits,
 } from "./capability_plan.ts";
 
 const JsonRecordSchema = z.record(z.string(), z.json());
@@ -112,7 +113,7 @@ function canonicalize(value: unknown): unknown {
   if (value && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .sort(([a], [b]) => a.localeCompare(b))
+        .sort(([a], [b]) => compareCodeUnits(a, b))
         .map(([key, inner]) => [key, canonicalize(inner)]),
     );
   }
@@ -142,7 +143,7 @@ export async function compileWorkflowDraft(rawGlobalArgs: unknown) {
   const graph = buildCapabilityGraph(
     args.vms.map((vm) => ({
       ...vm,
-      capabilities: [...vm.capabilities].sort((a, b) => a.localeCompare(b)),
+      capabilities: [...vm.capabilities].sort(compareCodeUnits),
     })),
     args.capabilities,
   );

@@ -124,6 +124,46 @@ Deno.test("compiler emits a deterministic literal diamond DAG", async () => {
   });
 });
 
+Deno.test("compiler orders Unicode names and nested keys by code unit", async () => {
+  const composed = "é";
+  const decomposed = "e\u0301";
+  const firstInput = {
+    targetWorkflowName: "unicode",
+    vms: [{ ...vm(composed), capabilities: [composed, decomposed] }],
+    capabilities: [
+      workflowCapability(composed),
+      {
+        ...workflowCapability(decomposed),
+        implementation: {
+          type: "workflow" as const,
+          workflowIdOrName: decomposed,
+          inputs: { [composed]: 1, [decomposed]: 2 },
+        },
+      },
+    ],
+  };
+  const secondInput = {
+    ...firstInput,
+    vms: [{ ...firstInput.vms[0], capabilities: [decomposed, composed] }],
+    capabilities: [
+      {
+        ...firstInput.capabilities[1],
+        implementation: {
+          ...firstInput.capabilities[1].implementation,
+          inputs: { [decomposed]: 2, [composed]: 1 },
+        },
+      },
+      firstInput.capabilities[0],
+    ],
+  };
+
+  const first = await compileWorkflowDraft(firstInput);
+  const second = await compileWorkflowDraft(secondInput);
+
+  assertEquals(first.workflowYaml, second.workflowYaml);
+  assertEquals(first.contentHash, second.contentHash);
+});
+
 Deno.test("compiler emits one package collector with non-package prerequisites", async () => {
   const input = {
     targetWorkflowName: "packages",
