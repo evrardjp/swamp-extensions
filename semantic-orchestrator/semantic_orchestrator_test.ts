@@ -64,10 +64,10 @@ Deno.test("compile resolves a diamond and renders arbitrary typed facts", async 
 
   assertEquals(result.dataHandles.length, 2);
   assertEquals(writes.map((write) => write.specName), [
-    "workflowDraft",
     "compilationReport",
+    "workflowDraft",
   ]);
-  const draft = writes[0].data as Record<string, unknown>;
+  const draft = writes[1].data as Record<string, unknown>;
   const workflow = parse(draft.workflowYaml as string) as Record<
     string,
     unknown
@@ -148,6 +148,25 @@ Deno.test("compile rejects unknown requests and semantic cycles without writes",
   }
 });
 
+Deno.test("compile validates references in unrequested capabilities", async () => {
+  for (
+    const invalid of [
+      { requires: ["missing"], implementation: executable().implementation },
+      { contributes: { to: "missing", values: {} } },
+    ]
+  ) {
+    const args = {
+      targetWorkflowName: "generated",
+      facts: { node: {} },
+      requests: { node: ["app"] },
+      capabilities: { app: executable(), invalid },
+    };
+    const { writes, context } = recorder(args);
+    await assertRejects(() => compile(args, context), Error);
+    assertEquals(writes, []);
+  }
+});
+
 Deno.test("compile folds contributions and preserves rewritten prerequisites", async () => {
   const args = {
     targetWorkflowName: "generated",
@@ -181,7 +200,7 @@ Deno.test("compile folds contributions and preserves rewritten prerequisites", a
   await compile(args, context);
 
   const workflow = parse(
-    (writes[0].data as Record<string, string>).workflowYaml,
+    (writes[1].data as Record<string, string>).workflowYaml,
   ) as { jobs: Array<Record<string, unknown>> };
   assertEquals(workflow.jobs.map((job) => job.name), [
     "node:packages",
@@ -193,7 +212,7 @@ Deno.test("compile folds contributions and preserves rewritten prerequisites", a
   const task = ((workflow.jobs[0].steps as Array<Record<string, unknown>>)[0]
     .task) as Record<string, unknown>;
   assertEquals(task.globalArgs, { packages: ["a", "docker", "z"] });
-  const report = writes[1].data as Record<string, unknown>;
+  const report = writes[0].data as Record<string, unknown>;
   assertEquals(report.mergedAggregates, [{
     aggregate: "packages",
     factKey: "node",
@@ -223,7 +242,7 @@ Deno.test("a requested contribution implicitly includes its aggregate", async ()
   const { writes, context } = recorder(args);
   await compile(args, context);
   const workflow = parse(
-    (writes[0].data as Record<string, string>).workflowYaml,
+    (writes[1].data as Record<string, string>).workflowYaml,
   ) as { jobs: Array<Record<string, unknown>> };
   assertEquals(workflow.jobs.map((job) => job.name), ["node:aggregate"]);
 });
@@ -238,7 +257,7 @@ Deno.test("effective keys cannot collide when fact and capability names contain 
   const { writes, context } = recorder(args);
   await compile(args, context);
   const workflow = parse(
-    (writes[0].data as Record<string, string>).workflowYaml,
+    (writes[1].data as Record<string, string>).workflowYaml,
   ) as { jobs: Array<Record<string, unknown>> };
   assertEquals(workflow.jobs.map((job) => job.name), ["a%3Ab:c", "a:b%3Ac"]);
 });
@@ -302,7 +321,7 @@ Deno.test("compile applies fact and global coordination deterministically", asyn
   const { writes, context } = recorder(args);
   await compile(args, context);
   const workflow = parse(
-    (writes[0].data as Record<string, string>).workflowYaml,
+    (writes[1].data as Record<string, string>).workflowYaml,
   ) as { jobs: Array<Record<string, unknown>> };
   const dependencies = Object.fromEntries(
     workflow.jobs.map((job) => [job.name, job.dependsOn]),
@@ -311,10 +330,33 @@ Deno.test("compile applies fact and global coordination deterministically", asyn
     { condition: { type: "succeeded" }, job: "a:first" },
   ]);
   assertEquals(dependencies["b:first"], [
-    { condition: { type: "succeeded" }, job: "a:later" },
+    { condition: { type: "completed" }, job: "a:later" },
   ]);
   assertEquals(dependencies["b:later"], [
     { condition: { type: "succeeded" }, job: "b:first" },
+  ]);
+});
+
+Deno.test("coordination waits for completion without success-gating peers", async () => {
+  const args = {
+    targetWorkflowName: "generated",
+    facts: { node: {} },
+    requests: { node: ["a", "b"] },
+    capabilities: {
+      a: { ...executable(), coordination: { group: "lock", scope: "fact" } },
+      b: { ...executable(), coordination: { group: "lock", scope: "fact" } },
+    },
+  };
+  const { writes, context } = recorder(args);
+  await compile(args, context);
+  const workflow = parse(
+    (writes[1].data as Record<string, string>).workflowYaml,
+  ) as { jobs: Array<Record<string, unknown>> };
+  const dependencies = Object.fromEntries(
+    workflow.jobs.map((job) => [job.name, job.dependsOn]),
+  );
+  assertEquals(dependencies["node:b"], [
+    { condition: { type: "completed" }, job: "node:a" },
   ]);
 });
 
@@ -335,14 +377,14 @@ Deno.test("coordination uses a stable topological order when key order conflicts
   const { writes, context } = recorder(args);
   await compile(args, context);
   const workflow = parse(
-    (writes[0].data as Record<string, string>).workflowYaml,
+    (writes[1].data as Record<string, string>).workflowYaml,
   ) as { jobs: Array<Record<string, unknown>> };
   const dependencies = Object.fromEntries(
     workflow.jobs.map((job) => [job.name, job.dependsOn]),
   );
   assertEquals(dependencies["node:b"], []);
   assertEquals(dependencies["node:c"], [
-    { condition: { type: "succeeded" }, job: "node:b" },
+    { condition: { type: "completed" }, job: "node:b" },
   ]);
   assertEquals(dependencies["node:a"], [
     { condition: { type: "succeeded" }, job: "node:c" },
@@ -365,7 +407,7 @@ Deno.test("coordination preserves semantic paths through jobs outside its bucket
   };
   const { writes, context } = recorder(args);
   await compile(args, context);
-  const report = writes[1].data as Record<string, unknown>;
+  const report = writes[0].data as Record<string, unknown>;
   assertEquals(report.operationalEdges, []);
 });
 
@@ -381,7 +423,7 @@ Deno.test("fact coordination bucket keys cannot collide", async () => {
   };
   const { writes, context } = recorder(args);
   await compile(args, context);
-  const report = writes[1].data as Record<string, unknown>;
+  const report = writes[0].data as Record<string, unknown>;
   assertEquals(report.operationalEdges, []);
 });
 
@@ -412,7 +454,7 @@ Deno.test("report retains folded edge origins and complete model targets", async
   };
   const { writes, context } = recorder(args);
   await compile(args, context);
-  const report = writes[1].data as Record<string, unknown>;
+  const report = writes[0].data as Record<string, unknown>;
   assertEquals((report.semanticEdges as unknown[]).length, 2);
   assertEquals(
     (report.effectiveJobs as Array<Record<string, unknown>>)[1].target,
@@ -437,9 +479,9 @@ Deno.test("equivalent shuffled inputs produce identical artifacts and reports", 
     };
     const { writes, context } = recorder(args);
     await compile(args, context);
-    const report = structuredClone(writes[1].data) as Record<string, unknown>;
+    const report = structuredClone(writes[0].data) as Record<string, unknown>;
     delete report.compiledAt;
-    return { draft: writes[0].data as Record<string, unknown>, report };
+    return { draft: writes[1].data as Record<string, unknown>, report };
   };
   const a = executable([], {
     type: "workflow",
