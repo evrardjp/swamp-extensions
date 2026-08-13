@@ -154,7 +154,12 @@ All changes go through pull requests — no direct pushes to main.
 
 **Version bumps**: Bump `version` in `manifest.yaml` (CalVer `YYYY.MM.DD.N`) in the same PR as the code change. Do not bump versions in separate commits or PRs.
 
-**New extensions**: When adding a new extension, update the root `README.md` — add it to the appropriate table, the install commands section, and any relevant usage examples.
+**Root README**: Keep `README.md` generic and byte-identical to
+`scripts/root-readme.md`. Do not add extension catalogs, individual extension
+names or descriptions, relationship diagrams, machine-local paths, or
+extension-specific commands. Put extension-specific documentation in the
+extension's own README. Update the canonical file only for intentional root
+README policy changes.
 
 ## Publishing
 
