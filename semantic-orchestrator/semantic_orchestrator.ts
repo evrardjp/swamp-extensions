@@ -402,44 +402,19 @@ function jobKey(factKey: string, capability: string): string {
   return `${component(factKey)}:${component(capability)}`;
 }
 
-function stableSemanticOrder(members: string[], edges: Edge[]): string[] {
-  const indegree = new Map(members.map((member) => [member, 0]));
+function stableTopologicalOrder(nodes: string[], edges: Edge[]): string[] {
+  const indegree = new Map(nodes.map((node) => [node, 0]));
   const next = new Map<string, string[]>();
-  const semanticNext = new Map<string, string[]>();
   for (const edge of edges) {
-    semanticNext.set(edge.from, [
-      ...(semanticNext.get(edge.from) ?? []),
-      edge.to,
-    ]);
+    indegree.set(edge.to, indegree.get(edge.to)! + 1);
+    next.set(edge.from, [...(next.get(edge.from) ?? []), edge.to]);
   }
-  const reachable = new Map<string, Set<string>>();
-  for (const member of members) {
-    const found = new Set<string>();
-    const stack = [...(semanticNext.get(member) ?? [])];
-    while (stack.length) {
-      const node = stack.pop()!;
-      if (found.has(node)) continue;
-      found.add(node);
-      stack.push(...(semanticNext.get(node) ?? []));
-    }
-    reachable.set(member, found);
-  }
-  for (const from of members) {
-    for (const to of members) {
-      if (from !== to && reachable.get(from)!.has(to)) {
-        indegree.set(to, indegree.get(to)! + 1);
-        next.set(from, [...(next.get(from) ?? []), to]);
-      }
-    }
-  }
-  const ready = members.filter((member) => indegree.get(member) === 0).sort(
-    order,
-  );
+  const ready = nodes.filter((node) => indegree.get(node) === 0).sort(order);
   const result: string[] = [];
   while (ready.length) {
-    const member = ready.shift()!;
-    result.push(member);
-    for (const child of (next.get(member) ?? []).sort(order)) {
+    const node = ready.shift()!;
+    result.push(node);
+    for (const child of (next.get(node) ?? []).sort(order)) {
       indegree.set(child, indegree.get(child)! - 1);
       if (indegree.get(child) === 0) {
         ready.push(child);
@@ -447,8 +422,8 @@ function stableSemanticOrder(members: string[], edges: Edge[]): string[] {
       }
     }
   }
-  if (result.length !== members.length) {
-    throw new Error("Semantic cycle in coordination bucket");
+  if (result.length !== nodes.length) {
+    throw new Error("Final workflow contains a cycle");
   }
   return result;
 }
@@ -624,7 +599,9 @@ async function compile(args: CompileArgs) {
   for (
     const [bucket, members] of [...buckets].sort(([a], [b]) => order(a, b))
   ) {
-    const sortedMembers = stableSemanticOrder(members, semantic);
+    const memberSet = new Set(members);
+    const sortedMembers = stableTopologicalOrder([...jobs.keys()], allEdges)
+      .filter((node) => memberSet.has(node));
     coordinationBuckets.push({ bucket, jobs: sortedMembers });
     for (let index = 1; index < sortedMembers.length; index++) {
       const from = sortedMembers[index - 1];
