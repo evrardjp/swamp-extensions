@@ -1,18 +1,15 @@
 import { assertEquals, assertMatch, assertRejects } from "jsr:@std/assert@1";
 import { parse } from "jsr:@std/yaml@1";
+import { createModelTestContext } from "jsr:@systeminit/swamp-testing@0.20260518.13";
 import { model } from "./semantic_orchestrator.ts";
 
 function recorder(globalArgs: Record<string, unknown>) {
-  const writes: Array<{ specName: string; name: string; data: unknown }> = [];
+  const test = createModelTestContext({ globalArgs });
   return {
-    writes,
-    context: {
-      globalArgs,
-      writeResource(specName: string, name: string, data: unknown) {
-        writes.push({ specName, name, data });
-        return { specName, name, version: 1 };
-      },
+    get writes() {
+      return test.getWrittenResources();
     },
+    context: test.context,
   };
 }
 
@@ -59,8 +56,9 @@ Deno.test("compile resolves a diamond and renders arbitrary typed facts", async 
       }),
     },
   };
-  const { writes, context } = recorder(args);
-  const result = await compile(args, context);
+  const test = recorder(args);
+  const result = await compile(args, test.context);
+  const writes = test.writes;
 
   assertEquals(result.dataHandles.length, 2);
   assertEquals(writes.map((write) => write.specName), [
@@ -116,13 +114,13 @@ Deno.test("compile rejects unknown templates and recursive workflows without wri
       requests: { node: ["app"] },
       capabilities: { app: executable([], implementation) },
     };
-    const { writes, context } = recorder(args);
+    const test = recorder(args);
     await assertRejects(
-      () => compile(args, context),
+      () => compile(args, test.context),
       Error,
       message,
     );
-    assertEquals(writes, []);
+    assertEquals(test.writes, []);
   }
 });
 
@@ -139,12 +137,12 @@ Deno.test("compile rejects unknown requests and semantic cycles without writes",
       requests: { node: [Object.keys(capabilities).length ? "a" : "missing"] },
       capabilities,
     };
-    const { writes, context } = recorder(args);
+    const test = recorder(args);
     await assertRejects(
-      () => compile(args, context),
+      () => compile(args, test.context),
       Error,
     );
-    assertEquals(writes, []);
+    assertEquals(test.writes, []);
   }
 });
 
@@ -161,10 +159,48 @@ Deno.test("compile validates references in unrequested capabilities", async () =
       requests: { node: ["app"] },
       capabilities: { app: executable(), invalid },
     };
-    const { writes, context } = recorder(args);
-    await assertRejects(() => compile(args, context), Error);
-    assertEquals(writes, []);
+    const test = recorder(args);
+    await assertRejects(() => compile(args, test.context), Error);
+    assertEquals(test.writes, []);
   }
+});
+
+Deno.test("compile rejects a workflow with no effective jobs clearly", async () => {
+  const args = {
+    targetWorkflowName: "generated",
+    facts: { node: {} },
+    requests: { node: [] },
+    capabilities: {},
+  };
+  const result = recorder(args);
+  await assertRejects(
+    () => compile(args, result.context),
+    Error,
+    "at least one effective job",
+  );
+  assertEquals(result.writes, []);
+});
+
+Deno.test("compile handles deep dependency chains without recursion overflow", async () => {
+  const capabilities: Record<string, unknown> = {};
+  for (let index = 0; index < 2_000; index++) {
+    capabilities[`cap-${index}`] = executable(
+      index === 0 ? [] : [`cap-${index - 1}`],
+    );
+  }
+  const args = {
+    targetWorkflowName: "generated",
+    facts: { node: {} },
+    requests: { node: ["cap-1999"] },
+    capabilities,
+  };
+  const result = recorder(args);
+  await compile(args, result.context);
+  const report = result.writes[0].data as Record<string, unknown>;
+  assertEquals(
+    (report.summary as Record<string, number>).effectiveJobCount,
+    2_000,
+  );
 });
 
 Deno.test("compile folds contributions and preserves rewritten prerequisites", async () => {
@@ -196,8 +232,9 @@ Deno.test("compile folds contributions and preserves rewritten prerequisites", a
       },
     },
   };
-  const { writes, context } = recorder(args);
-  await compile(args, context);
+  const test = recorder(args);
+  await compile(args, test.context);
+  const writes = test.writes;
 
   const workflow = parse(
     (writes[1].data as Record<string, string>).workflowYaml,
@@ -239,8 +276,9 @@ Deno.test("a requested contribution implicitly includes its aggregate", async ()
       },
     },
   };
-  const { writes, context } = recorder(args);
-  await compile(args, context);
+  const test = recorder(args);
+  await compile(args, test.context);
+  const writes = test.writes;
   const workflow = parse(
     (writes[1].data as Record<string, string>).workflowYaml,
   ) as { jobs: Array<Record<string, unknown>> };
@@ -254,8 +292,9 @@ Deno.test("effective keys cannot collide when fact and capability names contain 
     requests: { "a:b": ["c"], a: ["b:c"] },
     capabilities: { c: executable(), "b:c": executable() },
   };
-  const { writes, context } = recorder(args);
-  await compile(args, context);
+  const test = recorder(args);
+  await compile(args, test.context);
+  const writes = test.writes;
   const workflow = parse(
     (writes[1].data as Record<string, string>).workflowYaml,
   ) as { jobs: Array<Record<string, unknown>> };
@@ -289,12 +328,38 @@ Deno.test("compile rejects invalid contribution targets, inputs, and values", as
         },
       },
     };
-    const { writes, context } = recorder(args);
+    const test = recorder(args);
     await assertRejects(
-      () => compile(args, context),
+      () => compile(args, test.context),
       Error,
     );
-    assertEquals(writes, []);
+    assertEquals(test.writes, []);
+  }
+});
+
+Deno.test("compile rejects non-JSON aggregate values", async () => {
+  for (const value of [NaN, Infinity, 1n]) {
+    const args = {
+      targetWorkflowName: "generated",
+      facts: { node: {} },
+      requests: { node: ["item"] },
+      capabilities: {
+        packages: {
+          aggregate: { inputs: { values: { merge: "unique-sorted" } } },
+          implementation: {
+            type: "workflow",
+            workflowIdOrName: "child",
+            inputs: { values: "@{aggregate.values}" },
+          },
+        },
+        item: {
+          contributes: { to: "packages", values: { values: [value] } },
+        },
+      },
+    };
+    const result = recorder(args);
+    await assertRejects(() => compile(args, result.context), Error);
+    assertEquals(result.writes, []);
   }
 });
 
@@ -318,8 +383,9 @@ Deno.test("compile applies fact and global coordination deterministically", asyn
       },
     },
   };
-  const { writes, context } = recorder(args);
-  await compile(args, context);
+  const test = recorder(args);
+  await compile(args, test.context);
+  const writes = test.writes;
   const workflow = parse(
     (writes[1].data as Record<string, string>).workflowYaml,
   ) as { jobs: Array<Record<string, unknown>> };
@@ -347,8 +413,9 @@ Deno.test("coordination waits for completion without success-gating peers", asyn
       b: { ...executable(), coordination: { group: "lock", scope: "fact" } },
     },
   };
-  const { writes, context } = recorder(args);
-  await compile(args, context);
+  const test = recorder(args);
+  await compile(args, test.context);
+  const writes = test.writes;
   const workflow = parse(
     (writes[1].data as Record<string, string>).workflowYaml,
   ) as { jobs: Array<Record<string, unknown>> };
@@ -374,8 +441,9 @@ Deno.test("coordination uses a stable topological order when key order conflicts
       c: { ...executable(), coordination: { group: "lock", scope: "fact" } },
     },
   };
-  const { writes, context } = recorder(args);
-  await compile(args, context);
+  const test = recorder(args);
+  await compile(args, test.context);
+  const writes = test.writes;
   const workflow = parse(
     (writes[1].data as Record<string, string>).workflowYaml,
   ) as { jobs: Array<Record<string, unknown>> };
@@ -405,8 +473,9 @@ Deno.test("coordination preserves semantic paths through jobs outside its bucket
       },
     },
   };
-  const { writes, context } = recorder(args);
-  await compile(args, context);
+  const test = recorder(args);
+  await compile(args, test.context);
+  const writes = test.writes;
   const report = writes[0].data as Record<string, unknown>;
   assertEquals(report.operationalEdges, []);
 });
@@ -421,8 +490,9 @@ Deno.test("fact coordination bucket keys cannot collide", async () => {
       two: { ...executable(), coordination: { group: "b:c", scope: "fact" } },
     },
   };
-  const { writes, context } = recorder(args);
-  await compile(args, context);
+  const test = recorder(args);
+  await compile(args, test.context);
+  const writes = test.writes;
   const report = writes[0].data as Record<string, unknown>;
   assertEquals(report.operationalEdges, []);
 });
@@ -452,8 +522,9 @@ Deno.test("report retains folded edge origins and complete model targets", async
       },
     },
   };
-  const { writes, context } = recorder(args);
-  await compile(args, context);
+  const test = recorder(args);
+  await compile(args, test.context);
+  const writes = test.writes;
   const report = writes[0].data as Record<string, unknown>;
   assertEquals((report.semanticEdges as unknown[]).length, 2);
   assertEquals(
@@ -477,8 +548,9 @@ Deno.test("equivalent shuffled inputs produce identical artifacts and reports", 
       requests: { "ä": ["z", "a"], Z: ["a", "z"] },
       capabilities,
     };
-    const { writes, context } = recorder(args);
-    await compile(args, context);
+    const test = recorder(args);
+    await compile(args, test.context);
+    const writes = test.writes;
     const report = structuredClone(writes[0].data) as Record<string, unknown>;
     delete report.compiledAt;
     return { draft: writes[1].data as Record<string, unknown>, report };
