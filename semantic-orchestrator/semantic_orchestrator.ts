@@ -341,6 +341,12 @@ function resolveFact(
 
 function validateCatalog(capabilities: Record<string, Capability>): void {
   for (const [name, capability] of safeEntries(capabilities)) {
+    if (capability.implementation) {
+      assertJsonValue(
+        capability.implementation,
+        `Capability ${name} implementation`,
+      );
+    }
     for (const requirement of capability.requires) {
       if (!Object.hasOwn(capabilities, requirement)) {
         throw new Error(`Capability ${name} requires missing ${requirement}`);
