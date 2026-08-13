@@ -1,0 +1,22 @@
+name: Extension Testing / semantic-orchestrator
+
+on:
+  pull_request:
+    paths:
+      - "semantic-orchestrator/**"
+      - ".github/workflows/extension-testing.yml"
+      - ".github/workflows/extension-testing-semantic-orchestrator.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+run-name: Test semantic-orchestrator
+
+jobs:
+  test:
+    uses: ./.github/workflows/extension-testing.yml
+    with:
+      extension: semantic-orchestrator
+    secrets:
+      SWAMP_API_KEY: ${{ secrets.SWAMP_API_KEY }}

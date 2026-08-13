@@ -1,0 +1,8 @@
+# BEGIN swamp managed section - DO NOT EDIT
+.swamp/
+.swamp-sources.yaml
+.claude/worktrees/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/scheduled_tasks.json
+# END swamp managed section
