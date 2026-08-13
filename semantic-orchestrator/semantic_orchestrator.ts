@@ -196,6 +196,13 @@ function assertJsonValue(value: unknown, label: string): void {
     if (typeof current !== "object") {
       throw new Error(`${label} must contain JSON-compatible values`);
     }
+    const prototype = Object.getPrototypeOf(current);
+    if (
+      !Array.isArray(current) && prototype !== Object.prototype &&
+      prototype !== null
+    ) {
+      throw new Error(`${label} must contain JSON-compatible values`);
+    }
     if (frame.exit) {
       active.delete(current);
       continue;
@@ -631,6 +638,13 @@ async function compile(args: CompileArgs) {
   }
   assertDag([...jobs.keys()], allEdges);
 
+  const incoming = new Map<string, Edge[]>();
+  for (const edge of allEdges) {
+    incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge]);
+  }
+  const semanticKeys = new Set(
+    semantic.map((edge) => `${edge.from}\0${edge.to}`),
+  );
   const workflowJobs = [...jobs.entries()].sort(([a], [b]) => order(a, b)).map((
     [key, job],
   ) => ({
@@ -642,15 +656,12 @@ async function compile(args: CompileArgs) {
       weight: 0,
       allowFailure: false,
     }],
-    dependsOn: allEdges.filter((edge) => edge.to === key).map((edge) => ({
+    dependsOn: (incoming.get(key) ?? []).map((edge) => ({
       job: edge.from,
       condition: {
-        type:
-          semantic.some((item) =>
-              item.from === edge.from && item.to === edge.to
-            )
-            ? "succeeded"
-            : "completed",
+        type: semanticKeys.has(`${edge.from}\0${edge.to}`)
+          ? "succeeded"
+          : "completed",
       },
     })).sort((a, b) => order(a.job, b.job)),
     weight: 0,

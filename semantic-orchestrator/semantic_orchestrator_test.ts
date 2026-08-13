@@ -507,6 +507,28 @@ Deno.test("compile rejects deeply nested values injected by templates", async ()
   assertEquals(result.writes, []);
 });
 
+Deno.test("compile rejects non-JSON objects injected by templates", async () => {
+  const args = {
+    targetWorkflowName: "generated",
+    facts: { node: { date: new Date("2026-08-13T00:00:00Z") } },
+    requests: { node: ["app"] },
+    capabilities: {
+      app: executable([], {
+        type: "workflow",
+        workflowIdOrName: "child",
+        inputs: { date: "@{facts.date}" },
+      }),
+    },
+  };
+  const result = recorder(args);
+  await assertRejects(
+    () => compile(args, result.context),
+    Error,
+    "JSON-compatible values",
+  );
+  assertEquals(result.writes, []);
+});
+
 Deno.test("compile rejects malformed Unicode job key components clearly", async () => {
   const malformed = "\ud800";
   const args = {
