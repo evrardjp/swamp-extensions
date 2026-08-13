@@ -442,6 +442,32 @@ Deno.test("compile rejects excessively nested aggregate values clearly", async (
   assertEquals(result.writes, []);
 });
 
+Deno.test("compile rejects excessively nested implementation values clearly", async () => {
+  let nested: unknown = "value";
+  for (let index = 0; index < 200; index++) nested = [nested];
+  const args = {
+    targetWorkflowName: "generated",
+    facts: { node: {} },
+    requests: { node: ["app"] },
+    capabilities: {
+      app: {
+        implementation: {
+          type: "workflow",
+          workflowIdOrName: "child",
+          inputs: { nested },
+        },
+      },
+    },
+  };
+  const result = recorder(args);
+  await assertRejects(
+    () => compile(args, result.context),
+    Error,
+    "nesting depth",
+  );
+  assertEquals(result.writes, []);
+});
+
 Deno.test("compile rejects malformed Unicode job key components clearly", async () => {
   const malformed = "\ud800";
   const args = {
