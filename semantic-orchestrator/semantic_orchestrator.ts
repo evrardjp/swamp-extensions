@@ -477,7 +477,9 @@ async function compile(args: CompileArgs) {
   > = [];
 
   for (const [factKey, facts] of safeEntries(args.facts)) {
-    const requested = [...(args.requests[factKey] ?? [])].sort(order);
+    const requested = [
+      ...(Object.hasOwn(args.requests, factKey) ? args.requests[factKey] : []),
+    ].sort(order);
     const resolved = resolveFact(factKey, requested, args.capabilities);
     requestRecords.push({ factKey, requested, resolved });
     const effective = (name: string): string => {
@@ -553,6 +555,10 @@ async function compile(args: CompileArgs) {
         facts,
         aggregate: merged,
       });
+      assertJsonValue(
+        task,
+        `Fact ${factKey} capability ${name} implementation`,
+      );
       if (
         task.type === "workflow" &&
         task.workflowIdOrName === args.targetWorkflowName
