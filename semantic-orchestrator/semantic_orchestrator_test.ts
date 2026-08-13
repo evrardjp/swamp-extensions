@@ -468,6 +468,45 @@ Deno.test("compile rejects excessively nested implementation values clearly", as
   assertEquals(result.writes, []);
 });
 
+Deno.test("compile ignores missing requests for prototype-named facts", async () => {
+  const args = {
+    targetWorkflowName: "generated",
+    facts: { constructor: {}, node: {} },
+    requests: { node: ["app"] },
+    capabilities: { app: executable() },
+  };
+  const result = recorder(args);
+  await compile(args, result.context);
+  const workflow = parse(
+    (result.writes[1].data as Record<string, string>).workflowYaml,
+  ) as { jobs: Array<{ name: string }> };
+  assertEquals(workflow.jobs.map((job) => job.name), ["node:app"]);
+});
+
+Deno.test("compile rejects deeply nested values injected by templates", async () => {
+  let nested: unknown = "value";
+  for (let index = 0; index < 200; index++) nested = [nested];
+  const args = {
+    targetWorkflowName: "generated",
+    facts: { node: { nested } },
+    requests: { node: ["app"] },
+    capabilities: {
+      app: executable([], {
+        type: "workflow",
+        workflowIdOrName: "child",
+        inputs: { nested: "@{facts.nested}" },
+      }),
+    },
+  };
+  const result = recorder(args);
+  await assertRejects(
+    () => compile(args, result.context),
+    Error,
+    "nesting depth",
+  );
+  assertEquals(result.writes, []);
+});
+
 Deno.test("compile rejects malformed Unicode job key components clearly", async () => {
   const malformed = "\ud800";
   const args = {
