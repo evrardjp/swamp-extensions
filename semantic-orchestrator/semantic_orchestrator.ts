@@ -180,10 +180,11 @@ function valueKey(value: unknown): string {
 }
 
 function assertJsonValue(value: unknown, label: string): void {
-  const stack = [value];
-  const seen = new Set<object>();
+  const stack = [{ value, exit: false, depth: 0 }];
+  const active = new Set<object>();
   while (stack.length) {
-    const current = stack.pop();
+    const frame = stack.pop()!;
+    const current = frame.value;
     if (
       current === null || typeof current === "string" ||
       typeof current === "boolean"
@@ -195,10 +196,26 @@ function assertJsonValue(value: unknown, label: string): void {
     if (typeof current !== "object") {
       throw new Error(`${label} must contain JSON-compatible values`);
     }
-    if (seen.has(current)) throw new Error(`${label} must not contain cycles`);
-    seen.add(current);
-    if (Array.isArray(current)) stack.push(...current);
-    else stack.push(...Object.values(current));
+    if (frame.exit) {
+      active.delete(current);
+      continue;
+    }
+    if (frame.depth > 100) {
+      throw new Error(`${label} exceeds maximum nesting depth 100`);
+    }
+    if (active.has(current)) {
+      throw new Error(`${label} must not contain cycles`);
+    }
+    active.add(current);
+    stack.push({ value: current, exit: true, depth: frame.depth });
+    const children = Array.isArray(current) ? current : Object.values(current);
+    for (let index = children.length - 1; index >= 0; index--) {
+      stack.push({
+        value: children[index],
+        exit: false,
+        depth: frame.depth + 1,
+      });
+    }
   }
 }
 
@@ -304,12 +321,12 @@ function resolveFact(
     if (state.get(frame.name) === "visiting") {
       throw new Error(`Fact ${factKey} capability cycle at ${frame.name}`);
     }
-    const capability = capabilities[frame.name];
-    if (!capability) {
+    if (!Object.hasOwn(capabilities, frame.name)) {
       throw new Error(
         `Fact ${factKey} requests unknown capability ${frame.name}`,
       );
     }
+    const capability = capabilities[frame.name];
     state.set(frame.name, "visiting");
     stack.push({ name: frame.name, exit: true });
     const dependencies = [
@@ -362,6 +379,9 @@ function validateCatalog(capabilities: Record<string, Capability>): void {
 }
 
 function component(value: string): string {
+  if (!value.isWellFormed()) {
+    throw new Error("Job key components must contain well-formed Unicode");
+  }
   return encodeURIComponent(value);
 }
 
