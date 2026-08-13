@@ -1,5 +1,5 @@
 import { stringify } from "jsr:@std/yaml@1";
-import { z } from "npm:zod@4";
+import { z } from "npm:zod@4.4.3";
 
 const order = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 
