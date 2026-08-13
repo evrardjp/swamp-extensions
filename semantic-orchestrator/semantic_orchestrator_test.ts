@@ -146,6 +146,22 @@ Deno.test("compile rejects unknown requests and semantic cycles without writes",
   }
 });
 
+Deno.test("compile rejects inherited capability names as unknown", async () => {
+  const args = {
+    targetWorkflowName: "generated",
+    facts: { node: {} },
+    requests: { node: ["constructor"] },
+    capabilities: {},
+  };
+  const result = recorder(args);
+  await assertRejects(
+    () => compile(args, result.context),
+    Error,
+    "unknown capability constructor",
+  );
+  assertEquals(result.writes, []);
+});
+
 Deno.test("compile validates references in unrequested capabilities", async () => {
   for (
     const invalid of [
@@ -361,6 +377,86 @@ Deno.test("compile rejects non-JSON aggregate values", async () => {
     await assertRejects(() => compile(args, result.context), Error);
     assertEquals(result.writes, []);
   }
+});
+
+Deno.test("compile accepts repeated acyclic aggregate references", async () => {
+  const shared = { id: "x" };
+  const args = {
+    targetWorkflowName: "generated",
+    facts: { node: {} },
+    requests: { node: ["item"] },
+    capabilities: {
+      aggregate: {
+        aggregate: { inputs: { values: { merge: "unique-sorted" } } },
+        implementation: {
+          type: "workflow",
+          workflowIdOrName: "child",
+          inputs: { values: "@{aggregate.values}" },
+        },
+      },
+      item: {
+        contributes: {
+          to: "aggregate",
+          values: { values: [shared, shared] },
+        },
+      },
+    },
+  };
+  const result = recorder(args);
+  await compile(args, result.context);
+  const workflow = parse(
+    (result.writes[1].data as Record<string, string>).workflowYaml,
+  ) as { jobs: Array<{ steps: Array<{ task: { inputs: unknown } }> }> };
+  assertEquals(workflow.jobs[0].steps[0].task.inputs, {
+    values: [{ id: "x" }],
+  });
+});
+
+Deno.test("compile rejects excessively nested aggregate values clearly", async () => {
+  let nested: unknown = "value";
+  for (let index = 0; index < 200; index++) nested = [nested];
+  const args = {
+    targetWorkflowName: "generated",
+    facts: { node: {} },
+    requests: { node: ["item"] },
+    capabilities: {
+      aggregate: {
+        aggregate: { inputs: { values: { merge: "unique-sorted" } } },
+        implementation: {
+          type: "workflow",
+          workflowIdOrName: "child",
+          inputs: { values: "@{aggregate.values}" },
+        },
+      },
+      item: {
+        contributes: { to: "aggregate", values: { values: [nested] } },
+      },
+    },
+  };
+  const result = recorder(args);
+  await assertRejects(
+    () => compile(args, result.context),
+    Error,
+    "nesting depth",
+  );
+  assertEquals(result.writes, []);
+});
+
+Deno.test("compile rejects malformed Unicode job key components clearly", async () => {
+  const malformed = "\ud800";
+  const args = {
+    targetWorkflowName: "generated",
+    facts: { [malformed]: {} },
+    requests: { [malformed]: ["app"] },
+    capabilities: { app: executable() },
+  };
+  const result = recorder(args);
+  await assertRejects(
+    () => compile(args, result.context),
+    Error,
+    "well-formed Unicode",
+  );
+  assertEquals(result.writes, []);
 });
 
 Deno.test("compile applies fact and global coordination deterministically", async () => {
