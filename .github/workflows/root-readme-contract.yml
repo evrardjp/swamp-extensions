@@ -1,0 +1,25 @@
+name: Root README Contract
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  root-readme-contract:
+    name: Check root README contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Test root README validator
+        run: bash scripts/check-root-readme-test.sh
+
+      - name: Lint root README validator
+        run: shellcheck scripts/check-root-readme.sh scripts/check-root-readme-test.sh
+
+      - name: Check root README
+        run: bash scripts/check-root-readme.sh
