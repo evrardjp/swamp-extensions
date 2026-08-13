@@ -91,7 +91,9 @@ const ReportSchema = z.object({
   compiledAt: z.string(),
 });
 
-const SucceededSchema = z.object({ type: z.literal("succeeded") }).strict();
+const DependencyConditionSchema = z.object({
+  type: z.enum(["succeeded", "completed"]),
+}).strict();
 const GeneratedWorkflowSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -105,7 +107,7 @@ const GeneratedWorkflowSchema = z.object({
           dependsOn: z.array(
             z.object({
               step: z.string().min(1),
-              condition: SucceededSchema,
+              condition: DependencyConditionSchema,
             }).strict(),
           ),
           weight: z.number(),
@@ -115,7 +117,7 @@ const GeneratedWorkflowSchema = z.object({
       dependsOn: z.array(
         z.object({
           job: z.string().min(1),
-          condition: SucceededSchema,
+          condition: DependencyConditionSchema,
         }).strict(),
       ),
       weight: z.number(),
@@ -281,6 +283,41 @@ function resolveFact(
   return [...resolved].sort(order);
 }
 
+function validateCatalog(capabilities: Record<string, Capability>): void {
+  for (const [name, capability] of safeEntries(capabilities)) {
+    for (const requirement of capability.requires) {
+      if (!Object.hasOwn(capabilities, requirement)) {
+        throw new Error(`Capability ${name} requires missing ${requirement}`);
+      }
+    }
+    if (capability.contributes) {
+      const target = capabilities[capability.contributes.to];
+      if (!target) {
+        throw new Error(
+          `Capability ${name} contributes to missing ${capability.contributes.to}`,
+        );
+      }
+      if (!target.aggregate) {
+        throw new Error(
+          `Capability ${name} target ${capability.contributes.to} is not aggregate`,
+        );
+      }
+      for (const input of Object.keys(capability.contributes.values)) {
+        if (!Object.hasOwn(target.aggregate.inputs, input)) {
+          throw new Error(
+            `Capability ${name} has unknown aggregate input ${input}`,
+          );
+        }
+        if (!Array.isArray(capability.contributes.values[input])) {
+          throw new Error(
+            `Capability ${name} aggregate input ${input} must be an array`,
+          );
+        }
+      }
+    }
+  }
+}
+
 function component(value: string): string {
   return encodeURIComponent(value);
 }
@@ -322,6 +359,7 @@ function stableSemanticOrder(members: string[], edges: Edge[]): string[] {
 }
 
 async function compile(args: CompileArgs) {
+  validateCatalog(args.capabilities);
   for (const factKey of Object.keys(args.requests)) {
     if (!Object.hasOwn(args.facts, factKey)) {
       throw new Error(`Request fact ${factKey} has no matching facts entry`);
@@ -512,7 +550,14 @@ async function compile(args: CompileArgs) {
     }],
     dependsOn: allEdges.filter((edge) => edge.to === key).map((edge) => ({
       job: edge.from,
-      condition: { type: "succeeded" },
+      condition: {
+        type:
+          semantic.some((item) =>
+              item.from === edge.from && item.to === edge.to
+            )
+            ? "succeeded"
+            : "completed",
+      },
     })).sort((a, b) => order(a.job, b.job)),
     weight: 0,
   }));
@@ -616,17 +661,17 @@ export const model = {
         const report = { ...compiled.report, compiledAt };
         DraftSchema.parse(draft);
         ReportSchema.parse(report);
-        const draftHandle = await context.writeResource(
-          "workflowDraft",
-          "current",
-          draft,
-        );
         const reportHandle = await context.writeResource(
           "compilationReport",
           "current",
           report,
         );
-        return { dataHandles: [draftHandle, reportHandle] };
+        const draftHandle = await context.writeResource(
+          "workflowDraft",
+          "current",
+          draft,
+        );
+        return { dataHandles: [reportHandle, draftHandle] };
       },
     },
   },
