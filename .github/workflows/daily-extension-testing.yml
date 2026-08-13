@@ -28,6 +28,7 @@ jobs:
           - openbao-configurator
           - pi-session-telemetry
           - qcow2-overlay-prep
+          - semantic-orchestrator
           - selfcert
           - ssh-ca
           - vaultwarden

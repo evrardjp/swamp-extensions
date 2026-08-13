@@ -1,0 +1,22 @@
+manifestVersion: 1
+name: "@evrardjp/semantic-orchestrator"
+version: "2026.08.12.1"
+description: >-
+  Deterministically compile requested semantic capabilities and arbitrary keyed
+  facts into standalone Swamp workflow drafts with aggregation, dependency, and
+  operational coordination provenance.
+repository: "https://github.com/evrardjp/swamp-extensions"
+paths:
+  base: manifest
+models:
+  - semantic_orchestrator.ts
+reports: []
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+additionalFiles:
+  - README.md
+  - LICENSE.txt
+labels: [capability, orchestration, workflow, dag, compiler]
+dependencies: []

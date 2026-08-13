@@ -1,0 +1,7 @@
+swampVersion: 20260812.013400.0
+initializedAt: "2026-08-12T00:00:00.000Z"
+repoId: 00000000-0000-4000-8000-000000000001
+tools:
+  - claude
+  - opencode
+gitignoreManaged: true
