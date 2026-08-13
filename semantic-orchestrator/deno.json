@@ -9,5 +9,8 @@
     "swampquality": "swamp extension quality manifest.yaml",
     "swamppushdryrun": "swamp extension push manifest.yaml --dry-run --yes"
   },
+  "imports": {
+    "@systeminit/swamp-testing": "jsr:@systeminit/swamp-testing@0.20260518.13"
+  },
   "lint": { "rules": { "exclude": ["no-import-prefix", "require-await"] } }
 }

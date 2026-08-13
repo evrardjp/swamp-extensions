@@ -179,6 +179,29 @@ function valueKey(value: unknown): string {
   return JSON.stringify(canonical(value));
 }
 
+function assertJsonValue(value: unknown, label: string): void {
+  const stack = [value];
+  const seen = new Set<object>();
+  while (stack.length) {
+    const current = stack.pop();
+    if (
+      current === null || typeof current === "string" ||
+      typeof current === "boolean"
+    ) continue;
+    if (typeof current === "number") {
+      if (Number.isFinite(current)) continue;
+      throw new Error(`${label} must contain finite JSON values`);
+    }
+    if (typeof current !== "object") {
+      throw new Error(`${label} must contain JSON-compatible values`);
+    }
+    if (seen.has(current)) throw new Error(`${label} must not contain cycles`);
+    seen.add(current);
+    if (Array.isArray(current)) stack.push(...current);
+    else stack.push(...Object.values(current));
+  }
+}
+
 function lookup(path: string, context: Record<string, unknown>): unknown {
   const parts = path.split(".");
   let current: unknown = context;
@@ -228,31 +251,37 @@ function hasPath(edges: Edge[], from: string, to: string): boolean {
     next.set(edge.from, [...(next.get(edge.from) ?? []), edge.to]);
   }
   const seen = new Set<string>();
-  const visit = (node: string): boolean => {
+  const stack = [from];
+  while (stack.length) {
+    const node = stack.pop()!;
     if (node === to) return true;
-    if (seen.has(node)) return false;
+    if (seen.has(node)) continue;
     seen.add(node);
-    return (next.get(node) ?? []).some(visit);
-  };
-  return visit(from);
+    stack.push(...(next.get(node) ?? []));
+  }
+  return false;
 }
 
 function assertDag(nodes: string[], edges: Edge[]): void {
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
+  const indegree = new Map(nodes.map((node) => [node, 0]));
   const next = new Map<string, string[]>();
   for (const edge of edges) {
     next.set(edge.from, [...(next.get(edge.from) ?? []), edge.to]);
+    indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1);
   }
-  const visit = (node: string) => {
-    if (visiting.has(node)) throw new Error(`Final workflow cycle at ${node}`);
-    if (visited.has(node)) return;
-    visiting.add(node);
-    for (const child of next.get(node) ?? []) visit(child);
-    visiting.delete(node);
-    visited.add(node);
-  };
-  for (const node of nodes) visit(node);
+  const ready = nodes.filter((node) => indegree.get(node) === 0);
+  let visited = 0;
+  while (ready.length) {
+    const node = ready.pop()!;
+    visited++;
+    for (const child of next.get(node) ?? []) {
+      indegree.set(child, indegree.get(child)! - 1);
+      if (indegree.get(child) === 0) ready.push(child);
+    }
+  }
+  if (visited !== nodes.length) {
+    throw new Error("Final workflow contains a cycle");
+  }
 }
 
 function resolveFact(
@@ -260,27 +289,37 @@ function resolveFact(
   requested: string[],
   capabilities: Record<string, Capability>,
 ): string[] {
-  const resolved = new Set<string>();
-  const visiting = new Set<string>();
-  const visit = (name: string) => {
-    if (visiting.has(name)) {
-      throw new Error(`Fact ${factKey} capability cycle at ${name}`);
+  const state = new Map<string, "visiting" | "resolved">();
+  const stack = [...requested].sort(order).reverse().map((name) => ({
+    name,
+    exit: false,
+  }));
+  while (stack.length) {
+    const frame = stack.pop()!;
+    if (frame.exit) {
+      state.set(frame.name, "resolved");
+      continue;
     }
-    if (resolved.has(name)) return;
-    const capability = capabilities[name];
+    if (state.get(frame.name) === "resolved") continue;
+    if (state.get(frame.name) === "visiting") {
+      throw new Error(`Fact ${factKey} capability cycle at ${frame.name}`);
+    }
+    const capability = capabilities[frame.name];
     if (!capability) {
-      throw new Error(`Fact ${factKey} requests unknown capability ${name}`);
+      throw new Error(
+        `Fact ${factKey} requests unknown capability ${frame.name}`,
+      );
     }
-    visiting.add(name);
-    for (const requirement of [...capability.requires].sort(order)) {
-      visit(requirement);
-    }
-    if (capability.contributes) visit(capability.contributes.to);
-    visiting.delete(name);
-    resolved.add(name);
-  };
-  for (const name of [...requested].sort(order)) visit(name);
-  return [...resolved].sort(order);
+    state.set(frame.name, "visiting");
+    stack.push({ name: frame.name, exit: true });
+    const dependencies = [
+      ...capability.requires,
+      ...(capability.contributes ? [capability.contributes.to] : []),
+    ].sort(order).reverse();
+    for (const name of dependencies) stack.push({ name, exit: false });
+  }
+  return [...state.entries()].filter(([, value]) => value === "resolved")
+    .map(([name]) => name).sort(order);
 }
 
 function validateCatalog(capabilities: Record<string, Capability>): void {
@@ -313,6 +352,10 @@ function validateCatalog(capabilities: Record<string, Capability>): void {
             `Capability ${name} aggregate input ${input} must be an array`,
           );
         }
+        assertJsonValue(
+          capability.contributes.values[input],
+          `Capability ${name} aggregate input ${input}`,
+        );
       }
     }
   }
@@ -329,9 +372,28 @@ function jobKey(factKey: string, capability: string): string {
 function stableSemanticOrder(members: string[], edges: Edge[]): string[] {
   const indegree = new Map(members.map((member) => [member, 0]));
   const next = new Map<string, string[]>();
+  const semanticNext = new Map<string, string[]>();
+  for (const edge of edges) {
+    semanticNext.set(edge.from, [
+      ...(semanticNext.get(edge.from) ?? []),
+      edge.to,
+    ]);
+  }
+  const reachable = new Map<string, Set<string>>();
+  for (const member of members) {
+    const found = new Set<string>();
+    const stack = [...(semanticNext.get(member) ?? [])];
+    while (stack.length) {
+      const node = stack.pop()!;
+      if (found.has(node)) continue;
+      found.add(node);
+      stack.push(...(semanticNext.get(node) ?? []));
+    }
+    reachable.set(member, found);
+  }
   for (const from of members) {
     for (const to of members) {
-      if (from !== to && hasPath(edges, from, to)) {
+      if (from !== to && reachable.get(from)!.has(to)) {
         indegree.set(to, indegree.get(to)! + 1);
         next.set(from, [...(next.get(from) ?? []), to]);
       }
@@ -561,6 +623,9 @@ async function compile(args: CompileArgs) {
     })).sort((a, b) => order(a.job, b.job)),
     weight: 0,
   }));
+  if (workflowJobs.length === 0) {
+    throw new Error("Compilation requires at least one effective job");
+  }
   const workflow = canonical({
     name: args.targetWorkflowName,
     jobs: workflowJobs,
