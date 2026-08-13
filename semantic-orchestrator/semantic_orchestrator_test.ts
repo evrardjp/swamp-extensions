@@ -663,6 +663,33 @@ Deno.test("coordination preserves semantic paths through jobs outside its bucket
   assertEquals(report.operationalEdges, []);
 });
 
+Deno.test("coordination orders later buckets from accumulated edges", async () => {
+  const args = {
+    targetWorkflowName: "generated",
+    facts: { node: {} },
+    requests: { node: ["a1", "b1"] },
+    capabilities: {
+      a1: {
+        ...executable(["b2"]),
+        coordination: { group: "a", scope: "fact" },
+      },
+      a2: { ...executable(), coordination: { group: "a", scope: "fact" } },
+      b1: {
+        ...executable(["a2"]),
+        coordination: { group: "b", scope: "fact" },
+      },
+      b2: { ...executable(), coordination: { group: "b", scope: "fact" } },
+    },
+  };
+  const test = recorder(args);
+  await compile(args, test.context);
+  const report = test.writes[0].data as Record<string, unknown>;
+  assertEquals(report.operationalEdges, [
+    { bucket: "fact:node:a", from: "node:a2", to: "node:a1" },
+    { bucket: "fact:node:b", from: "node:b1", to: "node:b2" },
+  ]);
+});
+
 Deno.test("fact coordination bucket keys cannot collide", async () => {
   const args = {
     targetWorkflowName: "generated",
