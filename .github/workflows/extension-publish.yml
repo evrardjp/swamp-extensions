@@ -105,7 +105,7 @@ jobs:
           deno-version: ${{ env.DENO_VERSION }}
 
       - name: Setup swamp
-        uses: systeminit/setup-swamp@v0.1.1
+        uses: systeminit/setup-swamp@v0.1.2
         with:
           api-key: ${{ secrets.SWAMP_API_KEY }}
 
