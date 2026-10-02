@@ -25,7 +25,7 @@ jobs:
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.8.3
-      - uses: systeminit/setup-swamp@v0.1.1
+      - uses: systeminit/setup-swamp@v0.1.2
         with:
           api-key: ${{ secrets.SWAMP_API_KEY }}
       - name: Run Floci protocol suite
